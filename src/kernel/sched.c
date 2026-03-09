@@ -1,0 +1,387 @@
+#include "sched.h"
+#include "task.h"
+#include "arch.h"
+
+#include <stdint.h>
+#include <stddef.h>
+#include <string.h>
+
+/* RP2040 CMSIS-style register definitions are provided by the Pico SDK's
+ * inclusion of CMSIS headers via pico/stdlib.h.  We use SCB, NVIC, etc.
+ * directly as those symbols are always available after including the SDK. */
+
+/* -------------------------------------------------------------------------
+ * Configuration
+ * ------------------------------------------------------------------------- */
+#define TIME_SLICE_MS  10u   /* preemption interval in milliseconds */
+#define NUM_PRIORITIES  8u   /* matches the priority range 0..7     */
+
+/* -------------------------------------------------------------------------
+ * Module state
+ * ------------------------------------------------------------------------- */
+
+/* Exposed as extern (declared in sched.h). */
+volatile uint32_t  tick_count  = 0;
+
+/* current_tcb is defined in task.c and declared extern in both task.h and
+ * sched.h.  sched.c only reads/writes it; it does NOT redefine it here. */
+
+/* One singly-linked READY list per priority level (0 = highest). */
+static tcb_t *ready_queues[NUM_PRIORITIES];
+
+/* Countdown to the next forced context switch. */
+static uint32_t current_slice_remaining = TIME_SLICE_MS;
+
+/* -------------------------------------------------------------------------
+ * trace_enabled — defined in main.c; declared here so the tick ISR can
+ * optionally print thread switches (Phase 6 teaching feature).
+ * ------------------------------------------------------------------------- */
+extern volatile bool trace_enabled;
+
+/* -------------------------------------------------------------------------
+ * sched_add_thread
+ *
+ * Append t to the tail of the ready queue for its priority.  Using the tail
+ * gives natural round-robin ordering within a priority level.
+ * ------------------------------------------------------------------------- */
+void sched_add_thread(tcb_t *t)
+{
+    if (t == NULL) {
+        return;
+    }
+
+    uint8_t prio = t->priority;
+    if (prio >= NUM_PRIORITIES) {
+        prio = NUM_PRIORITIES - 1;
+    }
+
+    t->next = NULL;
+
+    if (ready_queues[prio] == NULL) {
+        ready_queues[prio] = t;
+        return;
+    }
+
+    /* Walk to the tail. */
+    tcb_t *cur = ready_queues[prio];
+    while (cur->next != NULL) {
+        cur = cur->next;
+    }
+    cur->next = t;
+}
+
+/* -------------------------------------------------------------------------
+ * sched_remove_from_ready_queue
+ *
+ * Internal helper: remove t from whatever priority queue it is currently in.
+ * ------------------------------------------------------------------------- */
+static void sched_remove_from_ready_queue(tcb_t *t)
+{
+    if (t == NULL) {
+        return;
+    }
+
+    uint8_t prio = t->priority;
+    if (prio >= NUM_PRIORITIES) {
+        prio = NUM_PRIORITIES - 1;
+    }
+
+    tcb_t *prev = NULL;
+    tcb_t *cur  = ready_queues[prio];
+
+    while (cur != NULL) {
+        if (cur == t) {
+            if (prev == NULL) {
+                ready_queues[prio] = cur->next;
+            } else {
+                prev->next = cur->next;
+            }
+            cur->next = NULL;
+            return;
+        }
+        prev = cur;
+        cur  = cur->next;
+    }
+}
+
+/* -------------------------------------------------------------------------
+ * sched_block
+ * ------------------------------------------------------------------------- */
+void sched_block(tcb_t *t)
+{
+    if (t == NULL) {
+        return;
+    }
+    t->state = THREAD_BLOCKED;
+    sched_remove_from_ready_queue(t);
+}
+
+/* -------------------------------------------------------------------------
+ * sched_unblock
+ * ------------------------------------------------------------------------- */
+void sched_unblock(tcb_t *t)
+{
+    if (t == NULL) {
+        return;
+    }
+    t->state = THREAD_READY;
+    sched_add_thread(t);
+}
+
+/* -------------------------------------------------------------------------
+ * sched_sleep
+ * ------------------------------------------------------------------------- */
+void sched_sleep(uint32_t ms)
+{
+    if (current_tcb == NULL) {
+        return;
+    }
+
+    current_tcb->wake_time_us = time_us_64() + (uint64_t)ms * 1000u;
+    current_tcb->state = THREAD_SLEEPING;
+
+    /* Remove from the ready queue so it doesn't get scheduled while asleep. */
+    sched_remove_from_ready_queue((tcb_t *)current_tcb);
+
+    /* Yield so the scheduler picks the next runnable thread. */
+    sched_yield();
+}
+
+/* -------------------------------------------------------------------------
+ * sched_yield
+ *
+ * Trigger a PendSV exception.  The exception will fire as soon as the
+ * current exception priority allows it (i.e. after any higher-priority ISR
+ * returns), resulting in a call to sched_next_thread() from sched_asm.S.
+ * ------------------------------------------------------------------------- */
+void sched_yield(void)
+{
+    /* Set the PENDSVSET bit in the Interrupt Control and State Register. */
+    SCB->ICSR |= SCB_ICSR_PENDSVSET_Msk;
+    __dsb();
+    __isb();
+}
+
+/* -------------------------------------------------------------------------
+ * sched_next_thread
+ *
+ * Called from the PendSV handler (in sched_asm.S) with interrupts disabled.
+ *
+ * Algorithm: priority round-robin.
+ *   1. Scan priority queues 0..7 for the first non-empty one.
+ *   2. Within that queue, advance past the current thread (if it is at the
+ *      head) to give other threads at the same priority a turn.
+ *   3. Move the selected thread to RUNNING; leave the old thread in whatever
+ *      state it was already placed in (the caller sets it before yielding).
+ *
+ * If no thread is ready at all, return current_tcb unchanged (the idle
+ * thread should always be READY at priority 7 to prevent this case).
+ * ------------------------------------------------------------------------- */
+tcb_t *sched_next_thread(void)
+{
+    tcb_t *selected = NULL;
+
+    for (uint8_t prio = 0; prio < NUM_PRIORITIES; prio++) {
+        if (ready_queues[prio] == NULL) {
+            continue;
+        }
+
+        /* There is at least one READY thread at this priority.
+         *
+         * Round-robin: if the current thread is at the head of this queue,
+         * rotate it to the tail so the next thread in line gets to run.
+         * This only makes sense if the current thread is still READY (it
+         * might have been moved to SLEEPING or BLOCKED before sched_yield
+         * was called).
+         */
+        if (ready_queues[prio] == (tcb_t *)current_tcb &&
+            current_tcb != NULL &&
+            current_tcb->state == THREAD_READY)
+        {
+            /* Rotate: pop the head and push it to the tail. */
+            tcb_t *head = ready_queues[prio];
+            if (head->next != NULL) {
+                /* Move head to tail. */
+                ready_queues[prio] = head->next;
+                tcb_t *tail = ready_queues[prio];
+                while (tail->next != NULL) {
+                    tail = tail->next;
+                }
+                tail->next = head;
+                head->next = NULL;
+            }
+            /* (If head->next is NULL it is the only thread; keep it.) */
+        }
+
+        selected = ready_queues[prio];
+        break;
+    }
+
+    if (selected == NULL) {
+        /* No ready thread — return current_tcb so execution can continue.
+         * This should not happen if the idle thread is always READY. */
+        return (tcb_t *)current_tcb;
+    }
+
+    /* Transition the selected thread to RUNNING. */
+    selected->state = THREAD_RUNNING;
+
+    /* Reset the time slice for the incoming thread. */
+    current_slice_remaining = TIME_SLICE_MS;
+
+    return selected;
+}
+
+/* -------------------------------------------------------------------------
+ * isr_systick — SysTick interrupt service routine (1 ms period)
+ *
+ * The name "isr_systick" is the Pico SDK's weak-symbol name for the SysTick
+ * handler.  Defining it here overrides the default no-op.
+ * ------------------------------------------------------------------------- */
+void isr_systick(void)
+{
+    tick_count++;
+
+    /* Accumulate CPU time for the currently running thread. */
+    if (current_tcb != NULL) {
+        current_tcb->cpu_time_us += 1000u;   /* 1 ms = 1000 us */
+    }
+
+    /* Wake any sleeping threads whose alarm has expired. */
+    uint64_t now = time_us_64();
+    for (int i = 0; i < MAX_THREADS; i++) {
+        tcb_t *t = task_get_thread_slot(i);
+        if (t == NULL) {
+            continue;
+        }
+        if (t->state == THREAD_SLEEPING && t->wake_time_us <= now) {
+            t->state = THREAD_READY;
+            sched_add_thread(t);
+
+            if (trace_enabled) {
+                /* A fully async print here would need a ring-buffer;
+                 * for teaching we skip it in the ISR to avoid re-entrancy. */
+            }
+        }
+    }
+
+    /* Time-slice preemption. */
+    if (current_slice_remaining > 0) {
+        current_slice_remaining--;
+    }
+    if (current_slice_remaining == 0) {
+        current_slice_remaining = TIME_SLICE_MS;
+        /* Pend a context switch. */
+        SCB->ICSR |= SCB_ICSR_PENDSVSET_Msk;
+    }
+}
+
+/* -------------------------------------------------------------------------
+ * sched_tick — public wrapper (declared in sched.h)
+ *
+ * Provided for callers that want to drive the scheduler tick manually (e.g.
+ * from a hardware timer callback).  In the default configuration the SysTick
+ * ISR above is used instead, but having this wrapper makes the teaching code
+ * explicit about the tick-to-scheduler relationship.
+ * ------------------------------------------------------------------------- */
+void sched_tick(void)
+{
+    isr_systick();
+}
+
+/* -------------------------------------------------------------------------
+ * sched_init
+ *
+ * Configure interrupt priorities:
+ *   SysTick: medium priority (0x40)
+ *   PendSV : lowest priority (0xFF) so it fires after every other ISR
+ * ------------------------------------------------------------------------- */
+void sched_init(void)
+{
+    /* Note: ready_queues[] is populated by sched_add_thread() as threads
+     * are created.  We do NOT reset the queues here — by the time sched_init
+     * is called all initial threads have already been added.
+     *
+     * We DO reset the time-slice counter in case sched_init is called more
+     * than once (e.g. during testing). */
+    current_slice_remaining = TIME_SLICE_MS;
+
+    /* Set PendSV to the lowest possible priority so that context switches
+     * never preempt real device ISRs. */
+    NVIC_SetPriority(PendSV_IRQn, 0xFFu);
+
+    /* SysTick at a medium priority — above PendSV but below critical ISRs. */
+    NVIC_SetPriority(SysTick_IRQn, 0x40u);
+}
+
+/* -------------------------------------------------------------------------
+ * sched_start
+ *
+ * Teaching approach: rather than engineering a first exception-return (which
+ * is fiddly on M0+), we simply:
+ *  1. Find the highest-priority READY thread.
+ *  2. Set it as current_tcb.
+ *  3. Set the PSP to just above its hardware exception frame (so that when
+ *     the CPU later saves/restores context it uses the right stack).
+ *  4. Switch to PSP (CONTROL.SPSEL = 1).
+ *  5. Start the SysTick timer.
+ *  6. Enable global interrupts.
+ *  7. Call the thread's entry function directly — the SysTick/PendSV
+ *     machinery will preempt it as soon as the first tick fires.
+ *
+ * This function never returns.
+ * ------------------------------------------------------------------------- */
+void sched_start(void)
+{
+    /* Pick the first ready thread. */
+    tcb_t *first = NULL;
+    for (uint8_t p = 0; p < NUM_PRIORITIES; p++) {
+        if (ready_queues[p] != NULL) {
+            first = ready_queues[p];
+            break;
+        }
+    }
+
+    if (first == NULL) {
+        /* Nothing to run — should never happen if the idle thread exists. */
+        for (;;) { __wfi(); }
+    }
+
+    first->state = THREAD_RUNNING;
+    current_tcb  = first;
+
+    /* Point the PSP at the top of the hardware exception frame within
+     * the thread's initial stack (just above the xpsr word).
+     * saved_sp points to the r4 word (the bottom of the 16-word frame).
+     * The hardware frame starts 8 words above saved_sp. */
+    uint32_t *hw_frame_bottom = first->saved_sp + 8;  /* r0 word */
+    uint32_t  psp_init        = (uint32_t)(uintptr_t)(hw_frame_bottom + 8); /* past xpsr */
+
+    /* Switch to PSP and set its value.
+     * CONTROL register bit 1 (SPSEL) selects PSP in Thread mode. */
+    __set_PSP(psp_init);
+    __set_CONTROL(__get_CONTROL() | 0x02u);
+    __isb();
+
+    /* Configure SysTick for a 1 ms period.
+     * The Pico SDK clock is 125 MHz by default; 125000 ticks = 1 ms. */
+    SysTick_Config(125000u);   /* uses CPU clock, enables SysTick IRQ */
+
+    /* Enable global interrupts. */
+    __enable_irq();
+
+    /* Retrieve entry and arg from the initialised stack frame.
+     * The hardware frame we laid down is:
+     *   saved_sp[0..7]  = r4-r11 (software frame)
+     *   saved_sp[8]     = r0  (= arg)
+     *   saved_sp[14]    = pc  (= entry)
+     */
+    void (*entry)(void *) = (void (*)(void *))((uintptr_t)first->saved_sp[14]);
+    void  *arg            = (void *)(uintptr_t)first->saved_sp[8];
+
+    /* Call the first thread's entry directly. */
+    entry(arg);
+
+    /* If entry returns, loop forever (the idle thread never returns). */
+    for (;;) { __wfi(); }
+}

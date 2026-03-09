@@ -1,0 +1,23 @@
+# CMake build directory
+build/
+
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+
+# Editor and IDE artefacts
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS metadata
+.DS_Store
+
+# Pico SDK (fetched separately — not part of this repo)
+pico-sdk/
+
+# Log files from the console tool
+*.log
