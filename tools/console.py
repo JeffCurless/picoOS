@@ -141,9 +141,17 @@ def reader_thread(ser: serial.Serial, tee: "Tee | None", stop_event: threading.E
 # ---------------------------------------------------------------------------
 
 def _wait_for_connection(port: "str | None", baud: int,
-                         poll_interval: float = 1.0) -> serial.Serial:
-    """Block until the Pico port is available, then return an open Serial."""
+                         poll_interval: float = 1.0,
+                         quit_event: "threading.Event | None" = None) -> "serial.Serial | None":
+    """Block until the Pico port is available, then return an open Serial.
+
+    Returns None if the user presses Ctrl-C (\\x03) while waiting.
+    Uses select() on stdin so Ctrl-C is detected even in raw terminal mode,
+    where SIGINT is suppressed and the byte must be read explicitly.
+    """
     while True:
+        if quit_event and quit_event.is_set():
+            return None
         p = port or find_pico_port()
         if p:
             try:
@@ -153,7 +161,17 @@ def _wait_for_connection(port: "str | None", baud: int,
                 return ser
             except serial.SerialException:
                 pass
-        time.sleep(poll_interval)
+        # Poll in short bursts so stdin (Ctrl-C) is checked every 0.1 s.
+        deadline = time.monotonic() + poll_interval
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            r, _, _ = select.select([sys.stdin], [], [], min(remaining, 0.1))
+            if r:
+                ch = sys.stdin.buffer.read(1)
+                if ch == b'\x03':  # Ctrl-C in raw mode
+                    if quit_event:
+                        quit_event.set()
+                    return None
 
 
 def interactive_mode(port: "str | None", baud: int, tee: "Tee | None"):
@@ -168,8 +186,12 @@ def interactive_mode(port: "str | None", baud: int, tee: "Tee | None"):
     try:
         tty.setraw(fd)
 
+        quit_event = threading.Event()
+
         while True:  # outer reconnect loop
-            ser = _wait_for_connection(port, baud)
+            ser = _wait_for_connection(port, baud, quit_event=quit_event)
+            if ser is None:  # Ctrl-C pressed during reconnect wait
+                break
             sys.stdout.write(f"\r\n[console] Connected ({ser.port}).  "
                              "Press Ctrl-C to exit.\r\n")
             sys.stdout.flush()
@@ -189,6 +211,7 @@ def interactive_mode(port: "str | None", baud: int, tee: "Tee | None"):
                 ch = sys.stdin.buffer.read(1)
                 if not ch or ch == b'\x03':  # Ctrl-C
                     user_quit = True
+                    quit_event.set()
                     break
                 # Map bare \n to \r so the Pico shell sees Enter correctly.
                 if ch == b'\n':
