@@ -158,8 +158,7 @@ void ksemaphore_wait(ksemaphore_t *s)
             return;
         }
 
-        /* Count is 0 (or negative) — block. */
-        s->count--;
+        /* Count is 0 — block without touching count. */
         waiter_enqueue(&s->waiters, (tcb_t *)current_tcb);
         sched_block((tcb_t *)current_tcb);
         spinlock_release(&s->spin);
@@ -174,12 +173,10 @@ void ksemaphore_signal(ksemaphore_t *s)
 
     s->count++;
 
-    if (s->count <= 0) {
-        /* A thread is waiting — wake the first one. */
-        tcb_t *t = waiter_dequeue(&s->waiters);
-        if (t != NULL) {
-            sched_unblock(t);
-        }
+    /* Always try to wake a waiter; count > 0 ensures it will succeed. */
+    tcb_t *t = waiter_dequeue(&s->waiters);
+    if (t != NULL) {
+        sched_unblock(t);
     }
 
     spinlock_release(&s->spin);

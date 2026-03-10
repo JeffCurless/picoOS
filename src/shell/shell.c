@@ -326,7 +326,7 @@ static int cmd_run(int argc, char **argv)
         for (int i = 0; i < app_table_size; i++) {
             shell_print("  %s\r\n", app_table[i].name);
         }
-        return -1;
+        return 0;
     }
 
     const char *appname = argv[1];
@@ -462,7 +462,17 @@ void shell_run(void)
         bool line_done = false;
 
         while (!line_done) {
-            int ch = getchar();   /* blocking read from USB CDC */
+            /* Non-blocking poll: sleep 1 ms between attempts so the shell
+             * thread is removed from the ready queue while idle, giving
+             * lower-priority threads (e.g. sensor, demo apps) a chance
+             * to run.  getchar() busy-polls and would starve them. */
+            int ch = PICO_ERROR_TIMEOUT;
+            while (ch == PICO_ERROR_TIMEOUT) {
+                ch = getchar_timeout_us(0);
+                if (ch == PICO_ERROR_TIMEOUT) {
+                    sys_sleep(1);
+                }
+            }
 
             if (ch == '\r' || ch == '\n') {
                 /* Enter pressed — process the line. */

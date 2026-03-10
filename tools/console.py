@@ -26,6 +26,7 @@ Dependencies
 import argparse
 import sys
 import os
+import select
 import threading
 import time
 import tty
@@ -108,9 +109,11 @@ class Tee:
 # Background reader thread
 # ---------------------------------------------------------------------------
 
-def reader_thread(ser: serial.Serial, tee: "Tee | None", stop_event: threading.Event):
+def reader_thread(ser: serial.Serial, tee: "Tee | None", stop_event: threading.Event,
+                  disconnected: "threading.Event | None" = None):
     """Continuously read bytes from the serial port and print them to stdout.
-    Also writes to the log file if a Tee is provided."""
+    Also writes to the log file if a Tee is provided.
+    Sets *disconnected* if the port disappears unexpectedly."""
     while not stop_event.is_set():
         try:
             waiting = ser.in_waiting
@@ -124,8 +127,12 @@ def reader_thread(ser: serial.Serial, tee: "Tee | None", stop_event: threading.E
             else:
                 time.sleep(0.01)
         except serial.SerialException:
+            if disconnected:
+                disconnected.set()
             break
         except Exception:
+            if disconnected:
+                disconnected.set()
             break
 
 
@@ -133,39 +140,80 @@ def reader_thread(ser: serial.Serial, tee: "Tee | None", stop_event: threading.E
 # Interactive mode
 # ---------------------------------------------------------------------------
 
-def interactive_mode(ser: serial.Serial, tee: "Tee | None"):
-    """Forward keystrokes to the Pico one byte at a time in raw terminal mode.
+def _wait_for_connection(port: "str | None", baud: int,
+                         poll_interval: float = 1.0) -> serial.Serial:
+    """Block until the Pico port is available, then return an open Serial."""
+    while True:
+        p = port or find_pico_port()
+        if p:
+            try:
+                ser = serial.Serial(p, baud, timeout=0.1)
+                time.sleep(0.2)
+                ser.reset_input_buffer()
+                return ser
+            except serial.SerialException:
+                pass
+        time.sleep(poll_interval)
 
-    The local terminal echo is disabled so only the Pico's own echo is shown.
-    Ctrl-C exits; Ctrl-D sends EOF (0x04) to the Pico and also exits.
+
+def interactive_mode(port: "str | None", baud: int, tee: "Tee | None"):
+    """Forward keystrokes to the Pico in raw terminal mode.
+
+    Automatically reconnects when the Pico reboots or is briefly unplugged.
+    Ctrl-C exits entirely.
     """
-    stop_event = threading.Event()
-    t = threading.Thread(target=reader_thread,
-                         args=(ser, tee, stop_event),
-                         daemon=True)
-    t.start()
-
-    print("[console] Connected.  Press Ctrl-C to exit.\r\n")
-
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
+
     try:
-        tty.setraw(fd)          # disable local echo and line buffering
-        while True:
-            ch = sys.stdin.buffer.read(1)
-            if not ch or ch == b'\x03':  # Ctrl-C
+        tty.setraw(fd)
+
+        while True:  # outer reconnect loop
+            ser = _wait_for_connection(port, baud)
+            sys.stdout.write(f"\r\n[console] Connected ({ser.port}).  "
+                             "Press Ctrl-C to exit.\r\n")
+            sys.stdout.flush()
+
+            disconnected = threading.Event()
+            stop_event = threading.Event()
+            t = threading.Thread(target=reader_thread,
+                                 args=(ser, tee, stop_event, disconnected),
+                                 daemon=True)
+            t.start()
+
+            user_quit = False
+            while not disconnected.is_set():
+                r, _, _ = select.select([sys.stdin], [], [], 0.2)
+                if not r:
+                    continue
+                ch = sys.stdin.buffer.read(1)
+                if not ch or ch == b'\x03':  # Ctrl-C
+                    user_quit = True
+                    break
+                # Map bare \n to \r so the Pico shell sees Enter correctly.
+                if ch == b'\n':
+                    ch = b'\r'
+                try:
+                    ser.write(ch)
+                    if tee:
+                        tee.write(ch)
+                except serial.SerialException:
+                    break
+
+            stop_event.set()
+            t.join(timeout=1.0)
+            ser.close()
+
+            if user_quit:
                 break
-            # Map bare \n to \r so the Pico's shell sees Enter correctly.
-            if ch == b'\n':
-                ch = b'\r'
-            ser.write(ch)
-            if tee:
-                tee.write(ch)
+
+            sys.stdout.write("\r\n[console] Pico disconnected — "
+                             "waiting for reconnect...\r\n")
+            sys.stdout.flush()
+
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-        stop_event.set()
-        t.join(timeout=1.0)
-        print("\r\n[console] Disconnected.")
+        sys.stdout.write("\r\n[console] Disconnected.\r\n")
 
 
 # ---------------------------------------------------------------------------
@@ -340,12 +388,6 @@ def main():
         list_serial_ports()
         return
 
-    # Open the serial connection.
-    ser = open_connection(args.port, args.baud)
-
-    # Show device info.
-    print_device_info(ser.port)
-
     # Set up log file tee.
     tee = None
     if args.log:
@@ -354,12 +396,17 @@ def main():
 
     try:
         if args.upload:
-            local_file, remote_name = args.upload
-            upload_file(ser, local_file, remote_name)
+            # Upload is a one-shot operation — open a connection explicitly.
+            ser = open_connection(args.port, args.baud)
+            print_device_info(ser.port)
+            try:
+                local_file, remote_name = args.upload
+                upload_file(ser, local_file, remote_name)
+            finally:
+                ser.close()
         else:
-            interactive_mode(ser, tee)
+            interactive_mode(args.port, args.baud, tee)
     finally:
-        ser.close()
         if tee:
             tee.close()
 

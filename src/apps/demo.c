@@ -4,6 +4,7 @@
 
 #include <stdio.h>
 #include <stdint.h>
+#include "../shell/shell.h"
 
 /* =========================================================================
  * Shared IPC objects for the producer-consumer demo
@@ -25,16 +26,17 @@ static ksemaphore_t producer_sem;
 static mqueue_t producer_queue;
 
 /* Flag to track whether the shared IPC objects have been initialised.
- * Both threads are created before either runs, so whichever runs first
- * should initialise — we use a simple flag rather than a spinlock for
- * clarity (the scheduler has not started preempting yet when main() runs,
- * so both objects are initialised in main() before either thread starts). */
+ * demo_producer initialises on first run; demo_consumer waits on the
+ * semaphore, which will block until the producer has run at least once. */
 static bool demo_ipc_ready = false;
 
 /* =========================================================================
- * demo_ipc_init — called from main() before the scheduler starts
+ * demo_ipc_init — initialises the shared IPC objects.
+ *
+ * Called by demo_producer on its first invocation.  Protected by the
+ * demo_ipc_ready flag; only the first caller does the work.
  * ========================================================================= */
-void demo_ipc_init(void)
+static void demo_ipc_init(void)
 {
     ksemaphore_init(&producer_sem, 0);
     mqueue_init(&producer_queue, sizeof(demo_message_t));
@@ -52,9 +54,9 @@ void demo_producer(void *arg)
 {
     (void)arg;
 
-    /* Safety: wait for IPC initialisation if we somehow start very early. */
-    while (!demo_ipc_ready) {
-        sys_yield();
+    /* Initialise IPC objects on first run. */
+    if (!demo_ipc_ready) {
+        demo_ipc_init();
     }
 
     uint32_t counter = 0u;
@@ -81,17 +83,13 @@ void demo_consumer(void *arg)
 {
     (void)arg;
 
-    while (!demo_ipc_ready) {
-        sys_yield();
-    }
-
     for (;;) {
         ksemaphore_wait(&producer_sem);   /* block until item available */
 
         demo_message_t msg;
         mqueue_recv(&producer_queue, &msg);
 
-        printf("[consumer] received value: %u\r\n", msg.value);
+        shell_print("[consumer] received value: %u\r\n", msg.value);
     }
 }
 

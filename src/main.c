@@ -9,7 +9,6 @@
 #include "kernel/vfs.h"
 #include "kernel/fs.h"
 #include "shell/shell.h"
-#include "apps/demo.h"
 
 /* -------------------------------------------------------------------------
  * trace_enabled
@@ -138,10 +137,6 @@ int main(void)
     vfs_init();    /* mount /dev entries, open-fd table            */
     fs_init();     /* mount flash FS or format if first boot       */
 
-    /* Initialise the producer-consumer IPC objects before any demo
-     * thread has a chance to run and find them uninitialised. */
-    demo_ipc_init();
-
     /* ------------------------------------------------------------------
      * 5. Create the kernel process (PID 1)
      * ------------------------------------------------------------------ */
@@ -165,21 +160,7 @@ int main(void)
                        2u, SERVICE_STACK_SIZE);
 
     /* ------------------------------------------------------------------
-     * 8. Demo threads — priority 4 / 5
-     * ------------------------------------------------------------------ */
-    pcb_t *demo_proc = task_create_process("demos", 3u);
-    task_create_thread(demo_proc, "producer",
-                       demo_producer, NULL,
-                       4u, DEFAULT_STACK_SIZE);
-    task_create_thread(demo_proc, "consumer",
-                       demo_consumer, NULL,
-                       4u, DEFAULT_STACK_SIZE);
-    task_create_thread(demo_proc, "sensor",
-                       demo_sensor, NULL,
-                       5u, DEFAULT_STACK_SIZE);
-
-    /* ------------------------------------------------------------------
-     * 9. Print thread summary before starting the scheduler
+     * 8. Print thread summary before starting the scheduler
      * ------------------------------------------------------------------ */
 
     printf("Threads created:\r\n");
@@ -192,7 +173,7 @@ int main(void)
     printf("\r\nStarting scheduler...\r\n\r\n");
 
     /* ------------------------------------------------------------------
-     * 10. Start the scheduler — this call never returns.
+     * 9. Start the scheduler — this call never returns.
      *
      * sched_init() sets interrupt priorities.
      * sched_start() picks the first ready thread, switches to PSP,

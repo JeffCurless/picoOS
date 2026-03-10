@@ -181,6 +181,13 @@ tcb_t *sched_next_thread(void)
 {
     tcb_t *selected = NULL;
 
+    /* A preempted thread arrives here with state THREAD_RUNNING (the assembly
+     * does not change it).  Mark it THREAD_READY so the rotation logic below
+     * can move it to the tail of its priority queue and let peers run. */
+    if (current_tcb != NULL && current_tcb->state == THREAD_RUNNING) {
+        current_tcb->state = THREAD_READY;
+    }
+
     for (uint8_t prio = 0; prio < NUM_PRIORITIES; prio++) {
         if (ready_queues[prio] == NULL) {
             continue;
