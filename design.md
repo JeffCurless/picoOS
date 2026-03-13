@@ -4,7 +4,7 @@ That matters because the Pico’s hardware is very capable for a microcontroller
 
 ## 1. Overall design direction
 
-I would structure it as a **monolithic microkernel-style teaching OS** with these pieces:
+The overall design structure is a **monolithic microkernel-style teaching OS** with these pieces:
 
 * **Boot / hardware bring-up**
 * **Kernel core**
@@ -19,7 +19,7 @@ It should feel like an OS to students, but internally stay simple enough that th
 
 ## 2. What “process” should mean on Pico
 
-On this platform, I would **not** try to build true protected processes in the Unix sense.
+On this platform, there is no true protected processes in the Unix sense.
 
 Instead, define two execution concepts:
 
@@ -36,7 +36,7 @@ Instead, define two execution concepts:
   * open files
   * metadata such as name, PID, parent PID
 
-This gives you the **teaching abstraction** of processes and threads, even though hardware-enforced isolation is not really the point here. In other words: the system can support `ps`, `kill`, `spawn`, and multithreaded applications, while still being honest that this is an embedded teaching OS.
+This gives us the **teaching abstraction** of processes and threads, even though hardware-enforced isolation is not really the point here. In other words: the system can support `ps`, `kill`, `spawn`, and multithreaded applications, while still being honest that this is an embedded teaching OS.
 
 ## 3. Recommended kernel architecture
 
@@ -76,7 +76,7 @@ That makes it teachable.
 
 ## 4. Core split across the two RP2040 cores
 
-RP2040 supports a symmetric dual-core design, but for a teaching OS I would avoid “full SMP everywhere” at first and use an **asymmetric policy** on top of the hardware. ([Raspberry Pi][2])
+RP2040 supports a symmetric dual-core design, but for a teaching OS we would to avoid “full SMP everywhere” at first and use an **asymmetric policy** on top of the hardware. ([Raspberry Pi][2])
 
 Recommended split:
 
@@ -148,7 +148,7 @@ Essential primitives:
 * message queue
 * pipe/ring buffer
 
-Because the console will matter a lot, I would make **message passing** a first-class concept. Most services can then look like:
+Because the console will matter a lot, I decided to make **message passing** a first-class concept. Most services can then look like:
 
 * shell sends request
 * service handles it
@@ -158,7 +158,7 @@ That gives students a clear mental model without needing a huge syscall layer ri
 
 ## 7. Console and teaching interface
 
-Your idea of a host environment connected over USB is exactly right.
+The host environment will be connected over USB.  This allows a simple serial console access to the OS.
 
 ### First implementation
 
@@ -192,7 +192,7 @@ Start with:
 
 ### Host-side companion tool
 
-Write a small Python terminal program that:
+A small Python terminal program that:
 
 * connects to the Pico over USB serial
 * provides a console window
@@ -204,9 +204,7 @@ That lets the OS remain simple while the development experience still feels poli
 
 ## 8. Firmware update path
 
-Do **not** invent your own USB firmware flasher first.
-
-Use the RP2040 boot ROM’s existing update model:
+We will use the RP2040 boot ROM’s existing update model:
 
 * from the shell, issue an `update` command
 * reboot into USB BOOTSEL mode
@@ -218,9 +216,7 @@ That keeps the kernel simpler and leverages a reliable path already supported by
 
 ## 9. Filesystem design
 
-This is where the project becomes very interesting.
-
-Because flash and RAM are tight, I would build a **very small flash-native filesystem** rather than FAT.
+This is where the project becomes very interesting, because flash and RAM are tight, we have a **very small flash-native filesystem** rather than FAT, or other small file systems.
 
 ### Important hardware constraint
 
@@ -326,7 +322,7 @@ This gives enough surface area to feel like an OS without exploding complexity.
 
 ## 12. User program model
 
-I would support two phases.
+Supported in two phases.
 
 ### Phase 1: built-in applications
 
@@ -372,9 +368,9 @@ This gives students a recognizable OS abstraction without requiring a full drive
 
 ## 14. What to make intentionally “not the best”
 
-Your idea of making some parts functional but suboptimal is excellent.
+The main concept of this system is to make everything functional, but suboptimal.  This allows for students to experiment, and expand areas to make the system better.
 
-I would intentionally leave these imperfect in version 1:
+The following is intentionally left as imperfect in version 1:
 
 * **global kernel lock**
 
@@ -410,7 +406,7 @@ I would intentionally leave these imperfect in version 1:
 
 That gives students real, visible optimization opportunities.
 
-## 15. Suggested project phases
+## 15. Project phases
 
 ### Phase 1 — bring-up
 
@@ -468,13 +464,12 @@ Use **Python on the host side** for:
 
 That split will keep the target code small and the tooling pleasant.
 
-## 17. My concrete recommendation
+## 17. Design approach
 
-If I were designing this from scratch, I would define the project like this:
 
 > **PicoTeachOS**: a dual-core educational operating system for RP2040 with a USB console shell, preemptive threads, software-defined processes, a tiny flash-native filesystem, and a deliberately imperfect first implementation meant to be profiled, debugged, and improved by students.
 
-That is realistic, teachable, and rich enough for a full course or multi-semester project.
+This is realistic, teachable, and rich enough for a full course or multi-semester project.
 
 The single biggest architectural rule I would enforce is this:
 
