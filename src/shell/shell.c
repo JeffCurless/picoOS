@@ -15,6 +15,11 @@
 #include <stdlib.h>   /* strtol */
 
 /* -------------------------------------------------------------------------
+ * Version
+ * ------------------------------------------------------------------------- */
+#define PICOOS_VERSION "1.0.0"
+
+/* -------------------------------------------------------------------------
  * trace_enabled — defined in main.c
  * ------------------------------------------------------------------------- */
 extern volatile bool trace_enabled;
@@ -363,11 +368,26 @@ static int cmd_run(int argc, char **argv)
 /* =========================================================================
  * Built-in command table
  * ========================================================================= */
+/* --- info ----------------------------------------------------------------- */
+static int cmd_info(int argc, char **argv)
+{
+    (void)argc;
+    (void)argv;
+    shell_print("picoOS v%s\r\n", PICOOS_VERSION);
+    shell_print("Build     : %s %s\r\n", __DATE__, __TIME__);
+    shell_print("Compiler  : %s\r\n",    __VERSION__);
+    shell_print("Platform  : RP2040, dual ARM Cortex-M0+ (133 MHz max)\r\n");
+    shell_print("SRAM      : 264 KB\r\n");
+    shell_print("Flash     : 2 MB QSPI (XIP)\r\n");
+    return 0;
+}
+
 /* builtin_cmds — compile-time command table for all built-in shell commands.
  * Registered into cmd_table[] by shell_init() via shell_register_cmd().
  * Additional commands can be added at runtime from any module by calling
  * shell_register_cmd() directly — no changes to this table are required. */
 static const shell_cmd_t builtin_cmds[] = {
+    { "info",    "Show system information and version",         cmd_info    },
     { "help",    "List all commands",                          cmd_help    },
     { "ps",      "Show processes",                             cmd_ps      },
     { "threads", "Show all threads with state and CPU time",   cmd_threads },
@@ -451,7 +471,7 @@ void shell_run(void)
     char    *argv[SHELL_ARGC_MAX];
     uint32_t line_len = 0u;
 
-    shell_print("\r\nPicoTeachOS shell ready.  Type 'help' for commands.\r\n");
+    shell_print("\r\npicoOS shell ready.  Type 'help' for commands.\r\n");
 
     for (;;) {
         /* Print prompt. */

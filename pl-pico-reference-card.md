@@ -738,7 +738,7 @@ BEGIN
 END ;
 ```
 
-The procedure name must match the vector table entry. For PicoTeachOS the relevant
+The procedure name must match the vector table entry. For picoOS the relevant
 names are:
 
 | Handler name | Exception |
@@ -848,7 +848,7 @@ VOLATILE RECORD(POINT) SENSOR_DATA;   % all fields are volatile
 
 ### 18.6 Layout and offset interop
 
-The PicoTeachOS TCB layout (first five fields fixed for `sched_asm.S`):
+The picoOS TCB layout (first five fields fixed for `sched_asm.S`):
 
 ```
 RECORD TCB
@@ -1212,7 +1212,7 @@ CONSTANT UINT32 NVIC_ISER      = 0xE000E100; % interrupt set-enable
 
 % Flash (XIP region — read only, written via SSI peripheral)
 CONSTANT UINT32 XIP_BASE       = 0x10000000; % start of flash in address space
-CONSTANT UINT32 FS_FLASH_OFFSET = 0x00100000; % PicoTeachOS FS at +1 MB
+CONSTANT UINT32 FS_FLASH_OFFSET = 0x00100000; % picoOS FS at +1 MB
 ```
 
 Usage:
@@ -1231,7 +1231,7 @@ WHILE MMIO(UART0_FR) AND 0x20 /= 0 DO ;
 ## Appendix E: Annotated OS Code Snippet
 
 This example shows VOLATILE, MMIO, INTERRUPT, and RECORD working together in a realistic
-kernel fragment. It mirrors the PicoTeachOS structures in `src/kernel/`.
+kernel fragment. It mirrors the picoOS structures in `src/kernel/`.
 
 ```
 % ── Type definitions ────────────────────────────────────────────────────────

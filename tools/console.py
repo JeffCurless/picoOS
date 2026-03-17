@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-PicoTeachOS Console — Host-side terminal companion
+picoOS Console — Host-side terminal companion
 ===================================================
-Connects to a Raspberry Pi Pico running PicoTeachOS over USB serial (CDC).
+Connects to a Raspberry Pi Pico running picoOS over USB serial (CDC).
 
 Usage
 -----
@@ -246,7 +246,7 @@ def interactive_mode(port: "str | None", baud: int, tee: "Tee | None"):
 def upload_file(ser: serial.Serial, local_path: str, remote_name: str):
     """Upload a local file to the Pico by sending a 'write' shell command.
 
-    The 'write' command in the PicoTeachOS shell takes:
+    The 'write' command in the picoOS shell takes:
         write <filename> <data>
     so we chunk the file content into multiple write calls if it is large.
 
@@ -261,7 +261,7 @@ def upload_file(ser: serial.Serial, local_path: str, remote_name: str):
     with open(local_path, "rb") as f:
         content = f.read()
 
-    # Decode as UTF-8; the PicoTeachOS filesystem stores text.
+    # Decode as UTF-8; the picoOS filesystem stores text.
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError:
@@ -308,7 +308,7 @@ def open_connection(port: "str | None", baud: int) -> serial.Serial:
         port = find_pico_port()
         if port is None:
             print("ERROR: No Raspberry Pi Pico found.")
-            print("       Connect a Pico running PicoTeachOS and try again,")
+            print("       Connect a Pico running picoOS and try again,")
             print("       or specify the port with --port /dev/ttyXXX")
             print()
             list_serial_ports()
@@ -361,7 +361,7 @@ def print_device_info(port_device: str):
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="PicoTeachOS Console — host-side terminal companion",
+        description="picoOS Console — host-side terminal companion",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )

@@ -1,6 +1,6 @@
 # Environment Setup, Build, and Flash Guide
 
-This guide covers everything needed to go from a fresh machine to a running PicoTeachOS image on a Raspberry Pi Pico.
+This guide covers everything needed to go from a fresh machine to a running picoOS image on a Raspberry Pi Pico.
 
 ---
 
@@ -79,8 +79,8 @@ source ~/.bashrc
 ## 4. Clone this repository
 
 ```bash
-git clone <repo-url> PICOTeachingOS
-cd PICOTeachingOS
+git clone <repo-url> picoOS
+cd picoOS
 ```
 
 ---
@@ -100,11 +100,11 @@ A successful build produces these files in `build/src/`:
 
 | File | Purpose |
 |------|---------|
-| `picoteachos.uf2` | **Flash this** — UF2 image for drag-and-drop or `picotool` |
-| `picoteachos.elf` | ELF with debug symbols (used by GDB) |
-| `picoteachos.bin` | Raw binary |
-| `picoteachos.hex` | Intel HEX format |
-| `picoteachos.dis` | Disassembly listing |
+| `picoos.uf2` | **Flash this** — UF2 image for drag-and-drop or `picotool` |
+| `picoos.elf` | ELF with debug symbols (used by GDB) |
+| `picoos.bin` | Raw binary |
+| `picoos.hex` | Intel HEX format |
+| `picoos.dis` | Disassembly listing |
 
 ### Incremental builds
 
@@ -133,16 +133,16 @@ rm -rf build/ && mkdir build && cd build && cmake .. && make -j$(nproc)
 1. Hold the **BOOTSEL** button on the Pico.
 2. While holding BOOTSEL, plug the USB cable into your machine.
 3. Release BOOTSEL. The Pico mounts as a USB mass-storage device named **RPI-RP2**.
-4. Copy `build/src/picoteachos.uf2` to the drive:
+4. Copy `build/src/picoos.uf2` to the drive:
 
 ```bash
-cp build/src/picoteachos.uf2 /media/$USER/RPI-RP2/
-# macOS: cp build/src/picoteachos.uf2 /Volumes/RPI-RP2/
+cp build/src/picoos.uf2 /media/$USER/RPI-RP2/
+# macOS: cp build/src/picoos.uf2 /Volumes/RPI-RP2/
 ```
 
-5. The Pico unmounts and reboots into PicoTeachOS automatically.
+5. The Pico unmounts and reboots into picoOS automatically.
 
-### Method B — picotool (scriptable, no button required if already running PicoTeachOS)
+### Method B — picotool (scriptable, no button required if already running picoOS)
 
 Install `picotool`:
 
@@ -154,13 +154,13 @@ sudo apt install picotool
 With the Pico in BOOTSEL mode:
 
 ```bash
-picotool load build/src/picoteachos.uf2 --force
+picotool load build/src/picoos.uf2 --force
 picotool reboot
 ```
 
 ### Method C — from the running shell (`update` command)
 
-If PicoTeachOS is already running and you have the console open, the `update` command reboots the Pico directly into BOOTSEL mode without touching the button:
+If picoOS is already running and you have the console open, the `update` command reboots the Pico directly into BOOTSEL mode without touching the button:
 
 ```
 pico> update
@@ -172,7 +172,7 @@ The Pico will reappear as **RPI-RP2**.  Then copy the new `.uf2` as above.
 
 ## 7. Connect to the console
 
-PicoTeachOS outputs a USB CDC serial port.  Once the Pico is running, a `/dev/ttyACM0` device (Linux) or `/dev/cu.usbmodem*` device (macOS) appears.
+picoOS outputs a USB CDC serial port.  Once the Pico is running, a `/dev/ttyACM0` device (Linux) or `/dev/cu.usbmodem*` device (macOS) appears.
 
 ### Option A — host console tool (recommended)
 
@@ -221,7 +221,7 @@ screen /dev/cu.usbmodem* 115200
 After flashing, the console should show:
 
 ```
-=== PicoTeachOS ===
+=== picoOS ===
 RP2040 dual-core educational OS
 Build: Mar  9 2026 14:23:01
 
@@ -272,7 +272,7 @@ openocd -f interface/cmsis-dap.cfg -f target/rp2040.cfg
 In another terminal, launch GDB:
 
 ```bash
-arm-none-eabi-gdb build/src/picoteachos.elf
+arm-none-eabi-gdb build/src/picoos.elf
 (gdb) target remote :3333
 (gdb) monitor reset init
 (gdb) continue
@@ -287,6 +287,6 @@ arm-none-eabi-gdb build/src/picoteachos.elf
 | `PICO_SDK_PATH` not found during `cmake` | Environment variable not exported | `export PICO_SDK_PATH=...` and re-run cmake |
 | `/dev/ttyACM0` permission denied | User not in `dialout` group | `sudo usermod -aG dialout $USER` then log out/in |
 | Pico doesn't appear as RPI-RP2 | Cable is power-only | Try a different USB cable |
-| Console output is garbled | Baud rate mismatch | PicoTeachOS uses 115200 — set your terminal to match |
+| Console output is garbled | Baud rate mismatch | picoOS uses 115200 — set your terminal to match |
 | `make` fails on `arm-none-eabi-gcc` not found | Toolchain not installed | Follow step 2 |
 | `picotool` can't find device | Pico not in BOOTSEL mode | Hold BOOTSEL while plugging in, or use `update` shell command |

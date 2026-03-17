@@ -108,7 +108,7 @@ int main(void)
      * 2. Boot banner
      * ------------------------------------------------------------------ */
     printf("\r\n\r\n=================================\r\n");
-    printf("       PicoTeachOS\r\n");
+    printf("       picoOS\r\n");
     printf("  RP2040 dual-core educational OS\r\n");
     printf("  Build: %s %s\r\n", __DATE__, __TIME__);
     printf("=================================\r\n\r\n");

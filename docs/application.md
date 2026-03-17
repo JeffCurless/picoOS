@@ -1,14 +1,14 @@
-# Writing Applications for PicoTeachOS
+# Writing Applications for picoOS
 
 This guide explains how to write, register, build, and run an application on
-PicoTeachOS.  It assumes you already have a working build environment — see
+picoOS.  It assumes you already have a working build environment — see
 [setup.md](setup.md) if not.
 
 ---
 
 ## Application model
 
-In Phase 1 of PicoTeachOS all applications are **compiled directly into the
+In Phase 1 of picoOS all applications are **compiled directly into the
 firmware**.  There is no dynamic loader or separate binary format.  An
 application is a C function with the signature:
 
@@ -133,7 +133,7 @@ void myapp(void *arg);
 Open `src/CMakeLists.txt` and add your file to the `add_executable` list:
 
 ```cmake
-add_executable(picoteachos
+add_executable(picoos
     main.c
     kernel/task.c
     kernel/sched.c
@@ -161,17 +161,17 @@ at `${CMAKE_CURRENT_SOURCE_DIR}` (i.e. `src/`).
 The build process is identical to the standard project build:
 
 ```bash
-cd /path/to/PICOTeachingOS/build
+cd /path/to/picoOS/build
 make -j$(nproc)
 ```
 
-The output is `build/src/picoteachos.uf2`.
+The output is `build/src/picoos.uf2`.
 
 Flash to the Pico:
 
 ```bash
 # Option A: drag-and-drop (hold BOOTSEL while plugging in USB)
-cp build/src/picoteachos.uf2 /media/$USER/RPI-RP2/
+cp build/src/picoos.uf2 /media/$USER/RPI-RP2/
 
 # Option B: from the running shell (reboots into BOOTSEL automatically)
 pico> update

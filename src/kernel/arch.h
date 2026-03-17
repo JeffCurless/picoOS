@@ -1,5 +1,5 @@
 /*
- * arch.h — Architecture-specific definitions for PicoTeachOS
+ * arch.h — Architecture-specific definitions for picoOS
  *
  * When building with the Pico SDK (the normal case, target = ARM Cortex-M0+),
  * this header just pulls in the SDK's own headers which supply CMSIS intrinsics,

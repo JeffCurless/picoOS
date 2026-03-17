@@ -467,7 +467,7 @@ That split will keep the target code small and the tooling pleasant.
 ## 17. Design approach
 
 
-> **PicoTeachOS**: a dual-core educational operating system for RP2040 with a USB console shell, preemptive threads, software-defined processes, a tiny flash-native filesystem, and a deliberately imperfect first implementation meant to be profiled, debugged, and improved by students.
+> **picoOS**: a dual-core educational operating system for RP2040 with a USB console shell, preemptive threads, software-defined processes, a tiny flash-native filesystem, and a deliberately imperfect first implementation meant to be profiled, debugged, and improved by students.
 
 This is realistic, teachable, and rich enough for a full course or multi-semester project.
 

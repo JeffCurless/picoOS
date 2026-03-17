@@ -1,9 +1,9 @@
-# PicoTeachOS
+# picoOS
 
-An educational operating system for the **Raspberry Pi Pico (RP2040)**.  PicoTeachOS is a small, readable teaching kernel — not a scaled-down desktop OS.  Every component is deliberately simple so students can read the code, understand how it works, and then improve it.
+An educational operating system for the **Raspberry Pi Pico (RP2040)**.  picoOS is a small, readable teaching kernel — not a scaled-down desktop OS.  Every component is deliberately simple so students can read the code, understand how it works, and then improve it.
 
 ```
-=== PicoTeachOS ===
+=== picoOS ===
 RP2040 dual-core educational OS
 Build: Mar  9 2026 14:23:01
 
@@ -71,13 +71,13 @@ cd ~/pico-sdk && git submodule update --init --recursive
 export PICO_SDK_PATH="$HOME/pico-sdk"
 
 # 3. Build
-cd PICOTeachingOS
+cd picoOS
 mkdir build && cd build
 cmake ..
 make -j$(nproc)
 
 # 4. Flash (hold BOOTSEL on Pico, then plug in USB)
-cp build/src/picoteachos.uf2 /media/$USER/RPI-RP2/
+cp build/src/picoos.uf2 /media/$USER/RPI-RP2/
 
 # 5. Open the console
 pip install pyserial
@@ -112,7 +112,7 @@ Once running, the USB shell accepts:
 ## Repository layout
 
 ```
-PICOTeachingOS/
+picoOS/
 ├── CMakeLists.txt          Top-level CMake build
 ├── pico_sdk_import.cmake   Pico SDK discovery (standard boilerplate)
 ├── design.md               Architecture design document
@@ -147,7 +147,7 @@ See **[design.md](design.md)** for the full design rationale.  The key points:
 
 ### Dual-core split
 
-The RP2040 has two cores.  PicoTeachOS uses them asymmetrically to keep the design easy to follow:
+The RP2040 has two cores.  picoOS uses them asymmetrically to keep the design easy to follow:
 
 - **Core 0** — USB console, SysTick, scheduler, filesystem writes, shell
 - **Core 1** — user worker threads, compute tasks, background services

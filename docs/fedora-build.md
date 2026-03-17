@@ -1,6 +1,6 @@
-# Building PicoTeachOS on Intel Fedora (Cross-Compile)
+# Building picoOS on Intel Fedora (Cross-Compile)
 
-This guide covers everything needed to cross-compile PicoTeachOS on an x86-64 Fedora Linux system and produce a flashable UF2 image for the Raspberry Pi Pico (RP2040).
+This guide covers everything needed to cross-compile picoOS on an x86-64 Fedora Linux system and produce a flashable UF2 image for the Raspberry Pi Pico (RP2040).
 
 ---
 
@@ -119,7 +119,7 @@ The Pico appears as two different USB devices depending on mode:
 | Mode | VID:PID | Notes |
 |---|---|---|
 | BOOTSEL (flash mode) | `2E8A:0003` | Mass storage — accessible without extra rules |
-| Running PicoTeachOS | `2E8A:000A` | USB CDC serial — needs `dialout` group |
+| Running picoOS | `2E8A:000A` | USB CDC serial — needs `dialout` group |
 
 Add your user to the `dialout` group:
 
@@ -147,8 +147,8 @@ sudo udevadm trigger
 ## 6. Clone this repository
 
 ```bash
-git clone <repo-url> PICOTeachingOS
-cd PICOTeachingOS
+git clone <repo-url> picoOS
+cd picoOS
 ```
 
 ---
@@ -166,11 +166,11 @@ A successful build produces these files in `build/src/`:
 
 | File | Purpose |
 |---|---|
-| `picoteachos.uf2` | **Flash this** — UF2 image for drag-and-drop or picotool |
-| `picoteachos.elf` | ELF with debug symbols (for GDB) |
-| `picoteachos.bin` | Raw binary |
-| `picoteachos.hex` | Intel HEX |
-| `picoteachos.dis` | Disassembly listing |
+| `picoos.uf2` | **Flash this** — UF2 image for drag-and-drop or picotool |
+| `picoos.elf` | ELF with debug symbols (for GDB) |
+| `picoos.bin` | Raw binary |
+| `picoos.hex` | Intel HEX |
+| `picoos.dis` | Disassembly listing |
 
 ### Incremental builds
 
@@ -204,24 +204,24 @@ make -j$(nproc) -C build
 3. Copy the UF2:
 
    ```bash
-   cp build/src/picoteachos.uf2 /run/media/$USER/RPI-RP2/
+   cp build/src/picoos.uf2 /run/media/$USER/RPI-RP2/
    sync
    ```
 
-   The Pico unmounts and reboots into PicoTeachOS automatically.
+   The Pico unmounts and reboots into picoOS automatically.
 
 ### Method B — picotool (if built in step 4)
 
 With the Pico in BOOTSEL mode:
 
 ```bash
-picotool load build/src/picoteachos.uf2 --force
+picotool load build/src/picoos.uf2 --force
 picotool reboot
 ```
 
 ### Method C — from the running shell
 
-If PicoTeachOS is already running, the `update` shell command reboots directly into BOOTSEL mode:
+If picoOS is already running, the `update` shell command reboots directly into BOOTSEL mode:
 
 ```
 pico> update

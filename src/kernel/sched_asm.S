@@ -1,7 +1,7 @@
 /*
  * sched_asm.S — Cortex-M0+ PendSV context-switch handler
  *
- * PicoTeachOS / RP2040
+ * picoOS / RP2040
  *
  * This file contains the only hand-written assembly in the kernel.  It is
  * deliberately kept as short and readable as possible so students can trace
@@ -12,7 +12,7 @@
  * When the CPU takes an exception (e.g. PendSV) it automatically saves
  * {r0, r1, r2, r3, r12, lr, pc, xpsr} onto the *current* stack before
  * branching to the ISR.  On M0+ in Thread mode the stack pointer may be
- * either MSP or PSP.  PicoTeachOS runs all threads with PSP; the kernel
+ * either MSP or PSP.  picoOS runs all threads with PSP; the kernel
  * exception handlers use MSP.
  *
  * PendSV is configured to the lowest priority (0xFF) so it fires only after
