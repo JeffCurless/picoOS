@@ -1,0 +1,277 @@
+# Building PicoTeachOS on Intel Fedora (Cross-Compile)
+
+This guide covers everything needed to cross-compile PicoTeachOS on an x86-64 Fedora Linux system and produce a flashable UF2 image for the Raspberry Pi Pico (RP2040).
+
+---
+
+## 1. Install host build dependencies
+
+```bash
+sudo dnf install -y \
+    cmake \
+    make \
+    gcc \
+    g++ \
+    git \
+    python3 \
+    python3-pip \
+    libusb1-devel \
+    pkg-config \
+    ninja-build
+```
+
+`libusb1-devel` and `pkg-config` are needed to build `picotool` (the flash utility) from source in step 4.
+
+---
+
+## 2. Install the ARM bare-metal cross-compiler
+
+### Option A — Fedora DNF packages (recommended, simplest)
+
+```bash
+sudo dnf install -y \
+    arm-none-eabi-gcc-cs \
+    arm-none-eabi-gcc-cs-c++ \
+    arm-none-eabi-binutils-cs \
+    arm-none-eabi-newlib
+```
+
+Verify:
+
+```bash
+arm-none-eabi-gcc --version
+# arm-none-eabi-gcc (Fedora 13.x ...) 13.x.x ...
+```
+
+The Pico SDK requires GCC 10 or later. Fedora ships GCC 12–14 in these packages depending on the Fedora release; all are compatible.
+
+### Option B — Official ARM GNU Toolchain tar.gz (latest)
+
+Use this if the DNF packages are too old or missing on your Fedora version.
+
+1. Download the **AArch32 bare-metal** tarball from the ARM Developer site:
+
+   ```
+   https://developer.arm.com/downloads/-/arm-gnu-toolchain-downloads
+   ```
+
+   Select: **arm-gnu-toolchain-XX.X-x86_64-arm-none-eabi.tar.xz**
+
+2. Extract and add to `PATH`:
+
+   ```bash
+   sudo tar -xJf arm-gnu-toolchain-*.tar.xz -C /opt
+   # Adjust the directory name to match what was extracted:
+   echo 'export PATH="/opt/arm-gnu-toolchain-14.2.rel1-x86_64-arm-none-eabi/bin:$PATH"' >> ~/.bashrc
+   source ~/.bashrc
+   ```
+
+3. Verify:
+
+   ```bash
+   arm-none-eabi-gcc --version
+   ```
+
+---
+
+## 3. Get the Pico SDK
+
+Clone the SDK into a permanent location:
+
+```bash
+git clone https://github.com/raspberrypi/pico-sdk.git ~/pico-sdk
+cd ~/pico-sdk
+git submodule update --init --recursive
+```
+
+Export the path so CMake can find it. Add this to `~/.bashrc`:
+
+```bash
+export PICO_SDK_PATH="$HOME/pico-sdk"
+```
+
+Reload:
+
+```bash
+source ~/.bashrc
+```
+
+---
+
+## 4. Build picotool (optional — for scriptable flashing)
+
+`picotool` is not yet packaged for Fedora; build it from source. This step is optional — you can flash without it using BOOTSEL drag-and-drop.
+
+```bash
+git clone https://github.com/raspberrypi/picotool.git ~/picotool
+cd ~/picotool
+cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk"
+cmake --build build -j$(nproc)
+sudo cmake --install build          # installs to /usr/local/bin
+```
+
+---
+
+## 5. USB device permissions
+
+The Pico appears as two different USB devices depending on mode:
+
+| Mode | VID:PID | Notes |
+|---|---|---|
+| BOOTSEL (flash mode) | `2E8A:0003` | Mass storage — accessible without extra rules |
+| Running PicoTeachOS | `2E8A:000A` | USB CDC serial — needs `dialout` group |
+
+Add your user to the `dialout` group:
+
+```bash
+sudo usermod -aG dialout $USER
+```
+
+Log out and back in for the group change to take effect.
+
+If you installed `picotool`, also add a udev rule so it can access the Pico without `sudo`:
+
+```bash
+sudo bash -c 'cat > /etc/udev/rules.d/99-pico.rules <<EOF
+# Raspberry Pi Pico — BOOTSEL mode
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="0003", MODE="0666"
+# Raspberry Pi Pico — CDC serial (running)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="000a", MODE="0666", GROUP="dialout"
+EOF'
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
+---
+
+## 6. Clone this repository
+
+```bash
+git clone <repo-url> PICOTeachingOS
+cd PICOTeachingOS
+```
+
+---
+
+## 7. Build
+
+```bash
+cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk"
+make -j$(nproc) -C build
+```
+
+CMake automatically reads the `pico_sdk_import.cmake` at the project root, locates the ARM cross-compiler via `arm-none-eabi-gcc` in `PATH`, and sets `CMAKE_SYSTEM_PROCESSOR=arm` — no extra toolchain flags needed.
+
+A successful build produces these files in `build/src/`:
+
+| File | Purpose |
+|---|---|
+| `picoteachos.uf2` | **Flash this** — UF2 image for drag-and-drop or picotool |
+| `picoteachos.elf` | ELF with debug symbols (for GDB) |
+| `picoteachos.bin` | Raw binary |
+| `picoteachos.hex` | Intel HEX |
+| `picoteachos.dis` | Disassembly listing |
+
+### Incremental builds
+
+```bash
+make -j$(nproc) -C build
+```
+
+### Clean rebuild
+
+```bash
+rm -rf build
+cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk"
+make -j$(nproc) -C build
+```
+
+---
+
+## 8. Flash the UF2
+
+### Method A — drag and drop (no extra tools needed)
+
+1. Hold **BOOTSEL** on the Pico and plug in USB. Release BOOTSEL.
+2. The Pico mounts as `RPI-RP2` — find the mount point:
+
+   ```bash
+   lsblk -o NAME,LABEL,MOUNTPOINT | grep RPI-RP2
+   ```
+
+   Fedora auto-mounts removable drives under `/run/media/$USER/RPI-RP2`.
+
+3. Copy the UF2:
+
+   ```bash
+   cp build/src/picoteachos.uf2 /run/media/$USER/RPI-RP2/
+   sync
+   ```
+
+   The Pico unmounts and reboots into PicoTeachOS automatically.
+
+### Method B — picotool (if built in step 4)
+
+With the Pico in BOOTSEL mode:
+
+```bash
+picotool load build/src/picoteachos.uf2 --force
+picotool reboot
+```
+
+### Method C — from the running shell
+
+If PicoTeachOS is already running, the `update` shell command reboots directly into BOOTSEL mode:
+
+```
+pico> update
+```
+
+Then copy the UF2 as in Method A.
+
+---
+
+## 9. Connect to the console
+
+Install pyserial for the companion console tool:
+
+```bash
+pip3 install --user pyserial
+```
+
+Run:
+
+```bash
+python3 tools/console.py
+```
+
+The script auto-detects the Pico by USB VID:PID `2E8A:000A`. Press **Ctrl-C** to exit.
+
+```bash
+python3 tools/console.py --port /dev/ttyACM0   # specific port
+python3 tools/console.py --log session.log      # save output
+```
+
+---
+
+## 10. LSP / clangd (optional)
+
+After a successful build, symlink the CMake compile database so clangd can resolve all Pico SDK headers:
+
+```bash
+ln -sf build/compile_commands.json compile_commands.json
+```
+
+---
+
+## 11. Troubleshooting (Fedora-specific)
+
+| Symptom | Likely cause | Fix |
+|---|---|---|
+| `arm-none-eabi-gcc: command not found` | Package not installed or not in PATH | Re-run step 2; check `echo $PATH` |
+| `cmake` fails: `C compiler cannot compile` | Wrong GCC or missing newlib | Verify `arm-none-eabi-newlib` is installed |
+| `/dev/ttyACM0: Permission denied` | Not in `dialout` group | `sudo usermod -aG dialout $USER` then log out/in |
+| Pico not found by `picotool` | udev rules not loaded | Re-run `udevadm` commands from step 5 |
+| `RPI-RP2` not mounted | Fedora auto-mount disabled | `udisksctl mount -b /dev/sdX` or check `dmesg` |
+| `cmake` version too old | Fedora version ships cmake < 3.13 | `sudo dnf install cmake` or use `dnf module enable cmake` |
+| Build fails: missing `libusb` | Only affects picotool build | `sudo dnf install libusb1-devel` |
