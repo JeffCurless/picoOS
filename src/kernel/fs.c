@@ -24,9 +24,9 @@
  * to the address XIP_BASE + FS_FLASH_OFFSET + sector_offset.
  *
  * Writing requires:
- *   1. Accumulate new data in scratch_buf (RAM).
+ *   1. Accumulate new data in fs_buffer (RAM).
  *   2. Erase the target sector (sets all bytes to 0xFF).
- *   3. Program the sector from scratch_buf.
+ *   3. Program the sector from fs_buffer.
  *
  * CRITICAL: During any flash_range_erase / flash_range_program call the
  * CPU must not fetch instructions from XIP.  Core 1 is paused via the
@@ -60,15 +60,15 @@ static fs_superblock_t superblock_ram;
  * Data is accumulated here during fs_write() calls and committed to flash
  * (erase + program) when the write-mode fd is closed.
  */
-static uint8_t scratch_buf[FS_BLOCK_SIZE];
+static uint8_t fs_buffer[FS_BLOCK_SIZE];
 
-/* Index of the file currently occupying scratch_buf, or -1 if free. */
+/* Index of the file currently occupying fs_buffer, or -1 if free. */
 static int scratch_owner = -1;   /* file_idx of the writing file, or -1 */
 
 /* Open FS file-descriptor table (internal to fs.c). */
 typedef struct {
     bool     used;
-    bool     dirty;      /* true: scratch_buf holds uncommitted data      */
+    bool     dirty;      /* true: fs_buffer holds uncommitted data      */
     uint32_t file_idx;   /* index into superblock_ram.files[]             */
     uint32_t pos;        /* current read/write position in bytes          */
     int      mode;
@@ -124,31 +124,31 @@ static void flash_program_sector(uint32_t flash_offset, const uint8_t *src)
 }
 
 /* Write superblock_ram to the superblock flash sector.
- * Uses scratch_buf as the write staging area; call only when scratch_buf is
+ * Uses fs_buffer as the write staging area; call only when fs_buffer is
  * not in use by an open write fd (i.e. after the file data has been committed
  * and scratch_owner has been cleared). */
 /* superblock_flush — write superblock_ram to the superblock flash sector.
  *
- * Must only be called when scratch_buf is free (scratch_owner == -1).
+ * Must only be called when fs_buffer is free (scratch_owner == -1).
  * Procedure:
- *   1. Pre-fill scratch_buf with 0xFF so unused bytes match the erased state
+ *   1. Pre-fill fs_buffer with 0xFF so unused bytes match the erased state
  *      and do not require extra program pulses.
- *   2. Copy superblock_ram into the start of scratch_buf.
+ *   2. Copy superblock_ram into the start of fs_buffer.
  *   3. Erase the superblock sector (SUPERBLOCK_FLASH_OFFSET).
- *   4. Program the sector from scratch_buf.
+ *   4. Program the sector from fs_buffer.
  *
- * After this call scratch_buf contains the serialised superblock padded with
- * 0xFF.  Callers that need scratch_buf for file data must overwrite it
+ * After this call fs_buffer contains the serialised superblock padded with
+ * 0xFF.  Callers that need fs_buffer for file data must overwrite it
  * afterwards (e.g. TRUNC zeros it, non-TRUNC copies from XIP). */
 static void superblock_flush(void)
 {
     /* Flash erase sets all bytes to 0xFF.  Pre-fill with 0xFF so unused
      * bytes in the sector match the erased state. */
-    memset(scratch_buf, 0xFF, FS_BLOCK_SIZE);
-    memcpy(scratch_buf, &superblock_ram, sizeof(superblock_ram));
+    memset(fs_buffer, 0xFF, FS_BLOCK_SIZE);
+    memcpy(fs_buffer, &superblock_ram, sizeof(superblock_ram));
 
     flash_erase_sector(SUPERBLOCK_FLASH_OFFSET);
-    flash_program_sector(SUPERBLOCK_FLASH_OFFSET, scratch_buf);
+    flash_program_sector(SUPERBLOCK_FLASH_OFFSET, fs_buffer);
 }
 
 /* =========================================================================
@@ -315,11 +315,11 @@ int fs_open(const char *name, int mode)
 
         if (mode & VFS_O_TRUNC) {
             /* Truncate: start with a blank buffer. */
-            memset(scratch_buf, 0, FS_BLOCK_SIZE);
+            memset(fs_buffer, 0, FS_BLOCK_SIZE);
             superblock_ram.files[file_idx].size = 0u;
         } else {
             /* Preserve existing content so append/overwrite works. */
-            memcpy(scratch_buf,
+            memcpy(fs_buffer,
                    (const uint8_t *)(XIP_BASE + FILE_FLASH_OFFSET(file_idx)),
                    FS_BLOCK_SIZE);
         }
@@ -349,7 +349,7 @@ int fs_open(const char *name, int mode)
  * (no RAM copy, zero overhead).
  *
  * For the file currently in the scratch buffer (opened for write and dirty):
- * read from scratch_buf so that in-progress writes are visible.
+ * read from fs_buffer so that in-progress writes are visible.
  * ========================================================================= */
 int fs_read(int fd, uint8_t *buf, uint32_t n)
 {
@@ -371,8 +371,8 @@ int fs_read(int fd, uint8_t *buf, uint32_t n)
     }
 
     if ((int)ofd->file_idx == scratch_owner && ofd->dirty) {
-        /* File is being written — read from scratch_buf. */
-        memcpy(buf, scratch_buf + ofd->pos, to_read);
+        /* File is being written — read from fs_buffer. */
+        memcpy(buf, fs_buffer + ofd->pos, to_read);
     } else {
         /* Read directly from XIP flash — no RAM copy required. */
         memcpy(buf, FILE_XIP_PTR(ofd->file_idx, ofd->pos), to_read);
@@ -385,7 +385,7 @@ int fs_read(int fd, uint8_t *buf, uint32_t n)
 /* =========================================================================
  * fs_write
  *
- * Accumulates data in scratch_buf.  Actual flash erase+program happens in
+ * Accumulates data in fs_buffer.  Actual flash erase+program happens in
  * fs_close() so that multiple fs_write() calls on the same fd are efficient
  * (one flash operation per close, not per write).
  * ========================================================================= */
@@ -415,7 +415,7 @@ int fs_write(int fd, const uint8_t *buf, uint32_t n)
         return -1;   /* no space */
     }
 
-    memcpy(scratch_buf + ofd->pos, buf, to_write);
+    memcpy(fs_buffer + ofd->pos, buf, to_write);
     ofd->pos += to_write;
     ofd->dirty = true;
 
@@ -429,9 +429,9 @@ int fs_write(int fd, const uint8_t *buf, uint32_t n)
 /* =========================================================================
  * fs_close
  *
- * If the fd has pending writes (dirty), commit scratch_buf to flash:
+ * If the fd has pending writes (dirty), commit fs_buffer to flash:
  *   1. Erase the file's data sector.
- *   2. Program the sector with scratch_buf contents.
+ *   2. Program the sector with fs_buffer contents.
  *   3. Flush the updated superblock (file size may have changed).
  * ========================================================================= */
 int fs_close(int fd)
@@ -446,11 +446,11 @@ int fs_close(int fd)
         uint32_t file_idx    = ofd->file_idx;
         uint32_t flash_offset = FILE_FLASH_OFFSET(file_idx);
 
-        /* Step 1 & 2: erase the data sector then program from scratch_buf. */
+        /* Step 1 & 2: erase the data sector then program from fs_buffer. */
         flash_erase_sector(flash_offset);
-        flash_program_sector(flash_offset, scratch_buf);
+        flash_program_sector(flash_offset, fs_buffer);
 
-        /* Step 3: scratch_buf is now free — use it to flush the superblock. */
+        /* Step 3: fs_buffer is now free — use it to flush the superblock. */
         scratch_owner = -1;
         superblock_flush();
     }

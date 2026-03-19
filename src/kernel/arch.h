@@ -42,10 +42,15 @@
 #include "pico/bootrom.h"
 #include "hardware/flash.h"
 #include "pico/multicore.h"    /* multicore_lockout_start/end_blocking */
+#ifdef PICOOS_DISPLAY_ENABLE
+#include "hardware/spi.h"
+#include "hardware/pwm.h"
+#endif
 
 #else /* ── Host / LSP stub definitions ──────────────────────────────────── */
 
 #include <stdio.h>  /* for printf in stubs that just return */
+typedef unsigned int uint;
 
 /* CMSIS-style register intrinsics ---------------------------------------- */
 static inline void     __disable_irq(void)          {}
@@ -123,6 +128,28 @@ static inline void    gpio_init(uint32_t gpio)                        { (void)gp
 static inline void    gpio_set_dir(uint32_t gpio, bool out)           { (void)gpio; (void)out; }
 static inline void    gpio_put(uint32_t gpio, bool v)                 { (void)gpio; (void)v; }
 static inline bool    gpio_get(uint32_t gpio)                         { (void)gpio; return false; }
+
+/* SPI stubs --------------------------------------------------------------- */
+typedef uint8_t spi_inst_t;
+static spi_inst_t spi0_inst;
+#define spi0 (&spi0_inst)
+static inline uint     spi_init(spi_inst_t *s, uint baud)                          { (void)s;(void)baud; return 0; }
+static inline void     spi_set_format(spi_inst_t *s,uint d,uint cp,uint ch,uint o) { (void)s;(void)d;(void)cp;(void)ch;(void)o; }
+static inline int      spi_write_blocking(spi_inst_t *s,const uint8_t *b,size_t n) { (void)s;(void)b;(void)n; return (int)n; }
+static inline void     gpio_set_function(uint32_t gpio, uint fn)                   { (void)gpio;(void)fn; }
+static inline void     gpio_pull_up(uint32_t gpio)                                 { (void)gpio; }
+#define GPIO_FUNC_SPI  1u
+#define SPI_CPOL_0     0u
+#define SPI_CPHA_0     0u
+#define SPI_MSB_FIRST  0u
+
+/* PWM stubs --------------------------------------------------------------- */
+static inline uint     pwm_gpio_to_slice_num(uint32_t gpio)                        { (void)gpio; return 0; }
+static inline uint     pwm_gpio_to_channel(uint32_t gpio)                          { (void)gpio; return 0; }
+static inline void     pwm_set_wrap(uint slice, uint16_t wrap)                     { (void)slice;(void)wrap; }
+static inline void     pwm_set_chan_level(uint slice, uint chan, uint16_t lv)       { (void)slice;(void)chan;(void)lv; }
+static inline void     pwm_set_enabled(uint slice, bool en)                        { (void)slice;(void)en; }
+#define GPIO_FUNC_PWM  5u
 
 #endif /* defined(__arm__) || defined(__thumb__) */
 
