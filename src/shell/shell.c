@@ -399,9 +399,9 @@ static int cmd_info(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    shell_print("\r\bpicoOS v%u.%u.%u\r\n\n",
+    shell_print("\r\npicoOS v%u.%u.%u\r\n\n",
                 PICOOS_VERSION_MAJOR, PICOOS_VERSION_MINOR, PICOOS_VERSION_EDIT);
-    shell_print("Build     : %s %s\r\n", __DATE__, __TIME__);
+    shell_print("Built On  : %s %s\r\n", __DATE__, __TIME__);
     shell_print("Compiler  : %s\r\n",    __VERSION__);
     shell_print("Platform  : RP2040, dual ARM Cortex-M0+ (133 MHz max)\r\n");
     shell_print("SRAM      : 264 KB\r\n");
