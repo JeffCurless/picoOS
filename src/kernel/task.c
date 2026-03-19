@@ -1,5 +1,6 @@
 #include "task.h"
-#include "sched.h"   /* sched_add_thread */
+#include "sched.h"   /* sched_add_thread, sched_remove_thread */
+#include "mem.h"     /* kmalloc / kfree  */
 
 #include <stddef.h>
 #include <stdint.h>
@@ -22,21 +23,13 @@ _Static_assert(offsetof(tcb_t, saved_sp) == 16,
 /* -------------------------------------------------------------------------
  * Static pools
  *
- * All memory for TCBs, PCBs, and thread stacks comes from these arrays so
- * the linker can account for every byte at build time.  No dynamic
- * allocation is used in the task manager itself.
+ * TCBs and PCBs come from static arrays so the linker can account for their
+ * size at build time.  Thread stacks are allocated dynamically from the
+ * kernel heap (kmalloc) and freed when the thread exits (kfree).
  * ------------------------------------------------------------------------- */
 
 static tcb_t tcb_pool[MAX_THREADS];
 static pcb_t pcb_pool[MAX_PROCESSES];
-
-/*
- * One flat stack pool.  We use SERVICE_STACK_SIZE for every slot to keep the
- * code simple (the teaching point is the concept, not the byte-counting).
- * A future optimisation would use per-thread size hints to pack stacks.
- */
-static uint8_t stack_pool[MAX_THREADS][SERVICE_STACK_SIZE]
-    __attribute__((aligned(8)));
 
 /* in-use flags */
 static bool tcb_used[MAX_THREADS];
@@ -63,7 +56,6 @@ void task_init(void)
     memset(pcb_pool, 0, sizeof(pcb_pool));
     memset(tcb_used, 0, sizeof(tcb_used));
     memset(pcb_used, 0, sizeof(pcb_used));
-    memset(stack_pool, 0, sizeof(stack_pool));
 
     next_tid = 1;
     current_tcb = NULL;
@@ -126,11 +118,17 @@ tcb_t *task_create_thread(pcb_t      *proc,
     tcb_t *t = &tcb_pool[slot];
     tcb_used[slot] = true;
 
+    /* Allocate the stack from the kernel heap. */
+    t->stack_base = (uint8_t *)kmalloc(stack_size);
+    if (t->stack_base == NULL) {
+        tcb_used[slot] = false;
+        return NULL;           /* heap exhausted */
+    }
+
     /* Basic fields. */
     t->tid        = next_tid++;
     t->pid        = proc ? proc->pid : 0;
-    t->stack_base = stack_pool[slot];
-    t->stack_size = SERVICE_STACK_SIZE;  /* actual allocated size */
+    t->stack_size = stack_size;
     t->priority   = priority;
     t->affinity   = 0;                  /* run on any core */
     t->state      = THREAD_READY;
@@ -148,7 +146,7 @@ tcb_t *task_create_thread(pcb_t      *proc,
     /* Build the initial stack frame.
      *
      * We work from the top of the stack downward:
-     *   stack_top = stack_base + SERVICE_STACK_SIZE
+     *   stack_top = stack_base + stack_size
      *
      * First, lay down the 8-word hardware exception frame (auto-saved by
      * the CPU when it takes the first exception return):
@@ -159,7 +157,7 @@ tcb_t *task_create_thread(pcb_t      *proc,
      *
      * saved_sp points to the bottom of the software frame (the r4 word).
      */
-    uint32_t *stack_top = (uint32_t *)(t->stack_base + SERVICE_STACK_SIZE);
+    uint32_t *stack_top = (uint32_t *)(t->stack_base + stack_size);
 
     /* Index from stack_top going down (stack_top[-1] is the first word
      * pushed, i.e. the highest address in the frame). */
@@ -204,12 +202,14 @@ tcb_t *task_create_thread(pcb_t      *proc,
  * ------------------------------------------------------------------------- */
 static void thread_exit(void)
 {
-    /* Mark the current thread as a zombie so the scheduler skips it.
-     * In a more complete kernel this would notify the parent process. */
+    /* Mark the current thread as a zombie.  sched_next_thread() detects the
+     * ZOMBIE state on the next PendSV, calls task_free_thread() to reclaim
+     * the stack and TCB slot, and auto-frees the PCB if no threads remain. */
     if (current_tcb != NULL) {
         current_tcb->state = THREAD_ZOMBIE;
     }
-    /* Yield forever; the scheduler will never schedule a ZOMBIE thread. */
+    /* Yield once; the scheduler reaps this thread on the first PendSV.
+     * The loop is a safety net — in normal operation we never return here. */
     for (;;) {
         sched_yield();
     }
@@ -321,12 +321,40 @@ void task_free_thread(tcb_t *t)
     if (t == NULL) {
         return;
     }
+
+    /* Save the PID now — memset below will zero the TCB. */
+    uint32_t pid = t->pid;
+
+    /* Remove this thread from the owning process's thread array. */
+    pcb_t *proc = task_find_process(pid);
+    if (proc != NULL) {
+        for (uint32_t i = 0; i < proc->thread_count; i++) {
+            if (proc->threads[i] == t) {
+                /* Compact: shift remaining pointers down one slot. */
+                proc->thread_count--;
+                for (uint32_t j = i; j < proc->thread_count; j++) {
+                    proc->threads[j] = proc->threads[j + 1];
+                }
+                proc->threads[proc->thread_count] = NULL;
+                break;
+            }
+        }
+    }
+
+    /* Free the TCB slot. */
     for (int i = 0; i < MAX_THREADS; i++) {
         if (&tcb_pool[i] == t) {
+            uint8_t *stack = t->stack_base;
             tcb_used[i] = false;
             memset(t, 0, sizeof(tcb_t));
-            return;
+            kfree(stack);   /* return stack memory to the heap */
+            break;
         }
+    }
+
+    /* If the process now owns no threads, free the PCB slot. */
+    if (proc != NULL && proc->thread_count == 0) {
+        task_free_process(proc);
     }
 }
 
@@ -341,6 +369,48 @@ void task_free_process(pcb_t *p)
             memset(p, 0, sizeof(pcb_t));
             return;
         }
+    }
+}
+
+/* -------------------------------------------------------------------------
+ * task_kill_process
+ *
+ * Kill every thread in proc, then free the PCB.
+ *
+ * Strategy: snapshot the thread array first, because task_free_thread()
+ * compacts proc->threads[] as it goes and would corrupt a live iteration.
+ * For each thread:
+ *   - non-self: ZOMBIE → sched_remove_thread → task_free_thread (immediate)
+ *   - self:     ZOMBIE only; sched_next_thread reaps on the next yield, and
+ *               that reap will call task_free_thread which auto-frees the PCB
+ *               when thread_count reaches zero.
+ * ------------------------------------------------------------------------- */
+void task_kill_process(pcb_t *proc)
+{
+    if (proc == NULL) {
+        return;
+    }
+
+    /* Snapshot: task_free_thread compacts proc->threads[], so we must not
+     * iterate it directly. */
+    uint32_t count = proc->thread_count;
+    tcb_t *snapshot[MAX_THREADS];
+    for (uint32_t i = 0; i < count; i++) {
+        snapshot[i] = proc->threads[i];
+    }
+
+    for (uint32_t i = 0; i < count; i++) {
+        tcb_t *t = snapshot[i];
+        if (t == NULL) {
+            continue;
+        }
+        t->state = THREAD_ZOMBIE;
+        if (t != (tcb_t *)current_tcb) {
+            sched_remove_thread(t);
+            task_free_thread(t);   /* also frees PCB when last thread gone */
+        }
+        /* Self-kill: scheduler reaps on next yield via sched_next_thread;
+         * task_free_thread called there will free the PCB automatically. */
     }
 }
 

@@ -157,7 +157,7 @@ int main(void)
     pcb_t *shell_proc = task_create_process("shell", 2u);
     task_create_thread(shell_proc, "shell",
                        shell_thread_entry, NULL,
-                       2u, SERVICE_STACK_SIZE);
+                       2u, DEFAULT_STACK_SIZE);
 
     /* ------------------------------------------------------------------
      * 8. Print thread summary before starting the scheduler

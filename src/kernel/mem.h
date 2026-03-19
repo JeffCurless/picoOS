@@ -7,18 +7,19 @@
 /* -------------------------------------------------------------------------
  * Kernel heap size
  *
- * 64 KB is a reasonable fraction of the RP2040's 264 KB SRAM.  Adjust this
- * downward if thread stacks and static pools leave insufficient room.
+ * Thread stacks are now allocated dynamically from this heap (kmalloc in
+ * task_create_thread, kfree in task_free_thread).  The previous 64 KB static
+ * stack_pool has been removed; this heap absorbs that budget while also
+ * serving kernel object allocations.  Net SRAM saving: ~32 KB.
  * ------------------------------------------------------------------------- */
 /*
- * 32 KB kernel heap.
+ * 64 KB kernel heap.
  *
- * RP2040 has 264 KB of SRAM shared with thread stacks (64 KB for 16 threads
- * at SERVICE_STACK_SIZE), the filesystem RAM buffer (16 KB), SDK buffers,
- * and code.  32 KB is a reasonable heap for Phase 1-3 workloads.
- * Increase to 64 KB if the thread count or stack sizes are reduced.
+ * Sized to cover dynamic thread stacks (up to 16 × DEFAULT_STACK_SIZE = 32 KB
+ * at peak) plus kernel object allocations.  The former static stack_pool
+ * (64 KB BSS) has been removed, so this growth is a net SRAM win.
  */
-#define HEAP_SIZE (32u * 1024u)   /* 32 KB kernel heap */
+#define HEAP_SIZE (64u * 1024u)   /* 64 KB — absorbs dynamic thread stacks */
 
 /* -------------------------------------------------------------------------
  * Memory manager API
