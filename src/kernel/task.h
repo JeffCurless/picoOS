@@ -12,24 +12,27 @@
  * Thread and process pool sizes.
  *
  * Memory budget note (RP2040 has 264 KB SRAM total):
- *   stack_pool[MAX_THREADS][SERVICE_STACK_SIZE] = 16 * 4096 = 64 KB
- *   kernel heap (mem.c HEAP_SIZE)               =             32 KB
- *   filesystem RAM buffer (fs.c)                =             16 KB
- *   TCB/PCB pools + code + SDK overhead         ~             50 KB
+ *   thread stacks (dynamic, from kernel heap)    =        variable
+ *   kernel heap (mem.c HEAP_SIZE)                =             64 KB
+ *   filesystem RAM buffer (fs.c)                 =             16 KB
+ *   TCB/PCB pools + code + SDK overhead          ~             50 KB
  *   ---------------------------------------------------------------
- *   Total                                       ~            162 KB  (OK)
+ *   Total static footprint                       ~            130 KB  (OK)
  *
- * Increase MAX_THREADS carefully — each additional slot costs SERVICE_STACK_SIZE
- * bytes of static SRAM.  Reducing SERVICE_STACK_SIZE is the better trade-off
- * when more threads are needed.
+ * Thread stacks are allocated dynamically from the kernel heap via kmalloc
+ * and freed when the thread exits.  Pass the appropriate SIZE constant to
+ * task_create_thread() based on the thread's call-chain depth.
+ *
+ * Increase MAX_THREADS carefully — each additional live thread consumes at
+ * least DEFAULT_STACK_SIZE bytes of heap at runtime.
  */
 #define MAX_THREADS        16
 #define MAX_PROCESSES      8
 #define MAX_FDS            16
 #define MAX_OPEN_FILES     8
-#define DEFAULT_STACK_SIZE 2048
-#define SERVICE_STACK_SIZE 4096
-#define IDLE_STACK_SIZE    512
+#define DEFAULT_STACK_SIZE 2048    /* general-purpose threads       */
+#define DEEP_STACK_SIZE    3072    /* threads with deep call chains */
+#define IDLE_STACK_SIZE     512    /* idle thread                   */
 #define STACK_CANARY       0xDEADBEEFu
 
 /* -------------------------------------------------------------------------
@@ -97,8 +100,10 @@ typedef struct pcb {
 } pcb_t;
 
 /* -------------------------------------------------------------------------
- * Global: the TCB currently executing on this core
- * (each core has its own copy via the scheduler)
+ * Global: the TCB currently executing on Core 0.
+ * There is a single definition (in task.c).  Core 1 idles in __wfi() and
+ * does not maintain a separate current_tcb — a full SMP implementation
+ * would need per-core current pointers.
  * ------------------------------------------------------------------------- */
 
 extern tcb_t * volatile current_tcb;
@@ -123,6 +128,15 @@ pcb_t   *task_find_process(uint32_t pid);
 
 void     task_free_thread(tcb_t *t);
 void     task_free_process(pcb_t *p);
+
+/*
+ * task_kill_process — kill every thread owned by proc and free the PCB.
+ *                     Threads other than the caller are removed from the
+ *                     scheduler and freed immediately.  If the calling thread
+ *                     belongs to proc (self-kill), it is marked ZOMBIE and
+ *                     the scheduler reaps it on the next yield.
+ */
+void     task_kill_process(pcb_t *p);
 
 int      task_thread_count(void);
 int      task_process_count(void);

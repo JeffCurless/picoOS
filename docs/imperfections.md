@@ -22,27 +22,7 @@ optimizing for readability over production readiness.
 
 ---
 
-## 1. Fixed-size thread stacks
-
-**Current behavior**: Every thread slot is backed by a `SERVICE_STACK_SIZE`
-(4096-byte) entry in `stack_pool[MAX_THREADS][SERVICE_STACK_SIZE]` regardless
-of actual need. `task_thread_create()` accepts a `stack_size` hint parameter
-but ignores it — `t->stack_size` is immediately overwritten with
-`SERVICE_STACK_SIZE`.
-
-**File:line**: `src/kernel/task.c:34–38`, `src/kernel/task.c:133`
-
-**Better implementation**: Honor the hint passed to `task_thread_create()`;
-allocate stacks from a shared byte pool using `kmalloc`. Idle thread needs
-~512 B; shell needs ~2 KB; only truly deep-call threads need 4 KB.
-
-**SRAM impact**: ~16–32 KB (if 8 of 16 threads drop from 4 KB to 2 KB)
-
-**Difficulty**: Medium
-
----
-
-## 2. O(n) ready-queue scan in the SysTick handler
+## 1. O(n) ready-queue scan in the SysTick handler
 
 **Current behavior**: Every millisecond the SysTick ISR iterates all
 `MAX_THREADS` TCB slots to find sleeping threads whose alarm has expired
@@ -64,7 +44,7 @@ O(1) pick.
 
 ---
 
-## 3. Global kernel lock (interrupt disable)
+## 2. Global kernel lock (interrupt disable)
 
 **Current behavior**: All kernel operations — scheduling, heap allocation,
 filesystem, IPC — are serialized by disabling interrupts
@@ -85,7 +65,7 @@ filesystem activity happening on Core 0.
 
 ---
 
-## 4. Interrupt-disable spinlock (no LDREX/STREX)
+## 3. Interrupt-disable spinlock (no LDREX/STREX)
 
 **Current behavior**: `spinlock_acquire()` disables interrupts globally to
 prevent races, then busy-waits on a plain `volatile uint32_t` lock word. This
@@ -105,7 +85,7 @@ latency bounded regardless of lock contention.
 
 ---
 
-## 5. First-fit heap allocator
+## 4. First-fit heap allocator
 
 **Current behavior**: `kmalloc` walks the boundary-tag free list from the
 beginning and returns the first block large enough to satisfy the request.
@@ -126,26 +106,7 @@ without any per-object header overhead.
 
 ---
 
-## 6. Oversized kernel heap
-
-**Current behavior**: The heap is a static 32 KB array (`HEAP_SIZE`) in BSS.
-This reservation is unconditional — the memory is claimed at boot whether
-threads actually allocate it or not.
-
-**File:line**: `src/kernel/mem.h` (line defining `HEAP_SIZE`)
-
-**Better implementation**: Reduce the default to 16 KB, which is sufficient for
-typical picoOS workloads. Expose `HEAP_SIZE` as a CMake cache variable so
-students can tune it without editing headers. The recovered 16 KB is needed
-for the WiFi/BT stack (see SRAM summary below).
-
-**SRAM impact**: 16 KB saved
-
-**Difficulty**: Low
-
----
-
-## 7. Linear file lookup
+## 5. Linear file lookup
 
 **Current behavior**: `fs_open()` iterates all `FS_MAX_FILES` (32) directory
 entries sequentially, comparing names with `strncmp`. With 32 files this is
@@ -164,7 +125,7 @@ with binary search gives O(log n) with no extra RAM.
 
 ---
 
-## 8. Single-root filesystem (no directories)
+## 6. Single-root filesystem (no directories)
 
 **Current behavior**: All files share a single flat namespace. `fs_open("foo")`
 and `fs_open("bar/foo")` are treated identically — there is no path component
@@ -182,7 +143,7 @@ hierarchy (root + one directory layer), which covers most embedded use cases.
 
 ---
 
-## 9. Single concurrent writer
+## 7. Single concurrent writer
 
 **Current behavior**: Only one file can be open for writing at a time. A
 global `scratch_buf[FS_BLOCK_SIZE]` (4 KB) accumulates write data, and
@@ -202,7 +163,7 @@ dynamic allocation)
 
 ---
 
-## 10. No MPU / pointer validation in syscalls
+## 8. No MPU / pointer validation in syscalls
 
 **Current behavior**: `syscall_dispatch()` casts `uint32_t` arguments directly
 to pointers and dereferences them without any validation. There is no MPU
@@ -222,7 +183,7 @@ offending thread rather than crashing the kernel.
 
 ---
 
-## 11. Synchronous console I/O
+## 9. Synchronous console I/O
 
 **Current behavior**: The shell calls `stdio_getchar()` and `printf` directly,
 blocking the shell thread for the entire duration of each USB CDC transaction.
@@ -242,7 +203,7 @@ asynchronously, freeing the shell to process the next command immediately.
 
 ---
 
-## 12. Full-screen display flush (no dirty regions)
+## 10. Full-screen display flush (no dirty regions)
 
 **Current behavior**: Every `display_flush_fb()` call transmits the entire
 240×135 RGB332 framebuffer (32,400 bytes) over SPI regardless of how many
@@ -262,7 +223,7 @@ terminal use this cuts transfer time by 80–90%.
 
 ---
 
-## 13. Linear waiter scan in event flags
+## 11. Linear waiter scan in event flags
 
 **Current behavior**: When `event_post()` is called it scans a flat
 `event_waiter_pool[MAX_EVENT_WAITERS]` array (sized `MAX_THREADS`) to find
@@ -282,7 +243,7 @@ O(MAX_THREADS).
 
 ---
 
-## 14. Unimplemented device read/write (flash and GPIO via VFS)
+## 12. Unimplemented device read/write (flash and GPIO via VFS)
 
 **Current behavior**: `dev_flash_read`, `dev_flash_write`, `dev_gpio_read`, and
 `dev_gpio_write` are stubs that return `DEV_ERR_UNSUPPORTED`. TODO comments
@@ -308,16 +269,19 @@ calling `read`/`write` does nothing useful.
 
 ## SRAM Impact Summary
 
-The three high-value fixes below are prerequisites for adding CYW43 WiFi+BT
-(BLE only) without removing the display driver (~63 KB framebuffer + stack).
+The two changes below are prerequisites for adding CYW43 WiFi+BT (BLE only)
+without removing the display driver (~63 KB framebuffer + stack).
+Dynamic thread stack sizing (#1 of the original list) has already been
+implemented — stacks are now `kmalloc`'d at creation and `kfree`'d on exit,
+replacing the former 64 KB static `stack_pool` with a shared 64 KB heap.
+Net realized saving: ~32 KB.
 
 | Fix | SRAM Saved |
 |-----|-----------|
-| Reduce heap 32 KB → 16 KB (#6) | 16 KB |
-| Per-thread stack sizing — 8 threads @ 2 KB instead of 4 KB (#1) | ~16 KB |
 | Reduce `MAX_THREADS` 16 → 8 in `task.h` | 32 KB |
-| **Total recoverable** | **~48–64 KB** |
+| **Total recoverable** | **~32 KB** |
 
-The CYW43 driver + lwIP stack requires roughly 40–50 KB at runtime. After
-these three changes picoOS fits comfortably within the RP2040's 264 KB SRAM
-with WiFi+BT active.
+The CYW43 driver + lwIP stack requires roughly 40–50 KB at runtime. Combined
+with the 32 KB already recovered from dynamic stack allocation, picoOS fits
+within the RP2040's 264 KB SRAM with WiFi+BT active after reducing
+`MAX_THREADS`.

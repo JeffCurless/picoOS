@@ -113,15 +113,16 @@ static int cmd_threads(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    shell_println("TID  PID  PRI  STATE     CPU-ms  NAME");
-    shell_println("---  ---  ---  --------  ------  ---------------");
+    shell_println("TID  PID  PRI  STATE     CPU-ms  STACK   NAME");
+    shell_println("---  ---  ---  --------  ------  ------  ---------------");
     for (int i = 0; i < MAX_THREADS; i++) {
         tcb_t *t = task_get_thread_slot(i);
         if (t == NULL) { continue; }
-        shell_print("%-4u %-4u %-4u %-9s %-7llu %s\r\n",
+        shell_print("%-4u %-4u %-4u %-9s %-7llu %-7u %s\r\n",
                     t->tid, t->pid, (unsigned)t->priority,
                     state_name(t->state),
                     (unsigned long long)(t->cpu_time_us / 1000u),
+                    t->stack_size,
                     t->name);
     }
     return 0;
@@ -141,7 +142,30 @@ static int cmd_kill(int argc, char **argv)
         return -1;
     }
     t->state = THREAD_ZOMBIE;
+    if (t != (tcb_t *)current_tcb) {
+        sched_remove_thread(t);
+        task_free_thread(t);
+    }
+    /* else: self-kill — scheduler reaps on next yield */
     shell_print("kill: thread %u (%s) killed\r\n", tid, t->name);
+    return 0;
+}
+
+/* --- killproc ----------------------------------------------------------- */
+static int cmd_killproc(int argc, char **argv)
+{
+    if (argc < 2) {
+        shell_println("Usage: killproc <pid>");
+        return -1;
+    }
+    uint32_t pid = (uint32_t)strtol(argv[1], NULL, 10);
+    pcb_t *p = task_find_process(pid);
+    if (p == NULL) {
+        shell_print("killproc: process %u not found\r\n", pid);
+        return -1;
+    }
+    shell_print("killproc: killing process %u (%s)\r\n", pid, p->name);
+    task_kill_process(p);
     return 0;
 }
 
@@ -398,6 +422,7 @@ static const shell_cmd_t builtin_cmds[] = {
     { "ps",      "Show processes",                             cmd_ps      },
     { "threads", "Show all threads with state and CPU time",   cmd_threads },
     { "kill",    "kill <tid>  — kill a thread",                cmd_kill    },
+    { "killproc","killproc <pid>  — kill all threads in a process", cmd_killproc },
     { "mem",     "Show heap usage and stack canary status",    cmd_mem     },
     { "ls",      "List filesystem contents",                   cmd_ls      },
     { "cat",     "cat <file>  — print file contents",          cmd_cat     },

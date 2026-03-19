@@ -190,7 +190,7 @@ void ksemaphore_signal(ksemaphore_t *s)
  * and whether it wants all or any bits.  We stash this in a small parallel
  * array indexed by the waiter's position in the queue.
  *
- * Teaching simplification: since MAX_THREADS is small (32), a linear scan
+ * Teaching simplification: since MAX_THREADS is small (16), a linear scan
  * over all waiters is perfectly acceptable.
  */
 #define MAX_EVENT_WAITERS MAX_THREADS

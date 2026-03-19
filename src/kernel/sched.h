@@ -34,8 +34,11 @@ void sched_init(void);
 void sched_start(void);
 
 /*
- * sched_tick  — must be called from the SysTick ISR every 1 ms.
- *               Wakes sleeping threads and triggers preemption.
+ * sched_tick  — public wrapper around isr_systick().  Useful for driving
+ *               the scheduler tick from a hardware timer callback or in
+ *               test/simulation environments.  In normal operation the
+ *               SysTick ISR (isr_systick) fires automatically every 1 ms
+ *               and does NOT go through this wrapper.
  */
 void sched_tick(void);
 
@@ -76,5 +79,12 @@ tcb_t *sched_next_thread(void);
  *                    priority queue.  Also called by sched_unblock.
  */
 void sched_add_thread(tcb_t *t);
+
+/*
+ * sched_remove_thread — remove t from whatever priority queue it currently
+ *                       occupies.  Does not change t->state.  Safe to call
+ *                       from PendSV context (interrupts already disabled).
+ */
+void sched_remove_thread(tcb_t *t);
 
 #endif /* KERNEL_SCHED_H */

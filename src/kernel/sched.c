@@ -6,9 +6,9 @@
 #include <stddef.h>
 #include <string.h>
 
-/* RP2040 CMSIS-style register definitions are provided by the Pico SDK's
- * inclusion of CMSIS headers via pico/stdlib.h.  We use SCB, NVIC, etc.
- * directly as those symbols are always available after including the SDK. */
+/* RP2040 CMSIS-style register definitions (SCB, NVIC, SysTick_Config, etc.)
+ * are pulled in through arch.h, which centralises all Pico SDK / CMSIS
+ * includes for the kernel.  Never include pico/stdlib.h directly. */
 
 /* -------------------------------------------------------------------------
  * Configuration
@@ -33,8 +33,11 @@ static tcb_t *ready_queues[NUM_PRIORITIES];
 static uint32_t current_slice_remaining = TIME_SLICE_MS;
 
 /* -------------------------------------------------------------------------
- * trace_enabled — defined in main.c; declared here so the tick ISR can
- * optionally print thread switches (Phase 6 teaching feature).
+ * trace_enabled — defined in main.c; toggled by the shell 'trace' command.
+ * The SysTick ISR checks this flag but does not yet emit output (async
+ * printing from an ISR requires a ring-buffer TX path — not yet implemented).
+ * The flag is available for future use by any subsystem that wants to gate
+ * diagnostic output.
  * ------------------------------------------------------------------------- */
 extern volatile bool trace_enabled;
 
@@ -71,11 +74,12 @@ void sched_add_thread(tcb_t *t)
 }
 
 /* -------------------------------------------------------------------------
- * sched_remove_from_ready_queue
+ * sched_remove_thread
  *
- * Internal helper: remove t from whatever priority queue it is currently in.
+ * Remove t from whatever priority queue it is currently in.
+ * Does not change t->state.  Safe to call from PendSV context.
  * ------------------------------------------------------------------------- */
-static void sched_remove_from_ready_queue(tcb_t *t)
+void sched_remove_thread(tcb_t *t)
 {
     if (t == NULL) {
         return;
@@ -113,7 +117,7 @@ void sched_block(tcb_t *t)
         return;
     }
     t->state = THREAD_BLOCKED;
-    sched_remove_from_ready_queue(t);
+    sched_remove_thread(t);
 }
 
 /* -------------------------------------------------------------------------
@@ -141,7 +145,7 @@ void sched_sleep(uint32_t ms)
     current_tcb->state = THREAD_SLEEPING;
 
     /* Remove from the ready queue so it doesn't get scheduled while asleep. */
-    sched_remove_from_ready_queue((tcb_t *)current_tcb);
+    sched_remove_thread((tcb_t *)current_tcb);
 
     /* Yield so the scheduler picks the next runnable thread. */
     sched_yield();
@@ -188,6 +192,18 @@ tcb_t *sched_next_thread(void)
         current_tcb->state = THREAD_READY;
     }
 
+    /* Reap zombie: handles the natural-exit (thread_exit) path.
+     * The outgoing thread set itself ZOMBIE and yielded; the assembly has
+     * already saved its context, so freeing the stack here is safe.
+     * Interrupts are disabled by the PendSV entry in sched_asm.S. */
+    bool zombie_reaped = false;
+    if (current_tcb != NULL && current_tcb->state == THREAD_ZOMBIE) {
+        sched_remove_thread((tcb_t *)current_tcb);
+        task_free_thread((tcb_t *)current_tcb);   /* frees stack + TCB slot */
+        zombie_reaped = true;
+        /* Do not dereference current_tcb after this point — TCB is zeroed. */
+    }
+
     for (uint8_t prio = 0; prio < NUM_PRIORITIES; prio++) {
         if (ready_queues[prio] == NULL) {
             continue;
@@ -201,7 +217,8 @@ tcb_t *sched_next_thread(void)
          * might have been moved to SLEEPING or BLOCKED before sched_yield
          * was called).
          */
-        if (ready_queues[prio] == (tcb_t *)current_tcb &&
+        if (!zombie_reaped &&
+            ready_queues[prio] == (tcb_t *)current_tcb &&
             current_tcb != NULL &&
             current_tcb->state == THREAD_READY)
         {
@@ -225,8 +242,12 @@ tcb_t *sched_next_thread(void)
     }
 
     if (selected == NULL) {
-        /* No ready thread — return current_tcb so execution can continue.
-         * This should not happen if the idle thread is always READY. */
+        /* No ready thread.  If the outgoing thread was just reaped
+         * (zombie_reaped == true), current_tcb has been freed and returning
+         * it would dereference a zeroed TCB — a crash.  This path should
+         * never be reached because the idle thread is always READY at
+         * priority 7.  If it does occur, the system is in an unrecoverable
+         * state regardless. */
         return (tcb_t *)current_tcb;
     }
 

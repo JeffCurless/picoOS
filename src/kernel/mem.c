@@ -111,12 +111,25 @@ void kfree(void *ptr)
 
     blk->free = true;
 
-    /* Coalesce: walk forward and merge all consecutive free blocks. */
+    /* Coalesce forward: merge all consecutive free blocks that follow blk. */
     while (blk->next != NULL && blk->next->free) {
         struct heap_block *next = blk->next;
-        /* Absorb next into blk. */
         blk->size += (uint32_t)HEADER_SIZE + next->size;
         blk->next  = next->next;
+    }
+
+    /* Coalesce backward: if the predecessor block is free, merge blk into it.
+     * The list is singly-linked so we walk from heap_head to find the
+     * predecessor.  This is O(n) but only paid on free, not on alloc. */
+    struct heap_block *prev = NULL;
+    struct heap_block *cur  = heap_head;
+    while (cur != NULL && cur != blk) {
+        prev = cur;
+        cur  = cur->next;
+    }
+    if (prev != NULL && prev->free) {
+        prev->size += (uint32_t)HEADER_SIZE + blk->size;
+        prev->next  = blk->next;
     }
 }
 
