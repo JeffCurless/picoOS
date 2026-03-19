@@ -21,3 +21,6 @@ pico-sdk/
 
 # Log files from the console tool
 *.log
+
+# Cache
+.cache/

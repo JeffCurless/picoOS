@@ -40,6 +40,8 @@ TID  NAME       PRI  STATE    CPU(ms)
 | Dual-core asymmetric split (RP2040) | `src/main.c` |
 | Producer/consumer IPC demo | `src/apps/demo.c` |
 | Interactive USB shell | `src/shell/shell.c` |
+| ST7789 display driver (optional) | `src/drivers/display.c` |
+| RGB LED driver (optional) | `src/drivers/led.c` |
 
 ---
 
@@ -52,6 +54,7 @@ TID  NAME       PRI  STATE    CPU(ms)
 | **Flash** | 2 MB QSPI (execute-in-place via XIP) |
 | **Console** | USB CDC serial (appears as `/dev/ttyACM0` on Linux) |
 | **Board** | Raspberry Pi Pico or Pico W |
+| **Optional** | Pimoroni Pico Display Pack (ST7789 240×135, RGB LED, 4 buttons) |
 
 ---
 
@@ -72,9 +75,8 @@ export PICO_SDK_PATH="$HOME/pico-sdk"
 
 # 3. Build
 cd picoOS
-mkdir build && cd build
-cmake ..
-make -j$(nproc)
+cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk"
+make -j$(nproc) -C build
 
 # 4. Flash (hold BOOTSEL on Pico, then plug in USB)
 cp build/src/picoos.uf2 /media/$USER/RPI-RP2/
@@ -84,6 +86,37 @@ pip install pyserial
 python3 tools/console.py
 ```
 
+### Build options
+
+The display and LED drivers are **enabled by default** but can be turned off when running on a plain Pico without a Display Pack attached.
+
+| CMake flag | Default | Effect |
+|------------|---------|--------|
+| `PICOOS_DISPLAY_ENABLE` | `ON` | Compile the ST7789 driver; mount `/dev/display`; adds ~32 KB SRAM for the framebuffer |
+| `PICOOS_DISPLAY_SHELL` | `ON` | Register the `display` shell command (requires `PICOOS_DISPLAY_ENABLE`) |
+| `PICOOS_LED_ENABLE` | `ON` (when display is ON) | Compile the RGB LED driver; mount `/dev/led` |
+| `PICOOS_LED_SHELL` | `ON` | Register the `led` shell command (requires `PICOOS_LED_ENABLE`) |
+
+```bash
+# Plain Pico — no Display Pack hardware
+cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk" \
+      -DPICOOS_DISPLAY_ENABLE=OFF \
+      -DPICOOS_LED_ENABLE=OFF
+make -j$(nproc) -C build
+
+# Display Pack attached, but suppress the shell commands
+cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk" \
+      -DPICOOS_DISPLAY_SHELL=OFF \
+      -DPICOOS_LED_SHELL=OFF
+make -j$(nproc) -C build
+
+# Full build with Display Pack (default)
+cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk"
+make -j$(nproc) -C build
+```
+
+> Disabling `PICOOS_DISPLAY_ENABLE` automatically disables `PICOOS_LED_ENABLE` as well — both drivers target the same Pimoroni board.
+
 ---
 
 ## Shell commands
@@ -92,6 +125,7 @@ Once running, the USB shell accepts:
 
 | Command | Description |
 |---------|-------------|
+| `info` | Show system version and build info |
 | `help` | List all commands |
 | `ps` | Show processes |
 | `threads` | Show all threads with state, priority, CPU time |
@@ -106,6 +140,8 @@ Once running, the USB shell accepts:
 | `trace on\|off` | Enable/disable scheduler trace output |
 | `update` | Reboot into USB BOOTSEL mode for reflashing |
 | `reboot` | Hard reboot |
+| `display <subcmd>` | Drive the ST7789 display *(registered when `PICOOS_DISPLAY_SHELL=ON`)* |
+| `led <r> <g> <b>` | Set RGB LED color 0–255 per channel *(registered when `PICOOS_LED_SHELL=ON`)* |
 
 ---
 
@@ -117,7 +153,10 @@ picoOS/
 ├── pico_sdk_import.cmake   Pico SDK discovery (standard boilerplate)
 ├── design.md               Architecture design document
 ├── docs/
-│   └── setup.md            Environment setup, build, and flash guide
+│   ├── setup.md            Environment setup, build, and flash guide
+│   ├── application.md      How to write and register a new app
+│   ├── imperfections.md    Catalogue of deliberate teaching imperfections
+│   └── studentwork.md      Suggested student exercises
 ├── src/
 │   ├── main.c              Boot sequence, process/thread creation
 │   ├── kernel/
@@ -133,10 +172,14 @@ picoOS/
 │   │   └── fs.[ch]         Flash-native persistent filesystem (XIP reads, erase/program on write)
 │   ├── shell/
 │   │   └── shell.[ch]      USB CDC interactive shell
-│   └── apps/
-│       └── demo.[ch]       Producer/consumer/sensor demo threads + app table
+│   ├── apps/
+│   │   └── demo.[ch]       Producer/consumer/sensor demo threads + app table
+│   └── drivers/
+│       ├── display.[ch]    ST7789 240×135 driver — /dev/display (optional)
+│       └── led.[ch]        Pimoroni RGB LED driver — /dev/led (optional)
 └── tools/
-    └── console.py          Host-side terminal companion (pyserial)
+    ├── console.py          Host-side terminal companion (pyserial)
+    └── mem_report.py       SRAM usage report derived from the linker map
 ```
 
 ---
@@ -151,6 +194,17 @@ The RP2040 has two cores.  picoOS uses them asymmetrically to keep the design ea
 
 - **Core 0** — USB console, SysTick, scheduler, filesystem writes, shell
 - **Core 1** — user worker threads, compute tasks, background services
+
+### Optional hardware drivers
+
+Both drivers expose their hardware through the VFS like any other built-in device:
+
+| Device path | Driver | Hardware |
+|-------------|--------|----------|
+| `/dev/display` | `drivers/display.c` | ST7789 240×135 over SPI0; DC=GPIO 16, CS=GPIO 17, SCK=GPIO 18, MOSI=GPIO 19, BL=GPIO 20; buttons on GPIO 12–15 |
+| `/dev/led` | `drivers/led.c` | Active-low RGB LED; PWM on GPIO 6 (R), 7 (G), 8 (B) |
+
+Use `ioctl` on `/dev/display` with `IOCTL_DISP_*` commands (clear, flush, draw pixel/line/rect/text, set backlight, read buttons) and on `/dev/led` with `IOCTL_LED_SET_RGB` / `IOCTL_LED_OFF`.
 
 ### Deliberately imperfect
 
@@ -168,20 +222,34 @@ Several parts of v1 are intentionally suboptimal — these are teaching opportun
 
 ### Memory budget (264 KB SRAM)
 
+The `tools/mem_report.py` script derives live numbers from the linker map after every build:
+
+```bash
+python3 tools/mem_report.py          # full table
+python3 tools/mem_report.py --brief  # one-line summary
+```
+
+Typical breakdown with display and LED enabled:
+
 | Region | Size |
 |--------|------|
 | Thread stack pool (16 × 4 KB) | 64 KB |
 | Kernel heap | 32 KB |
-| FS superblock cache (`superblock_ram`) | ~1 KB |
-| FS write scratch buffer (`scratch_buf`) | 4 KB |
-| Kernel code, data, SDK overhead | ~50 KB |
-| **Available headroom** | **~113 KB** |
+| Display framebuffer (RGB332, 240×135) | ~32 KB |
+| FS write buffer + superblock cache | ~5 KB |
+| .data, TCB/PCB pools, VFS tables | ~9 KB |
+| SDK / other | ~11 KB |
+| **Available headroom** | ~111 KB |
+
+Without `PICOOS_DISPLAY_ENABLE`, the 32 KB framebuffer is reclaimed.
 
 ---
 
-## Host console tool
+## Host tools
 
-`tools/console.py` connects to the Pico over USB serial and provides:
+### `tools/console.py`
+
+Connects to the Pico over USB serial:
 
 - Auto-detection of the Pico by USB VID:PID (`2E8A:000A`)
 - Interactive shell in raw terminal mode (local echo disabled; Pico echoes instead)
@@ -192,6 +260,16 @@ Several parts of v1 are intentionally suboptimal — these are teaching opportun
 ```bash
 pip install pyserial
 python3 tools/console.py --help
+```
+
+### `tools/mem_report.py`
+
+Parses the linker map (`build/src/picoos.elf.map`) produced by every build and prints an SRAM usage breakdown by subsystem.
+
+```bash
+python3 tools/mem_report.py                        # default map path
+python3 tools/mem_report.py --map path/to/foo.map  # custom map
+python3 tools/mem_report.py --brief                # one-line summary
 ```
 
 ---
@@ -217,6 +295,7 @@ The project is designed to be modified.  Suggested starting points for students:
 
 1. **Improve the scheduler** — add priority inheritance to fix priority inversion in `mutex_lock`
 2. **Add stack overflow detection** — check the canary on every context switch in `sched_asm.S`, not just in `mem`
-3. **Multi-file write support** — the FS currently allows only one file open for writing at a time; add a per-file scratch buffer pool
+3. **Multi-file write support** — the FS currently allows only one file open for writing at a time; add a per-file buffer pool
 4. **Extend the shell** — add new commands by calling `shell_register_cmd()` from any module
 5. **Launch Core 1 workers** — replace the Core 1 idle loop in `src/main.c` with real thread dispatch
+6. **Drive the display** — write a status dashboard using `/dev/display` ioctls

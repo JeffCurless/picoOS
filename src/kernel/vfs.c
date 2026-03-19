@@ -46,6 +46,12 @@ void vfs_init(void)
     vfs_mount_dev("/dev/timer",   DEV_TIMER);
     vfs_mount_dev("/dev/flash",   DEV_FLASH);
     vfs_mount_dev("/dev/gpio",    DEV_GPIO);
+#ifdef PICOOS_DISPLAY_ENABLE
+    vfs_mount_dev("/dev/display", DEV_DISPLAY);
+#endif
+#ifdef PICOOS_LED_ENABLE
+    vfs_mount_dev("/dev/led", DEV_LED);
+#endif
 }
 
 /* -------------------------------------------------------------------------

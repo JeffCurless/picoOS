@@ -15,9 +15,11 @@
 #include <stdlib.h>   /* strtol */
 
 /* -------------------------------------------------------------------------
- * Version
+ * Version — defined by CMakeLists.txt via target_compile_definitions
  * ------------------------------------------------------------------------- */
-#define PICOOS_VERSION "1.0.0"
+#ifdef PICOOS_DISPLAY_ENABLE
+#include "../drivers/display.h"
+#endif
 
 /* -------------------------------------------------------------------------
  * trace_enabled — defined in main.c
@@ -373,12 +375,16 @@ static int cmd_info(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    shell_print("picoOS v%s\r\n", PICOOS_VERSION);
+    shell_print("\r\bpicoOS v%u.%u.%u\r\n\n",
+                PICOOS_VERSION_MAJOR, PICOOS_VERSION_MINOR, PICOOS_VERSION_EDIT);
     shell_print("Build     : %s %s\r\n", __DATE__, __TIME__);
     shell_print("Compiler  : %s\r\n",    __VERSION__);
     shell_print("Platform  : RP2040, dual ARM Cortex-M0+ (133 MHz max)\r\n");
     shell_print("SRAM      : 264 KB\r\n");
     shell_print("Flash     : 2 MB QSPI (XIP)\r\n");
+#ifdef PICOOS_DISPLAY_ENABLE
+    shell_print("Display   : %ux%u RGB332 ST7789\r\n", DISP_WIDTH, DISP_HEIGHT);
+#endif
     return 0;
 }
 
@@ -411,7 +417,6 @@ static const shell_cmd_t builtin_cmds[] = {
  * ========================================================================= */
 void shell_init(void)
 {
-    cmd_count = 0;
     for (int i = 0; i < BUILTIN_CMD_COUNT; i++) {
         shell_register_cmd(&builtin_cmds[i]);
     }

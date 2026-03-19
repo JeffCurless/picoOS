@@ -1,6 +1,12 @@
 #include "dev.h"
 #include "sched.h"   /* tick_count */
 #include "arch.h"
+#ifdef PICOOS_DISPLAY_ENABLE
+#include "../drivers/display.h"
+#endif
+#ifdef PICOOS_LED_ENABLE
+#include "../drivers/led.h"
+#endif
 
 #include <stdio.h>
 #include <stdint.h>
@@ -306,6 +312,28 @@ static device_t devices[DEV_COUNT] = {
         .ioctl = gpio_ioctl,
         .close = gpio_close,
     },
+#ifdef PICOOS_DISPLAY_ENABLE
+    [DEV_DISPLAY] = {
+        .id    = DEV_DISPLAY,
+        .name  = "display",
+        .open  = display_open,
+        .read  = display_read,
+        .write = display_write,
+        .ioctl = display_ioctl,
+        .close = display_close,
+    },
+#endif
+#ifdef PICOOS_LED_ENABLE
+    [DEV_LED] = {
+        .id    = DEV_LED,
+        .name  = "led",
+        .open  = led_open,
+        .read  = led_read,
+        .write = led_write,
+        .ioctl = led_ioctl,
+        .close = led_close,
+    },
+#endif
 };
 
 /* dev_init — initialise the device layer.
@@ -316,7 +344,12 @@ static device_t devices[DEV_COUNT] = {
  * (e.g. I2C, SPI peripherals) here without changing main.c. */
 void dev_init(void)
 {
-    /* Nothing to do at runtime — the table is statically initialised. */
+#ifdef PICOOS_DISPLAY_ENABLE
+    display_shell_register();   /* register 'display' shell command (no-op if PICOOS_DISPLAY_SHELL unset) */
+#endif
+#ifdef PICOOS_LED_ENABLE
+    led_shell_register();       /* register 'led' shell command (no-op if PICOOS_LED_SHELL unset) */
+#endif
 }
 
 device_t *dev_get(dev_id_t id)
