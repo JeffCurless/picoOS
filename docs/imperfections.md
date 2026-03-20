@@ -203,27 +203,7 @@ asynchronously, freeing the shell to process the next command immediately.
 
 ---
 
-## 10. Full-screen display flush (no dirty regions)
-
-**Current behavior**: Every `display_flush_fb()` call transmits the entire
-240×135 RGB332 framebuffer (32,400 bytes) over SPI regardless of how many
-pixels actually changed. A single character update causes a full-screen DMA
-transfer.
-
-**File:line**: `src/drivers/display.c:273–276`
-
-**Better implementation**: Track a dirty rectangle (min/max row and column
-updated since the last flush). Transmit only the bounding rows in a single
-SPI transaction using the display's partial-update window command. For typical
-terminal use this cuts transfer time by 80–90%.
-
-**SRAM impact**: None (8 bytes for the dirty rect; speed improvement)
-
-**Difficulty**: Low–Medium
-
----
-
-## 11. Linear waiter scan in event flags
+## 10. Linear waiter scan in event flags
 
 **Current behavior**: When `event_post()` is called it scans a flat
 `event_waiter_pool[MAX_EVENT_WAITERS]` array (sized `MAX_THREADS`) to find
@@ -243,7 +223,7 @@ O(MAX_THREADS).
 
 ---
 
-## 12. Unimplemented device read/write (flash and GPIO via VFS)
+## 11. Unimplemented device read/write (flash and GPIO via VFS)
 
 **Current behavior**: `dev_flash_read`, `dev_flash_write`, `dev_gpio_read`, and
 `dev_gpio_write` are stubs that return `DEV_ERR_UNSUPPORTED`. TODO comments

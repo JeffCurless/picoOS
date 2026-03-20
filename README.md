@@ -129,7 +129,8 @@ Once running, the USB shell accepts:
 | `help` | List all commands |
 | `ps` | Show processes |
 | `threads` | Show all threads with state, priority, CPU time |
-| `kill <tid>` | Terminate a thread |
+| `kill <tid>` | Terminate a thread; frees its stack and TCB slot; auto-frees the process when its last thread exits |
+| `killproc <pid>` | Terminate all threads in a process and free the PCB |
 | `mem` | Memory usage and heap stats |
 | `ls` | List filesystem files |
 | `cat <file>` | Print a file |
