@@ -23,10 +23,10 @@ PID  NAME             THREADS  ALIVE
 2    shell            1        yes
 
 pico> threads
-TID  NAME       PRI  STATE    CPU(ms)
----  ---------  ---  -------  -------
-1    idle        7   READY        142
-2    shell       2   RUNNING     1023
+TID  PID  PRI  STATE     CPU-ms  STACK   NAME             CANARY
+---  ---  ---  --------  ------  ------  ---------------  --------
+1    1    7    READY     142     2048    idle             OK
+2    2    2    RUNNING   1023    4096    shell            OK
 ```
 
 ---
@@ -149,7 +149,7 @@ Once running, the USB shell accepts:
 | `info` | Show system version and build info |
 | `help` | List all commands |
 | `ps` | Show processes |
-| `threads` | Show all threads with state, priority, CPU time |
+| `threads` | Show all threads with state, priority, CPU time, and stack canary status |
 | `kill <tid>` | Terminate a thread; frees its stack and TCB slot; auto-frees the process when its last thread exits |
 | `killproc <pid>` | Terminate all threads in a process and free the PCB |
 | `mem` | Memory usage and heap stats |
@@ -333,8 +333,7 @@ The codebase is structured around the six phases in [docs/design.md](docs/design
 The project is designed to be modified.  Suggested starting points for students:
 
 1. **Improve the scheduler** — add priority inheritance to fix priority inversion in `mutex_lock`
-2. **Add stack overflow detection** — check the canary on every context switch in `sched_asm.S`, not just in `mem`
-3. **Multi-file write support** — the FS currently allows only one file open for writing at a time; add a per-file buffer pool
-4. **Extend the shell** — add new commands by calling `shell_register_cmd()` from any module
-5. **Launch Core 1 workers** — replace the Core 1 idle loop in `src/main.c` with real thread dispatch
-6. **Drive the display** — write a status dashboard using `/dev/display` ioctls
+2. **Multi-file write support** — the FS currently allows only one file open for writing at a time; add a per-file buffer pool
+3. **Extend the shell** — add new commands by calling `shell_register_cmd()` from any module
+4. **Launch Core 1 workers** — replace the Core 1 idle loop in `src/main.c` with real thread dispatch
+5. **Drive the display** — write a status dashboard using `/dev/display` ioctls

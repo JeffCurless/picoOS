@@ -167,6 +167,41 @@ void sched_yield(void)
 }
 
 /* -------------------------------------------------------------------------
+ * stack_overflow_panic
+ *
+ * Called when the canary at the bottom of a thread's stack has been
+ * overwritten, indicating a stack overflow.
+ *
+ * We are inside the PendSV handler with interrupts disabled (cpsid i from
+ * step 1 of isr_pendsv).  Re-enable interrupts so the USB CDC ring-buffer
+ * can drain, print the panic message, pump the USB stack for ~0.5 s, then
+ * halt forever.  The user must reboot the device.
+ * ------------------------------------------------------------------------- */
+static void __attribute__((noreturn)) stack_overflow_panic(const tcb_t *t)
+{
+    __enable_irq();   /* allow USB IRQ to drain the TX ring-buffer */
+
+    printf("\r\n\r\n"
+           "!!! STACK OVERFLOW !!!\r\n"
+           "  Thread : TID %u \"%s\"\r\n"
+           "  Base   : 0x%08X\r\n"
+           "  Canary : 0x%08X  (expected 0x%08X)\r\n"
+           "System halted. Reboot required.\r\n\r\n",
+           (unsigned)t->tid, t->name,
+           (unsigned)(uintptr_t)t->stack_base,
+           *(const uint32_t *)t->stack_base,
+           STACK_CANARY);
+
+    /* Pump USB for ~0.5 s so the message reaches the host terminal. */
+    for (int i = 0; i < 50; i++) {
+        tud_task();
+        sleep_ms(10);
+    }
+
+    for (;;) { __wfi(); }
+}
+
+/* -------------------------------------------------------------------------
  * sched_next_thread
  *
  * Called from the PendSV handler (in sched_asm.S) with interrupts disabled.
@@ -183,6 +218,13 @@ void sched_yield(void)
  * ------------------------------------------------------------------------- */
 tcb_t *sched_next_thread(void)
 {
+    /* ---- Stack canary check for the outgoing thread ---- */
+    if (current_tcb != NULL && current_tcb->stack_base != NULL) {
+        if (*(const uint32_t *)current_tcb->stack_base != STACK_CANARY) {
+            stack_overflow_panic(current_tcb);   /* no return */
+        }
+    }
+
     tcb_t *selected = NULL;
 
     /* A preempted thread arrives here with state THREAD_RUNNING (the assembly

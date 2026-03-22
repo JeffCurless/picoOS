@@ -113,17 +113,20 @@ static int cmd_threads(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    shell_println("TID  PID  PRI  STATE     CPU-ms  STACK   NAME");
-    shell_println("---  ---  ---  --------  ------  ------  ---------------");
+    shell_println("TID  PID  PRI  STATE     CPU-ms  STACK   NAME            CANARY");
+    shell_println("---  ---  ---  --------  ------  ------  ---------------  --------");
     for (int i = 0; i < MAX_THREADS; i++) {
         tcb_t *t = task_get_thread_slot(i);
         if (t == NULL) { continue; }
-        shell_print("%-4u %-4u %-4u %-9s %-7llu %-7u %s\r\n",
+        uint32_t *canary_ptr = (uint32_t *)t->stack_base;
+        const char *stack_str = (*canary_ptr == STACK_CANARY) ? "OK" : "OVERFLOW";
+        shell_print("%-4u %-4u %-4u %-9s %-7llu %-7u %-16s %s\r\n",
                     t->tid, t->pid, (unsigned)t->priority,
                     state_name(t->state),
                     (unsigned long long)(t->cpu_time_us / 1000u),
                     t->stack_size,
-                    t->name);
+                    t->name,
+                    stack_str);
     }
     return 0;
 }
