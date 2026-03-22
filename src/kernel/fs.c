@@ -333,10 +333,17 @@ int fs_open(const char *name, int mode)
         return -1;
     }
 
+    /* When appending, start the write cursor at the current end of file so
+     * new data is placed after existing content rather than overwriting it. */
+    uint32_t initial_pos = 0u;
+    if (writing && (mode & VFS_O_APPEND)) {
+        initial_pos = superblock_ram.files[file_idx].size;
+    }
+
     open_fds[fd].used     = true;
     open_fds[fd].dirty    = false;
     open_fds[fd].file_idx = (uint32_t)file_idx;
-    open_fds[fd].pos      = 0u;
+    open_fds[fd].pos      = initial_pos;
     open_fds[fd].mode     = mode;
 
     return fd;

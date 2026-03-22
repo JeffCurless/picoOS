@@ -48,8 +48,9 @@
  *   └─────────┘  ← PSP before exception (= original thread SP)
  *
  * Struct offsets (must match tcb_t in task.h):
- *   saved_sp is at byte offset 16 within tcb_t.
- *   See _Static_assert in task.c.
+ *   saved_sp   is at byte offset 16 within tcb_t.
+ *   exc_return is at byte offset 20 within tcb_t.
+ *   See _Static_asserts in task.c.
  */
 
 /*
@@ -101,10 +102,16 @@ isr_pendsv:
     /* ------------------------------------------------------------------ */
     /* Step 3 — Push r4-r11 below the hardware frame.                     */
     /*                                                                    */
-    /* M0+ only has STMIA/LDMIA for the low registers (r0-r7), so we     */
-    /* must copy r8-r11 into r4-r7 first, save them, then restore r4-r7. */
+    /* M33/M4/M7 support STMDB directly for high registers (r8-r11),     */
+    /* replacing 9 instructions with one.  M0+ lacks this, so we use a   */
+    /* staging-register workaround with MOV + STMIA.                      */
     /* ------------------------------------------------------------------ */
 
+#if defined(__ARM_ARCH_8M_MAIN__) || defined(__ARM_ARCH_7M__)
+    /* Cortex-M33/M4/M7: STMDB handles high registers directly. */
+    stmdb   r0!, {r4-r11}       /* r0 = new saved_sp (decremented by 32) */
+#else
+    /* Cortex-M0+: no STMDB for r8-r11; use staging-register workaround. */
     /* Make room for 8 words (32 bytes) on the PSP stack. */
     subs    r0, r0, #32
 
@@ -123,28 +130,38 @@ isr_pendsv:
     /* r0 now points past all 8 saved words.  Back up to the start so  */
     /* r0 = saved_sp = address of the r4 word (bottom of our frame).   */
     subs    r0, r0, #32
+#endif
 
     /* ------------------------------------------------------------------ */
-    /* Step 4 — Store the new PSP into current_tcb->saved_sp.            */
+    /* Step 4 — Store the new PSP into current_tcb->saved_sp, and save   */
+    /*          LR (the EXC_RETURN value) into current_tcb->exc_return.  */
     /*                                                                    */
-    /* tcb_t layout: tid(4) pid(4) stack_base(4) stack_size(4) saved_sp  */
-    /* byte offset:   0      4      8             12            16        */
+    /* tcb_t layout:                                                      */
+    /*   tid(4) pid(4) stack_base(4) stack_size(4) saved_sp  exc_return  */
+    /*   0      4      8             12            16         20          */
+    /*                                                                    */
+    /* On Cortex-M33 (RP2350) the FPU may be active.  If so, the CPU     */
+    /* saves an extended 26-word frame and sets LR = 0xFFFFFFED.  Saving */
+    /* LR here lets PendSV restore the correct frame size per thread.    */
     /* ------------------------------------------------------------------ */
     ldr     r1, =current_tcb        /* r1 = &current_tcb (the global ptr) */
     ldr     r1, [r1]                /* r1 = current_tcb (the TCB pointer)  */
-    str     r0, [r1, #16]           /* current_tcb->saved_sp = r0          */
+    str     r0, [r1, #16]           /* current_tcb->saved_sp   = r0        */
+    /* STR cannot encode lr (r14) in the Thumb narrow form used by M0+.   */
+    /* Copy LR to r0 (low register) then store; r0 is free after the str. */
+    mov     r0, lr
+    str     r0, [r1, #20]           /* current_tcb->exc_return = LR        */
 
     /* ------------------------------------------------------------------ */
     /* Step 5 — Call sched_next_thread() to get the next TCB.            */
     /*                                                                    */
-    /* We push LR (the EXC_RETURN value) so it survives the BL.          */
-    /* Note: on M0+ we must use the MSP for ISR work (it was switched    */
-    /* automatically when PendSV fired), so this push/pop uses MSP.      */
+    /* We push LR (the EXC_RETURN value) so it survives the BL, then    */
+    /* pop to balance the stack.  The actual EXC_RETURN to use on return */
+    /* is loaded from the incoming thread's TCB in step 7.               */
     /* ------------------------------------------------------------------ */
     push    {lr}
     bl      sched_next_thread       /* r0 = next TCB pointer              */
-    pop     {r1}                    /* r1 = saved EXC_RETURN              */
-    mov     lr, r1
+    pop     {r1}                    /* balance stack (value discarded)    */
 
     /* ------------------------------------------------------------------ */
     /* Step 6 — Update current_tcb to point to the new thread.           */
@@ -153,9 +170,21 @@ isr_pendsv:
     str     r0, [r1]                /* current_tcb = next TCB             */
 
     /* ------------------------------------------------------------------ */
-    /* Step 7 — Load the new thread's saved SP.                          */
+    /* Step 7 — Load the new thread's EXC_RETURN and saved SP.           */
+    /*                                                                    */
+    /* Load exc_return first (while r0 = next_tcb), then overwrite r0    */
+    /* with saved_sp for the register-restore step.                       */
     /* ------------------------------------------------------------------ */
+#if defined(__ARM_ARCH_8M_MAIN__) || defined(__ARM_ARCH_7M__)
+    ldr     lr, [r0, #20]           /* LR = next_tcb->exc_return          */
     ldr     r0, [r0, #16]           /* r0 = next_tcb->saved_sp            */
+#else
+    /* M0+ has no FPU; exc_return is always 0xFFFFFFFD.  Restore LR the  */
+    /* old way so bx lr at step 11 still works.                           */
+    ldr     r1, [r0, #20]           /* r1 = next_tcb->exc_return (=0xFFFFFFFD) */
+    mov     lr, r1                  /* LR  = exc_return                   */
+    ldr     r0, [r0, #16]           /* r0  = next_tcb->saved_sp           */
+#endif
 
     /* ------------------------------------------------------------------ */
     /* Step 8 — Restore r4-r11 from the new thread's stack.              */
@@ -175,6 +204,11 @@ isr_pendsv:
     /* staging area.  We must restore r4-r7 last to avoid clobbering.   */
     /* ------------------------------------------------------------------ */
 
+#if defined(__ARM_ARCH_8M_MAIN__) || defined(__ARM_ARCH_7M__)
+    /* Cortex-M33/M4/M7: LDMIA handles high registers directly. */
+    ldmia   r0!, {r4-r11}       /* r0 = saved_sp + 32 = hw frame base   */
+#else
+    /* Cortex-M0+: staging-register workaround. */
     /* Load the r8-r11 values (at offset +16) into r4-r7 as staging. */
     adds    r0, r0, #16             /* r0 = &saved_r8                    */
     ldmia   r0!, {r4-r7}            /* r4=r8val,r5=r9val,r6=r10val,r7=r11val */
@@ -192,6 +226,7 @@ isr_pendsv:
 
     /* Advance r0 to the hardware exception frame base (saved_sp + 32). */
     adds    r0, r0, #16
+#endif
 
     /* ------------------------------------------------------------------ */
     /* Step 9 — Update PSP to the new thread's stack pointer.            */
@@ -206,15 +241,13 @@ isr_pendsv:
     cpsie   i
 
     /* ------------------------------------------------------------------ */
-    /* Step 11 — Exception return.                                        */
+    /* Step 11 — Exception return using the incoming thread's EXC_RETURN. */
     /*                                                                    */
-    /* EXC_RETURN = 0xFFFFFFFD means:                                     */
-    /*   - Return to Thread mode                                          */
-    /*   - Use PSP for the frame                                          */
-    /*   - Restore floating-point context: no (M0+ has none)             */
-    /* The CPU pops {r0-r3, r12, lr, pc, xpsr} from the PSP stack.       */
+    /* LR was loaded from next_tcb->exc_return in step 7.                */
+    /*   0xFFFFFFFD — basic frame (8 words), thread mode, PSP            */
+    /*   0xFFFFFFED — extended frame (26 words, includes FP regs), M33   */
+    /* The CPU pops the appropriate frame from the PSP stack.             */
     /* ------------------------------------------------------------------ */
-    ldr     r0, =0xFFFFFFFD
-    bx      r0
+    bx      lr
 
 .size isr_pendsv, . - isr_pendsv

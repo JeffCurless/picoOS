@@ -392,8 +392,8 @@ void sched_start(void)
     __isb();
 
     /* Configure SysTick for a 1 ms period.
-     * The Pico SDK clock is 125 MHz by default; 125000 ticks = 1 ms. */
-    SysTick_Config(125000u);   /* uses CPU clock, enables SysTick IRQ */
+     * Use clock_get_hz() so this is correct regardless of board or clock speed. */
+    SysTick_Config(clock_get_hz(clk_sys) / 1000u);   /* 1 ms tick, any clock speed */
 
     /* Enable global interrupts. */
     __enable_irq();

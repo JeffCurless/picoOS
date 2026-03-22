@@ -19,8 +19,16 @@ __pycache__/
 # Pico SDK (fetched separately — not part of this repo)
 pico-sdk/
 
+# Build areas
+build_pico/
+build_pico2/
+build_picow/
+build_pico2w/
+kits/
+
 # Log files from the console tool
 *.log
 
 # Cache
 .cache/
+

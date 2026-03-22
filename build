@@ -1,0 +1,9 @@
+#!/usr/bin/bash
+
+mkdir -p kits
+for board in pico picow pico2 pico2w ; do 
+    echo "Building board_$board..."
+    cmake -B build_$board -DPICO_SDK_PATH="$HOME/workspace/pico-sdk" -DPICO_BOARD=$board
+    make -j$NPROC -C build_$board
+    cp -f build_$board/src/*.uf2 kits/
+done

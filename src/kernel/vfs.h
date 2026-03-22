@@ -17,6 +17,7 @@
 #define VFS_O_RDWR    0x03
 #define VFS_O_CREAT   0x04
 #define VFS_O_TRUNC   0x08
+#define VFS_O_APPEND  0x10  /* start write position at end of file */
 
 /* -------------------------------------------------------------------------
  * File types

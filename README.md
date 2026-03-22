@@ -1,27 +1,32 @@
 # picoOS
 
-An educational operating system for the **Raspberry Pi Pico (RP2040)**.  picoOS is a small, readable teaching kernel — not a scaled-down desktop OS.  Every component is deliberately simple so students can read the code, understand how it works, and then improve it.
+An educational operating system for the **Raspberry Pi Pico family (RP2040 / RP2350)**.  picoOS is a small, readable teaching kernel — not a scaled-down desktop OS.  Every component is deliberately simple so students can read the code, understand how it works, and then improve it.
 
 ```
-=== picoOS ===
-RP2040 dual-core educational OS
-Build: Mar  9 2026 14:23:01
+=======================================================
+picoOS  v0.1.4
+
+  Platform : RP2040, dual ARM Cortex-M0+ (133 MHz max)
+  Options  : none
+=======================================================
+
+Threads created:
+  TID 1  PID 1  pri 7  idle
+  TID 2  PID 2  pri 2  shell
+
+Starting scheduler...
 
 pico> ps
 PID  NAME             THREADS  ALIVE
 ---  ---------------  -------  -----
 1    kernel           1        yes
 2    shell            1        yes
-3    demos            3        yes
 
 pico> threads
 TID  NAME       PRI  STATE    CPU(ms)
 ---  ---------  ---  -------  -------
 1    idle        7   READY        142
 2    shell       2   RUNNING     1023
-3    producer    4   SLEEPING      87
-4    consumer    4   BLOCKED       34
-5    sensor      5   SLEEPING      12
 ```
 
 ---
@@ -31,15 +36,16 @@ TID  NAME       PRI  STATE    CPU(ms)
 | OS concept | Where to look |
 |-----------|--------------|
 | Preemptive scheduling | `src/kernel/sched.c`, `src/kernel/sched_asm.S` |
-| Context switching (ARM Cortex-M0+) | `src/kernel/sched_asm.S` |
+| Context switching (Cortex-M0+ and M33) | `src/kernel/sched_asm.S` |
 | Thread and process abstractions | `src/kernel/task.h`, `src/kernel/task.c` |
 | Mutex, semaphore, event flags, message queues | `src/kernel/sync.c` |
 | First-fit heap allocator | `src/kernel/mem.c` |
 | Flash-backed filesystem | `src/kernel/fs.c` |
 | Device abstraction (VFS) | `src/kernel/vfs.c`, `src/kernel/dev.c` |
-| Dual-core asymmetric split (RP2040) | `src/main.c` |
+| Dual-core asymmetric split (RP2040 / RP2350) | `src/main.c` |
 | Producer/consumer IPC demo | `src/apps/demo.c` |
 | Interactive USB shell | `src/shell/shell.c` |
+| WiFi (pico_w / pico2_w only) | `src/kernel/wifi.c` |
 | ST7789 display driver (optional) | `src/drivers/display.c` |
 | RGB LED driver (optional) | `src/drivers/led.c` |
 
@@ -49,11 +55,11 @@ TID  NAME       PRI  STATE    CPU(ms)
 
 | | |
 |-|-|
-| **MCU** | RP2040 — dual Cortex-M0+ @ up to 133 MHz |
-| **RAM** | 264 KB SRAM |
-| **Flash** | 2 MB QSPI (execute-in-place via XIP) |
+| **MCU** | RP2040 — dual Cortex-M0+ @ up to 133 MHz, or RP2350 — dual Cortex-M33 @ up to 150 MHz |
+| **RAM** | 264 KB SRAM (RP2040) / 520 KB SRAM (RP2350) |
+| **Flash** | 2 MB QSPI (RP2040) / 4 MB QSPI (RP2350), execute-in-place via XIP |
 | **Console** | USB CDC serial (appears as `/dev/ttyACM0` on Linux) |
-| **Board** | Raspberry Pi Pico or Pico W |
+| **Supported boards** | `pico`, `pico2`, `picow`, `pico2w` |
 | **Optional** | Pimoroni Pico Display Pack (ST7789 240×135, RGB LED, 4 buttons) |
 
 ---
@@ -73,18 +79,31 @@ git clone https://github.com/raspberrypi/pico-sdk.git ~/pico-sdk
 cd ~/pico-sdk && git submodule update --init --recursive
 export PICO_SDK_PATH="$HOME/pico-sdk"
 
-# 3. Build
+# 3. Build (choose your board)
 cd picoOS
-cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk"
+cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico
 make -j$(nproc) -C build
 
 # 4. Flash (hold BOOTSEL on Pico, then plug in USB)
-cp build/src/picoos.uf2 /media/$USER/RPI-RP2/
+cp build/src/picoos-v0.1.4.uf2 /media/$USER/RPI-RP2/
 
 # 5. Open the console
 pip install pyserial
 python3 tools/console.py
 ```
+
+### Board selection
+
+Pass `-DPICO_BOARD=<name>` to CMake.  picoOS accepts the underscore-free aliases and maps them to the SDK-canonical names internally:
+
+| `-DPICO_BOARD=` | Board | Chip | WiFi | Output files |
+|----------------|-------|------|------|--------------|
+| `pico` | Raspberry Pi Pico | RP2040 | No | `picoos-v0.1.4.*` |
+| `pico2` | Raspberry Pi Pico 2 | RP2350 | No | `pico2os-v0.1.4.*` |
+| `picow` | Raspberry Pi Pico W | RP2040 | Yes | `picowos-v0.1.4.*` |
+| `pico2w` | Raspberry Pi Pico 2 W | RP2350 | Yes | `pico2wos-v0.1.4.*` |
+
+The output files (`.uf2`, `.bin`, `.elf`, `.elf.map`, `.dis`) are named after the board and include the version number, so builds for different boards can share the same output directory without conflict.
 
 ### Build options
 
@@ -94,28 +113,30 @@ The display and LED drivers are **enabled by default** but can be turned off whe
 |------------|---------|--------|
 | `PICOOS_DISPLAY_ENABLE` | `ON` | Compile the ST7789 driver; mount `/dev/display`; adds ~32 KB SRAM for the framebuffer |
 | `PICOOS_DISPLAY_SHELL` | `ON` | Register the `display` shell command (requires `PICOOS_DISPLAY_ENABLE`) |
-| `PICOOS_LED_ENABLE` | `ON` (when display is ON) | Compile the RGB LED driver; mount `/dev/led` |
+| `PICOOS_LED_ENABLE` | `ON` | Compile the RGB LED driver; mount `/dev/led` |
 | `PICOOS_LED_SHELL` | `ON` | Register the `led` shell command (requires `PICOOS_LED_ENABLE`) |
+
+Dependency rules enforced by CMake:
+- Setting `PICOOS_DISPLAY_ENABLE=OFF` cascades OFF to all sub-features — they all share the same hardware.
+- Setting any sub-feature ON automatically enables `PICOOS_DISPLAY_ENABLE`.
+- `PICOOS_LED_SHELL=ON` forces `PICOOS_LED_ENABLE=ON`.
 
 ```bash
 # Plain Pico — no Display Pack hardware
-cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk" \
-      -DPICOOS_DISPLAY_ENABLE=OFF \
-      -DPICOOS_LED_ENABLE=OFF
+cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico \
+      -DPICOOS_DISPLAY_ENABLE=OFF
 make -j$(nproc) -C build
 
 # Display Pack attached, but suppress the shell commands
-cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk" \
+cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico \
       -DPICOOS_DISPLAY_SHELL=OFF \
       -DPICOOS_LED_SHELL=OFF
 make -j$(nproc) -C build
 
 # Full build with Display Pack (default)
-cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk"
+cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico
 make -j$(nproc) -C build
 ```
-
-> Disabling `PICOOS_DISPLAY_ENABLE` automatically disables `PICOOS_LED_ENABLE` as well — both drivers target the same Pimoroni board.
 
 ---
 
@@ -143,6 +164,7 @@ Once running, the USB shell accepts:
 | `reboot` | Hard reboot |
 | `display <subcmd>` | Drive the ST7789 display *(registered when `PICOOS_DISPLAY_SHELL=ON`)* |
 | `led <r> <g> <b>` | Set RGB LED color 0–255 per channel *(registered when `PICOOS_LED_SHELL=ON`)* |
+| `wifi [status\|scan\|connect\|disconnect]` | WiFi management *(registered when built for pico_w / pico2_w)* |
 
 ---
 
@@ -150,27 +172,30 @@ Once running, the USB shell accepts:
 
 ```
 picoOS/
-├── CMakeLists.txt          Top-level CMake build
+├── CMakeLists.txt          Top-level CMake build (board alias mapping lives here)
 ├── pico_sdk_import.cmake   Pico SDK discovery (standard boilerplate)
-├── design.md               Architecture design document
 ├── docs/
+│   ├── design.md           Architecture design document
 │   ├── setup.md            Environment setup, build, and flash guide
 │   ├── application.md      How to write and register a new app
+│   ├── picoOS_API.md       Developer API reference
 │   ├── imperfections.md    Catalogue of deliberate teaching imperfections
 │   └── studentwork.md      Suggested student exercises
 ├── src/
+│   ├── CMakeLists.txt      Source-level build: feature flags, sources, output naming
 │   ├── main.c              Boot sequence, process/thread creation
 │   ├── kernel/
 │   │   ├── arch.h          SDK/CMSIS includes (ARM) + host stubs (LSP)
 │   │   ├── task.[ch]       TCB / PCB pools, thread stack initialisation
 │   │   ├── sched.[ch]      Preemptive priority round-robin scheduler
-│   │   ├── sched_asm.S     PendSV context-switch handler (Cortex-M0+ asm)
-│   │   ├── mem.[ch]        First-fit boundary-tag heap allocator
+│   │   ├── sched_asm.S     PendSV context-switch handler (M0+ and M33 asm)
+│   │   ├── mem.[ch]        First-fit boundary-tag heap allocator (64 KB)
 │   │   ├── sync.[ch]       Spinlock, mutex, semaphore, event flags, mqueue
 │   │   ├── syscall.[ch]    Syscall dispatch table
 │   │   ├── dev.[ch]        Device abstraction layer
 │   │   ├── vfs.[ch]        VFS routing (device files vs. filesystem)
-│   │   └── fs.[ch]         Flash-native persistent filesystem (XIP reads, erase/program on write)
+│   │   ├── fs.[ch]         Flash-native persistent filesystem
+│   │   └── wifi.[ch]       CYW43 WiFi module — scan, connect, poll thread (pico_w/pico2_w)
 │   ├── shell/
 │   │   └── shell.[ch]      USB CDC interactive shell
 │   ├── apps/
@@ -187,14 +212,18 @@ picoOS/
 
 ## Architecture overview
 
-See **[design.md](design.md)** for the full design rationale.  The key points:
+See **[docs/design.md](docs/design.md)** for the full design rationale.  The key points:
 
 ### Dual-core split
 
-The RP2040 has two cores.  picoOS uses them asymmetrically to keep the design easy to follow:
+Both RP2040 and RP2350 have two cores.  picoOS uses them asymmetrically to keep the design easy to follow:
 
 - **Core 0** — USB console, SysTick, scheduler, filesystem writes, shell
-- **Core 1** — user worker threads, compute tasks, background services
+- **Core 1** — registers as a multicore lockout victim (required for safe flash writes), then idles in `__wfi()`.  User worker threads, compute tasks, and background services can be pinned here.
+
+### Cortex-M33 FPU support (RP2350)
+
+On RP2350 the Cortex-M33 has a hardware FPU.  When a thread uses floating-point instructions the CPU saves an extended 26-word exception frame instead of the standard 8-word frame, and sets `LR=0xFFFFFFED`.  picoOS stores the actual `EXC_RETURN` value per-thread in the TCB (`tcb_t.exc_return`) and restores it on every context switch so the correct frame size is always used.  This also fixes USB CDC input reliability on the pico2_w when WiFi is enabled.
 
 ### Optional hardware drivers
 
@@ -206,6 +235,10 @@ Both drivers expose their hardware through the VFS like any other built-in devic
 | `/dev/led` | `drivers/led.c` | Active-low RGB LED; PWM on GPIO 6 (R), 7 (G), 8 (B) |
 
 Use `ioctl` on `/dev/display` with `IOCTL_DISP_*` commands (clear, flush, draw pixel/line/rect/text, set backlight, read buttons) and on `/dev/led` with `IOCTL_LED_SET_RGB` / `IOCTL_LED_OFF`.
+
+### WiFi module (pico_w / pico2_w)
+
+When built for a CYW43-equipped board (`PICO_BOARD=picow` or `pico2w`), `kernel/wifi.c` is compiled in.  `wifi_init()` — called from `main.c` — initialises the CYW43 radio, enables STA mode, spawns a low-priority `wifi-poll` thread (priority 6) in the kernel process, and registers the `wifi` shell command.  Scan results and connection state are managed internally; the poll thread calls `cyw43_arch_poll()` every 10 ms.
 
 ### Deliberately imperfect
 
@@ -221,28 +254,33 @@ Several parts of v1 are intentionally suboptimal — these are teaching opportun
 | Synchronous console I/O | Easy to trace | Lock-free ring buffer |
 | Single-root filesystem | Simpler directory model | Hierarchical namespace |
 
-### Memory budget (264 KB SRAM)
+### Memory budget
 
 The `tools/mem_report.py` script derives live numbers from the linker map after every build:
 
 ```bash
-python3 tools/mem_report.py          # full table
-python3 tools/mem_report.py --brief  # one-line summary
+# Pass the board-named map file as a positional argument
+python3 tools/mem_report.py build/src/picoos-v0.1.4.elf.map
+
+# Or use the --map option
+python3 tools/mem_report.py --map build/src/pico2wos-v0.1.4.elf.map
+
+# One-line summary
+python3 tools/mem_report.py build/src/picoos-v0.1.4.elf.map --brief
 ```
 
-Typical breakdown with display and LED enabled:
+RP2040 typical breakdown with display and LED enabled:
 
 | Region | Size |
 |--------|------|
-| Thread stack pool (16 × 4 KB) | 64 KB |
-| Kernel heap | 32 KB |
+| Kernel heap (thread stacks + objects) | 64 KB |
 | Display framebuffer (RGB332, 240×135) | ~32 KB |
 | FS write buffer + superblock cache | ~5 KB |
 | .data, TCB/PCB pools, VFS tables | ~9 KB |
 | SDK / other | ~11 KB |
-| **Available headroom** | ~111 KB |
+| **Available headroom** | ~143 KB |
 
-Without `PICOOS_DISPLAY_ENABLE`, the 32 KB framebuffer is reclaimed.
+Without `PICOOS_DISPLAY_ENABLE`, the 32 KB framebuffer is reclaimed.  RP2350 boards have 520 KB total SRAM so headroom is substantially larger.
 
 ---
 
@@ -265,19 +303,19 @@ python3 tools/console.py --help
 
 ### `tools/mem_report.py`
 
-Parses the linker map (`build/src/picoos.elf.map`) produced by every build and prints an SRAM usage breakdown by subsystem.
+Parses the linker map produced by every build and prints an SRAM usage breakdown by subsystem.  The map file is named after the board and version (e.g. `build/src/picoos-v0.1.4.elf.map`).
 
 ```bash
-python3 tools/mem_report.py                        # default map path
-python3 tools/mem_report.py --map path/to/foo.map  # custom map
-python3 tools/mem_report.py --brief                # one-line summary
+python3 tools/mem_report.py build/src/picoos-v0.1.4.elf.map   # positional path
+python3 tools/mem_report.py --map build/src/picoos-v0.1.4.elf.map  # named option
+python3 tools/mem_report.py --brief                             # one-line summary (uses default path)
 ```
 
 ---
 
 ## Implementation phases
 
-The codebase is structured around the six phases in [design.md](design.md):
+The codebase is structured around the six phases in [docs/design.md](docs/design.md):
 
 | Phase | Status | Description |
 |-------|--------|-------------|

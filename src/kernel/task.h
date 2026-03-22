@@ -57,8 +57,16 @@ typedef enum {
  *   offset  8 : stack_base (4 bytes — pointer)
  *   offset 12 : stack_size (4 bytes)
  *   offset 16 : saved_sp   (4 bytes — pointer)   <-- used by PendSV handler
+ *   offset 20 : exc_return (4 bytes)              <-- EXC_RETURN for PendSV
  *
- * Do NOT reorder these first five fields without updating sched_asm.S.
+ * exc_return tracks the ARM EXC_RETURN value for this thread.  On Cortex-M33
+ * (RP2350) the FPU is present; if a thread uses FP instructions the hardware
+ * saves an extended exception frame (26 words, LR=0xFFFFFFED) instead of the
+ * basic frame (8 words, LR=0xFFFFFFFD).  Storing the correct EXC_RETURN per
+ * thread lets PendSV return with the right value, keeping PSP aligned.
+ * On Cortex-M0+ (RP2040) there is no FPU so exc_return is always 0xFFFFFFFD.
+ *
+ * Do NOT reorder these first six fields without updating sched_asm.S.
  * ------------------------------------------------------------------------- */
 
 typedef struct tcb {
@@ -67,6 +75,7 @@ typedef struct tcb {
     uint8_t        *stack_base;     /* Lowest byte of the thread's stack     */
     uint32_t        stack_size;     /* Stack size in bytes                   */
     uint32_t       *saved_sp;       /* Saved stack pointer (context switch)  */
+    uint32_t        exc_return;     /* EXC_RETURN used by PendSV on restore  */
 
     uint8_t         priority;       /* Scheduling priority: 0 = highest      */
     uint8_t         affinity;       /* 0 = any, 1 = core 0, 2 = core 1      */
@@ -145,5 +154,10 @@ int      task_process_count(void);
  * Returns the slot pointer or NULL when idx is out of range.              */
 tcb_t   *task_get_thread_slot(int idx);
 pcb_t   *task_get_process_slot(int idx);
+
+/* Returns a pointer to the kernel process (PID 1), or NULL if not yet
+ * created.  Used by kernel modules that need to spawn threads in the
+ * kernel process (e.g. wifi-poll, future background services).           */
+pcb_t   *task_get_kernel_proc(void);
 
 #endif /* KERNEL_TASK_H */

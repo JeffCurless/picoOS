@@ -26,10 +26,11 @@
  * ------------------------------------------------------------------------- */
 
 /*
- * mem_init — initialise the kernel heap.
- *            Must be called once before any kmalloc/kfree calls.
+ * kmem_init — initialise the kernel heap.
+ *             Must be called once before any kmalloc/kfree calls.
+ *             Prefixed with 'k' to avoid collision with lwIP's mem_init.
  */
-void mem_init(void);
+void kmem_init(void);
 
 /*
  * kmalloc — allocate at least `size` bytes from the kernel heap.
@@ -45,11 +46,11 @@ void *kmalloc(size_t size);
 void kfree(void *ptr);
 
 /*
- * mem_stats — fill in heap usage statistics.
+ * kmem_stats — fill in heap usage statistics.
  *   *used    — total bytes currently allocated (including headers)
  *   *free    — total free bytes (including headers of free blocks)
  *   *largest — size of the largest single contiguous free block (payload only)
  */
-void mem_stats(uint32_t *used, uint32_t *free_bytes, uint32_t *largest);
+void kmem_stats(uint32_t *used, uint32_t *free_bytes, uint32_t *largest);
 
 #endif /* KERNEL_MEM_H */

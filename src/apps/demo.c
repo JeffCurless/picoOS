@@ -6,6 +6,10 @@
 #include <stdint.h>
 #include "../shell/shell.h"
 
+#ifdef PICOOS_WIFI_ENABLE
+extern void wifi_test(void *arg);
+#endif
+
 /* =========================================================================
  * Shared IPC objects for the producer-consumer demo
  *
@@ -124,9 +128,12 @@ void demo_sensor(void *arg)
  * Application table
  * ========================================================================= */
 const app_entry_t app_table[] = {
-    { "producer", demo_producer, 4u },
-    { "consumer", demo_consumer, 4u },
-    { "sensor",   demo_sensor,   5u },
+    { "producer",  demo_producer, 4u },
+    { "consumer",  demo_consumer, 4u },
+    { "sensor",    demo_sensor,   5u },
+#ifdef PICOOS_WIFI_ENABLE
+    { "wifi-test", wifi_test,     3u },
+#endif
 };
 
 const int app_table_size = (int)(sizeof(app_table) / sizeof(app_table[0]));

@@ -9,6 +9,9 @@
 #include "kernel/vfs.h"
 #include "kernel/fs.h"
 #include "shell/shell.h"
+#ifdef PICOOS_WIFI_ENABLE
+#include "kernel/wifi.h"
+#endif
 
 /* -------------------------------------------------------------------------
  * trace_enabled
@@ -38,6 +41,12 @@ static void idle_thread(void *arg)
     (void)arg;
     for (;;) {
         __wfi();
+        /* Service the USB stack after every wakeup interrupt.  The SDK's
+         * background IRQ mechanism calls tud_task() on RP2040 via the
+         * shared USBCTRL_IRQ handler, but on RP2350 that chain may not
+         * fire reliably.  Calling it here ensures CDC input is processed
+         * at least as often as interrupts wake the idle thread (~1 ms). */
+        tud_task();
     }
 }
 
@@ -107,11 +116,22 @@ int main(void)
     /* ------------------------------------------------------------------
      * 2. Boot banner
      * ------------------------------------------------------------------ */
-    printf("\r\n\r\n=================================\r\n");
-    printf("       picoOS\r\n");
-    printf("  RP2040 dual-core educational OS\r\n");
-    printf("  Build: %s %s\r\n", __DATE__, __TIME__);
-    printf("=================================\r\n\r\n");
+    printf("\r\n\r\n=======================================================\r\n");
+    printf("picoOS  v%u.%u.%u\r\n\r\n",
+           PICOOS_VERSION_MAJOR, PICOOS_VERSION_MINOR, PICOOS_VERSION_EDIT);
+    printf("  Platform : " PICOOS_PLATFORM_STR "\r\n");
+    printf("  Options  :"
+#ifdef PICOOS_WIFI_ENABLE
+           " WiFi"
+#endif
+#ifdef PICOOS_DISPLAY_ENABLE
+           " DISPLAY_PACK"
+#endif
+#if !defined(PICOOS_WIFI_ENABLE) && !defined(PICOOS_DISPLAY_ENABLE)
+           " none"
+#endif
+           "\r\n");
+    printf("=======================================================\r\n\r\n");
 
     /* ------------------------------------------------------------------
      * 3. Launch Core 1 early so it can register as a multicore lockout
@@ -131,7 +151,7 @@ int main(void)
     /* ------------------------------------------------------------------
      * 4. Kernel subsystem initialisation (order matters)
      * ------------------------------------------------------------------ */
-    mem_init();    /* heap must be ready before any kmalloc        */
+    kmem_init();   /* heap must be ready before any kmalloc        */
     task_init();   /* TCB/PCB pools, ID counters                   */
     dev_init();    /* register device descriptors                  */
     vfs_init();    /* mount /dev entries, open-fd table            */
@@ -141,6 +161,19 @@ int main(void)
      * 5. Create the kernel process (PID 1)
      * ------------------------------------------------------------------ */
     pcb_t *kernel_proc = task_create_process("kernel", 1u);
+
+    /* ------------------------------------------------------------------
+     * 5a. WiFi module init (pico_w / pico2_w only)
+     *
+     * wifi_init() calls cyw43_arch_init(), enables STA mode, spawns the
+     * wifi-poll thread in the kernel process, and registers the 'wifi'
+     * shell command.  Must run after task_init() and after the kernel
+     * process is created (so the poll thread has a home PCB), but before
+     * sched_start().
+     * ------------------------------------------------------------------ */
+#ifdef PICOOS_WIFI_ENABLE
+    wifi_init();
+#endif
 
     /* ------------------------------------------------------------------
      * 6. Idle thread — priority 7 (lowest), tiny stack

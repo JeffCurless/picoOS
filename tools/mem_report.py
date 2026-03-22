@@ -3,9 +3,10 @@
 mem_report.py — picoOS SRAM usage report from linker map file.
 
 Usage:
-    python3 tools/mem_report.py                        # default map path
-    python3 tools/mem_report.py --map path/to/foo.map  # custom map
-    python3 tools/mem_report.py --brief                # one-line summary only
+    python3 tools/mem_report.py                             # default map path
+    python3 tools/mem_report.py build/src/picoos.elf.map   # positional path
+    python3 tools/mem_report.py --map path/to/foo.map      # named option
+    python3 tools/mem_report.py --brief                     # one-line summary only
 """
 
 import argparse
@@ -190,15 +191,20 @@ def main():
         description="Report picoOS SRAM usage from a linker map file."
     )
     parser.add_argument(
-        "--map", default=DEFAULT_MAP, metavar="PATH",
-        help=f"path to the .map file (default: {DEFAULT_MAP})"
+        "mapfile", nargs="?", metavar="MAP",
+        help="path to the .elf.map file (positional)"
+    )
+    parser.add_argument(
+        "--map", default=None, metavar="PATH",
+        help=f"path to the .elf.map file (default: {DEFAULT_MAP})"
     )
     parser.add_argument(
         "--brief", action="store_true",
         help="print a single summary line instead of the full table"
     )
     args = parser.parse_args()
-    report(args.map, args.brief)
+    map_path = args.mapfile or args.map or DEFAULT_MAP
+    report(map_path, args.brief)
 
 
 if __name__ == "__main__":
