@@ -23,16 +23,25 @@
 
 /* ── Real ARM / Pico SDK build ─────────────────────────────────────────────
  *
- * pico/stdlib.h brings in CMSIS core headers (core_cm0plus.h), which define
- * SCB, NVIC, SysTick_Config, __dsb, __isb, __wfi, __set_PSP, etc.
+ * The CMSIS device header (RP2040.h / RP2350.h) must be included explicitly
+ * to get SCB, NVIC, IRQn_Type, SysTick_Config, __set_PSP, etc.
+ * pico/stdlib.h alone does not pull in the device header.
+ * We select the correct one via the compiler's architecture predefined macro:
+ *   __ARM_ARCH_8M_MAIN__ is set by arm-none-eabi-gcc for Cortex-M33 (RP2350).
+ *   Nothing matching is set for Cortex-M0+ (RP2040).
  * hardware/timer.h defines time_us_64 / time_us_32.
  * hardware/sync.h defines __disable_irq / __enable_irq / __dmb / __nop.
  * hardware/gpio.h defines gpio_init / gpio_set_dir / gpio_put / gpio_get.
  * pico/multicore.h defines multicore_launch_core1.
  */
+#if defined(__ARM_ARCH_8M_MAIN__)
+#include "RP2350.h"           /* IRQn_Type, SCB, NVIC, SysTick_Config, etc. (Cortex-M33) */
+#else
+#include "RP2040.h"           /* IRQn_Type, SCB, NVIC, SysTick_Config, etc. (Cortex-M0+) */
+#endif
 #include "pico/stdlib.h"
-#include "RP2040.h"           /* IRQn_Type, SCB, NVIC, SysTick_Config, __set_PSP, etc. */
 #include "pico/stdio_usb.h"
+#include "tusb.h"               /* tud_task() — explicit USB stack servicing */
 #include "pico/multicore.h"
 #include "hardware/timer.h"
 #include "hardware/sync.h"
@@ -41,10 +50,14 @@
 #include "hardware/watchdog.h"
 #include "pico/bootrom.h"
 #include "hardware/flash.h"
+#include "hardware/clocks.h"   /* clock_get_hz(clk_sys) */
 #include "pico/multicore.h"    /* multicore_lockout_start/end_blocking */
 #ifdef PICOOS_DISPLAY_ENABLE
 #include "hardware/spi.h"
 #include "hardware/pwm.h"
+#endif
+#ifdef PICOOS_WIFI_ENABLE
+#include "pico/cyw43_arch.h"
 #endif
 
 #else /* ── Host / LSP stub definitions ──────────────────────────────────── */
@@ -113,10 +126,24 @@ static inline void     flash_range_program(uint32_t offset, const uint8_t *data,
 static inline uint32_t save_and_disable_interrupts(void)                                   { return 0; }
 static inline void     restore_interrupts(uint32_t status)                                 { (void)status; }
 
+/* TinyUSB stub ------------------------------------------------------------ */
+static inline void tud_task(void) {}
+
 /* Pico SDK stdio helpers -------------------------------------------------- */
 static inline bool stdio_usb_connected(void) { return false; }
 static inline void sleep_ms(uint32_t ms)     { (void)ms; }
 static inline void stdio_flush(void)         {}
+
+/* hardware/clocks stubs ---------------------------------------------------*/
+typedef int clock_handle_t;
+#define clk_sys 6
+static inline uint32_t clock_get_hz(clock_handle_t h) { (void)h; return 125000000u; }
+
+/* CYW43 stubs (only needed when building with PICOOS_WIFI_ENABLE) --------- */
+#ifdef PICOOS_WIFI_ENABLE
+static inline int  cyw43_arch_init(void)   { return 0; }
+static inline void cyw43_arch_deinit(void) {}
+#endif
 
 /* Pico SDK error codes ---------------------------------------------------- */
 #define PICO_ERROR_TIMEOUT (-1)

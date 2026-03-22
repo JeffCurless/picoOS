@@ -175,7 +175,7 @@ static int cmd_mem(int argc, char **argv)
     (void)argc;
     (void)argv;
     uint32_t used, free_bytes, largest;
-    mem_stats(&used, &free_bytes, &largest);
+    kmem_stats(&used, &free_bytes, &largest);
 
     shell_print("Kernel heap:\r\n");
     shell_print("  Used        : %u bytes\r\n",  used);
@@ -239,52 +239,122 @@ static int cmd_cat(int argc, char **argv)
     return 0;
 }
 
-/* --- write --------------------------------------------------------------- */
-static int cmd_write(int argc, char **argv)
+/* --- fs ------------------------------------------------------------------ */
+
+/* fs write <file>          — interactive multi-line mode (end with '.' alone)
+ * fs write <file> <text>   — write a single line and newline, overwriting file
+ * fs append <file> <text>  — append a line and newline to an existing file
+ * fs format                — erase all files */
+static int cmd_fs(int argc, char **argv)
 {
-    if (argc < 3) {
-        shell_println("Usage: write <file> <data>");
-        return -1;
-    }
+    const char *sub = (argc >= 2) ? argv[1] : "";
 
-    /* Open (create/truncate) the file. */
-    int fd = fs_open(argv[1], VFS_O_WRONLY | VFS_O_CREAT | VFS_O_TRUNC);
-    if (fd < 0) {
-        shell_print("write: cannot open '%s'\r\n", argv[1]);
-        return -1;
-    }
-
-    /* Join remaining argv tokens into a single string with spaces. */
-    char data_buf[SHELL_LINE_MAX];
-    data_buf[0] = '\0';
-    for (int i = 2; i < argc; i++) {
-        if (i > 2) {
-            strncat(data_buf, " ", sizeof(data_buf) - strlen(data_buf) - 1u);
+    /* ---- fs write ---- */
+    if (strcmp(sub, "write") == 0) {
+        if (argc < 3) {
+            shell_println("Usage: fs write <file> [text]");
+            shell_println("       Without [text]: interactive multi-line mode.");
+            shell_println("       End input with a single '.' on its own line.");
+            return -1;
         }
-        strncat(data_buf, argv[i], sizeof(data_buf) - strlen(data_buf) - 1u);
+
+        int fd = fs_open(argv[2], VFS_O_WRONLY | VFS_O_CREAT | VFS_O_TRUNC);
+        if (fd < 0) {
+            shell_print("fs write: cannot open '%s'\r\n", argv[2]);
+            return -1;
+        }
+
+        int total = 0;
+
+        if (argc >= 4) {
+            /* Single-line mode: join remaining tokens with spaces, add newline. */
+            char line[SHELL_LINE_MAX];
+            line[0] = '\0';
+            for (int i = 3; i < argc; i++) {
+                if (i > 3) strncat(line, " ", sizeof(line) - strlen(line) - 1u);
+                strncat(line, argv[i], sizeof(line) - strlen(line) - 1u);
+            }
+            strncat(line, "\n", sizeof(line) - strlen(line) - 1u);
+            total = fs_write(fd, (const uint8_t *)line, (uint32_t)strlen(line));
+        } else {
+            /* Multi-line interactive mode.  Read lines until '.' alone. */
+            shell_print("Entering multi-line mode for '%s'.\r\n", argv[2]);
+            shell_println("Type lines, then enter '.' alone to finish.");
+            char line[SHELL_LINE_MAX];
+            for (;;) {
+                shell_print("> ");
+                int n = shell_readline(line, sizeof(line));
+                if (n == 1 && line[0] == '.') {
+                    break;   /* sentinel: done */
+                }
+                /* Append newline so file has proper line endings. */
+                strncat(line, "\n", sizeof(line) - (size_t)n - 1u);
+                int w = fs_write(fd, (const uint8_t *)line,
+                                 (uint32_t)strlen(line));
+                if (w < 0) {
+                    shell_println("fs write: write error (file full?)");
+                    break;
+                }
+                total += w;
+            }
+        }
+
+        fs_close(fd);
+        if (total < 0) {
+            shell_print("fs write: failed writing to '%s'\r\n", argv[2]);
+            return -1;
+        }
+        shell_print("fs write: wrote %d bytes to '%s'\r\n", total, argv[2]);
+        return 0;
     }
 
-    uint32_t len = (uint32_t)strlen(data_buf);
-    int written = fs_write(fd, (const uint8_t *)data_buf, len);
-    fs_close(fd);
+    /* ---- fs append ---- */
+    if (strcmp(sub, "append") == 0) {
+        if (argc < 4) {
+            shell_println("Usage: fs append <file> <text>");
+            return -1;
+        }
 
-    if (written < 0) {
-        shell_print("write: failed to write to '%s'\r\n", argv[1]);
-        return -1;
+        int fd = fs_open(argv[2], VFS_O_WRONLY | VFS_O_CREAT | VFS_O_APPEND);
+        if (fd < 0) {
+            shell_print("fs append: cannot open '%s'\r\n", argv[2]);
+            return -1;
+        }
+
+        char line[SHELL_LINE_MAX];
+        line[0] = '\0';
+        for (int i = 3; i < argc; i++) {
+            if (i > 3) strncat(line, " ", sizeof(line) - strlen(line) - 1u);
+            strncat(line, argv[i], sizeof(line) - strlen(line) - 1u);
+        }
+        strncat(line, "\n", sizeof(line) - strlen(line) - 1u);
+
+        int written = fs_write(fd, (const uint8_t *)line,
+                               (uint32_t)strlen(line));
+        fs_close(fd);
+
+        if (written < 0) {
+            shell_print("fs append: failed writing to '%s'\r\n", argv[2]);
+            return -1;
+        }
+        shell_print("fs append: appended %d bytes to '%s'\r\n",
+                    written, argv[2]);
+        return 0;
     }
-    shell_print("write: wrote %d bytes to '%s'\r\n", written, argv[1]);
-    return 0;
-}
 
-/* --- format -------------------------------------------------------------- */
-static int cmd_format(int argc, char **argv)
-{
-    (void)argc;
-    (void)argv;
-    shell_println("Formatting filesystem — all files will be erased...");
-    fs_format();
-    shell_println("Format complete.");
-    return 0;
+    /* ---- fs format ---- */
+    if (strcmp(sub, "format") == 0) {
+        shell_println("Formatting filesystem — all files will be erased...");
+        fs_format();
+        shell_println("Format complete.");
+        return 0;
+    }
+
+    shell_println("Usage: fs <write|append|format>");
+    shell_println("  fs write <file> [text]   — create/overwrite (multi-line if no text)");
+    shell_println("  fs append <file> <text>  — append a line to a file");
+    shell_println("  fs format                — erase all files");
+    return -1;
 }
 
 /* --- rm ------------------------------------------------------------------ */
@@ -403,9 +473,12 @@ static int cmd_info(int argc, char **argv)
                 PICOOS_VERSION_MAJOR, PICOOS_VERSION_MINOR, PICOOS_VERSION_EDIT);
     shell_print("Built On  : %s %s\r\n", __DATE__, __TIME__);
     shell_print("Compiler  : %s\r\n",    __VERSION__);
-    shell_print("Platform  : RP2040, dual ARM Cortex-M0+ (133 MHz max)\r\n");
-    shell_print("SRAM      : 264 KB\r\n");
-    shell_print("Flash     : 2 MB QSPI (XIP)\r\n");
+    shell_print("Platform  : " PICOOS_PLATFORM_STR "\r\n");
+    shell_print("SRAM      : " PICOOS_SRAM_STR "\r\n");
+    shell_print("Flash     : " PICOOS_FLASH_STR "\r\n");
+#ifdef PICOOS_WIFI_ENABLE
+    shell_print("WiFi      : CYW43 (enabled)\r\n");
+#endif
 #ifdef PICOOS_DISPLAY_ENABLE
     shell_print("Display   : %ux%u RGB332 ST7789\r\n", DISP_WIDTH, DISP_HEIGHT);
 #endif
@@ -426,9 +499,8 @@ static const shell_cmd_t builtin_cmds[] = {
     { "mem",     "Show heap usage and stack canary status",    cmd_mem     },
     { "ls",      "List filesystem contents",                   cmd_ls      },
     { "cat",     "cat <file>  — print file contents",          cmd_cat     },
-    { "write",   "write <file> <data>  — write data to file",  cmd_write   },
     { "rm",      "rm <file>  — delete a file",                 cmd_rm      },
-    { "format",  "Erase all files and reset the filesystem",   cmd_format  },
+    { "fs",      "fs <write|append|format>  — filesystem ops", cmd_fs      },
     { "reboot",  "Reboot the system",                          cmd_reboot  },
     { "update",  "Reboot into USB BOOTSEL mode",               cmd_update  },
     { "trace",   "trace <on|off>  — toggle scheduler tracing", cmd_trace   },
@@ -495,11 +567,68 @@ static int tokenise(char *line, char **argv, int max_argc)
     return argc;
 }
 
+/* =========================================================================
+ * shell_readline — read one line from the USB console.
+ *
+ * Shares the same character-by-character approach as shell_run: non-blocking
+ * getchar_timeout_us(0) with a 1 ms sleep between polls so other threads
+ * stay alive.  Handles backspace and echoes printable characters.
+ * Returns the number of characters in the line (not the NUL terminator).
+ * ========================================================================= */
+int shell_readline(char *buf, uint32_t size)
+{
+    uint32_t len = 0u;
+    for (;;) {
+        int ch = PICO_ERROR_TIMEOUT;
+        while (ch == PICO_ERROR_TIMEOUT) {
+            ch = getchar_timeout_us(0);
+            if (ch == PICO_ERROR_TIMEOUT) {
+                /* Explicitly service the USB stack so tud_cdc_available()
+                 * is updated before the next poll.  The SDK's background
+                 * IRQ mechanism handles this on RP2040; on RP2350 the IRQ
+                 * chain may not fire reliably, so we call it directly here.
+                 * tud_task() is safe to call from thread context — on a
+                 * single core any concurrent IRQ-driven call preempts and
+                 * completes before this resumes. */
+#if defined(__arm__) || defined(__thumb__)
+                tud_task();
+#endif
+                sys_sleep(1);
+            }
+        }
+        if (ch == '\r' || ch == '\n') {
+            shell_print("\r\n");
+            break;
+        }
+        if ((ch == '\b' || ch == 0x7F) && len > 0u) {
+            len--;
+            shell_print("\b \b");
+        } else if (ch >= 0x20 && ch < 0x7F && len < size - 1u) {
+            buf[len++] = (char)ch;
+            putchar_raw(ch);
+        }
+    }
+    buf[len] = '\0';
+    return (int)len;
+}
+
 void shell_run(void)
 {
     char     line[SHELL_LINE_MAX];
     char    *argv[SHELL_ARGC_MAX];
     uint32_t line_len = 0u;
+
+    /* On RP2350 the USB background IRQ may not fire reliably, so
+     * stdio_usb_connected() can return false immediately after the
+     * scheduler starts — even though a host is connected.  Poll here
+     * until the CDC link is confirmed live before printing anything;
+     * otherwise stdio_usb_out_chars() silently discards the output. */
+#if defined(__arm__) || defined(__thumb__)
+    while (!stdio_usb_connected()) {
+        tud_task();
+        sys_sleep(5);
+    }
+#endif
 
     shell_print("\r\npicoOS shell ready.  Type 'help' for commands.\r\n");
 
@@ -520,6 +649,9 @@ void shell_run(void)
             while (ch == PICO_ERROR_TIMEOUT) {
                 ch = getchar_timeout_us(0);
                 if (ch == PICO_ERROR_TIMEOUT) {
+#if defined(__arm__) || defined(__thumb__)
+                    tud_task();
+#endif
                     sys_sleep(1);
                 }
             }

@@ -16,8 +16,10 @@
 /* This assert is valid only when pointers are 4 bytes (32-bit ARM target).
  * On a 64-bit host the struct layout differs, so we guard by pointer size. */
 #if __SIZEOF_POINTER__ == 4
-_Static_assert(offsetof(tcb_t, saved_sp) == 16,
+_Static_assert(offsetof(tcb_t, saved_sp)   == 16,
                "saved_sp offset mismatch: update the #16 offset in sched_asm.S");
+_Static_assert(offsetof(tcb_t, exc_return) == 20,
+               "exc_return offset mismatch: update the #20 offset in sched_asm.S");
 #endif
 
 /* -------------------------------------------------------------------------
@@ -41,6 +43,13 @@ static uint32_t next_tid = 1;
 /* current_tcb is declared volatile in sched.h and defined here so that the
  * linker has exactly one definition. */
 tcb_t * volatile current_tcb = NULL;
+
+/* Pointer to the kernel process (PID 1), set in task_create_process when
+ * pid == 1.  Exposed via task_get_kernel_proc() for use by kernel modules
+ * that need to create threads in the kernel process (e.g. wifi-poll). */
+static pcb_t *s_kernel_proc = NULL;
+
+pcb_t *task_get_kernel_proc(void) { return s_kernel_proc; }
 
 /* -------------------------------------------------------------------------
  * thread_exit — used as the initial LR so a returning thread self-terminates
@@ -93,7 +102,7 @@ void task_init(void)
  *   low address (stack_base + STACK_CANARY written here)
  *
  * The PendSV handler loads saved_sp, pops r4-r11, updates PSP, then returns
- * with EXC_RETURN=0xFFFFFFFD which causes the hardware to pop r0-r3, r12,
+ * with the thread's saved EXC_RETURN value which causes the hardware to pop r0-r3, r12,
  * lr, pc, xpsr from the PSP stack.
  * ------------------------------------------------------------------------- */
 tcb_t *task_create_thread(pcb_t      *proc,
@@ -184,7 +193,15 @@ tcb_t *task_create_thread(pcb_t      *proc,
 
     /* saved_sp points to the r4 word — the lowest address in the combined
      * frame.  That matches what the PendSV handler expects to find. */
-    t->saved_sp = &stack_top[-16];
+    t->saved_sp   = &stack_top[-16];
+
+    /* On Cortex-M33 (RP2350) the FPU may be active; the EXC_RETURN value
+     * in LR when PendSV fires tells the CPU whether the saved exception frame
+     * is basic (8 words, 0xFFFFFFFD) or extended with FP (26 words, 0xFFFFFFED).
+     * New threads always start with a basic 8-word frame, so initialise to the
+     * basic-frame EXC_RETURN.  The PendSV handler updates this on every
+     * suspension so future restores use the correct frame size. */
+    t->exc_return = 0xFFFFFFFDu;
 
     /* Link thread into its owning process. */
     if (proc != NULL && proc->thread_count < MAX_THREADS) {
@@ -238,6 +255,10 @@ pcb_t *task_create_process(const char *name, uint32_t pid)
     p->pid          = pid;
     p->parent_pid   = 0;
     p->thread_count = 0;
+
+    if (pid == 1u) {
+        s_kernel_proc = p;
+    }
     p->heap_base    = NULL;
     p->heap_size    = 0;
     p->exit_code    = 0;

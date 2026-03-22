@@ -3,57 +3,84 @@
 # ---------------------------------------------------------------------------
 set(PICOOS_VERSION_MAJOR 0)
 set(PICOOS_VERSION_MINOR 1)
-set(PICOOS_VERSION_EDIT  3)
+set(PICOOS_VERSION_EDIT  4)
 
 message(STATUS "picoOS version        : ${PICOOS_VERSION_MAJOR}.${PICOOS_VERSION_MINOR}.${PICOOS_VERSION_EDIT}")
 
 # ---------------------------------------------------------------------------
-# Feature flags
+# Display Pack feature flags  (all four share the same physical hardware)
 #
-# Pass on the cmake command line, e.g.:
-#   cmake -B build -DPICOOS_DISPLAY_ENABLE=ON -DPICOOS_DISPLAY_SHELL=ON
+# Default: all ON.  Override on the cmake command line, e.g.:
+#   cmake -B build -DPICOOS_DISPLAY_ENABLE=OFF   # disable the whole pack
+#   cmake -B build -DPICOOS_LED_SHELL=OFF        # keep driver, drop shell cmd
 #
-# PICOOS_DISPLAY_ENABLE — compile the ST7789 driver and mount /dev/display.
-#                         Requires Pimoroni Pico Display Pack hardware.
-#                         Adds ~32 KB static SRAM (framebuffer).
-#
-# PICOOS_DISPLAY_SHELL  — register the interactive 'display' shell command.
-#                         Requires PICOOS_DISPLAY_ENABLE.
-#                         Enabling PICOOS_DISPLAY_SHELL automatically enables
-#                         PICOOS_DISPLAY_ENABLE.
+# Dependency rules (enforced below after the option() declarations):
+#   Pull-up  — turning any sub-feature ON automatically enables
+#              PICOOS_DISPLAY_ENABLE (the hardware adapter must be present).
+#   Push-down — setting PICOOS_DISPLAY_ENABLE=OFF disables all sub-features
+#              (PICOOS_DISPLAY_SHELL, PICOOS_LED_ENABLE, PICOOS_LED_SHELL).
+#   LED shell requires LED driver: PICOOS_LED_SHELL=ON forces PICOOS_LED_ENABLE=ON.
 # ---------------------------------------------------------------------------
-option(PICOOS_DISPLAY_ENABLE "Include Pimoroni Pico Display Pack driver" ON)
-option(PICOOS_DISPLAY_SHELL  "Register 'display' shell command"          ON)
+option(PICOOS_DISPLAY_ENABLE "Include Pimoroni Pico Display Pack driver"         ON)
+option(PICOOS_DISPLAY_SHELL  "Register 'display' shell command"                  ON)
+option(PICOOS_LED_ENABLE     "Include Pico Display Pack tri-color LED driver"    ON)
+option(PICOOS_LED_SHELL      "Register 'led' shell command"                      ON)
 
-# Enforce dependency: shell command requires the driver.
-# If the driver is disabled, silently disable the shell command too.
-if(PICOOS_DISPLAY_SHELL AND NOT PICOOS_DISPLAY_ENABLE)
-    message(STATUS "PICOOS_DISPLAY_ENABLE=OFF — disabling PICOOS_DISPLAY_SHELL")
-    set(PICOOS_DISPLAY_SHELL OFF)
+# Push-down runs first: PICOOS_DISPLAY_ENABLE=OFF disables every sub-feature.
+# This gives the master switch priority over individual sub-feature defaults.
+if(NOT PICOOS_DISPLAY_ENABLE)
+    foreach(_feat PICOOS_DISPLAY_SHELL PICOOS_LED_ENABLE PICOOS_LED_SHELL)
+        if(${_feat})
+            message(STATUS "PICOOS_DISPLAY_ENABLE=OFF — disabling ${_feat}")
+            set(${_feat} OFF)
+        endif()
+    endforeach()
 endif()
 
-message(STATUS "picoOS display driver : ${PICOOS_DISPLAY_ENABLE}")
-message(STATUS "picoOS display shell  : ${PICOOS_DISPLAY_SHELL}")
-
-# PICOOS_LED_ENABLE — compile the tri-color RGB LED driver and mount /dev/led.
-#                     Requires Pimoroni Pico Display Pack hardware (GPIO 6/7/8).
-#                     Defaults ON when display is enabled (same board).
-# PICOOS_LED_SHELL  — register the interactive 'led' shell command.
-#                     Requires PICOOS_LED_ENABLE.
-if(PICOOS_DISPLAY_ENABLE)
-    option(PICOOS_LED_ENABLE "Include Pico Display Pack tri-color LED driver" ON)
-else()
-    option(PICOOS_LED_ENABLE "Include Pico Display Pack tri-color LED driver" OFF)
+# Pull-up runs second: any sub-feature explicitly ON enables the hardware driver.
+# (After push-down, sub-features are only ON if the user set them explicitly AND
+#  PICOOS_DISPLAY_ENABLE was not set to OFF.)
+if((PICOOS_DISPLAY_SHELL OR PICOOS_LED_ENABLE OR PICOOS_LED_SHELL) AND NOT PICOOS_DISPLAY_ENABLE)
+    message(STATUS "Display Pack sub-feature enabled — forcing PICOOS_DISPLAY_ENABLE=ON")
+    set(PICOOS_DISPLAY_ENABLE ON)
 endif()
-option(PICOOS_LED_SHELL "Register 'led' shell command" ON)
 
+# LED shell requires LED driver.
 if(PICOOS_LED_SHELL AND NOT PICOOS_LED_ENABLE)
     message(STATUS "PICOOS_LED_ENABLE=OFF — disabling PICOOS_LED_SHELL")
     set(PICOOS_LED_SHELL OFF)
 endif()
 
+message(STATUS "picoOS display driver : ${PICOOS_DISPLAY_ENABLE}")
+message(STATUS "picoOS display shell  : ${PICOOS_DISPLAY_SHELL}")
 message(STATUS "picoOS LED driver     : ${PICOOS_LED_ENABLE}")
 message(STATUS "picoOS LED shell      : ${PICOOS_LED_SHELL}")
+
+# ---------------------------------------------------------------------------
+# Board / chip / WiFi detection
+# (pico_sdk_init() must have run before PICO_RP2350/PICO_CYW43_SUPPORTED exist;
+#  both are set in the root CMakeLists.txt before add_subdirectory(src))
+# ---------------------------------------------------------------------------
+if(PICO_RP2350)
+    set(PICOOS_PLATFORM_STR "RP2350, dual ARM Cortex-M33 (150 MHz max)")
+    set(PICOOS_SRAM_STR     "520 KB")
+    set(PICOOS_FLASH_STR    "4 MB QSPI (XIP)")
+else()
+    set(PICOOS_PLATFORM_STR "RP2040, dual ARM Cortex-M0+ (133 MHz max)")
+    set(PICOOS_SRAM_STR     "264 KB")
+    set(PICOOS_FLASH_STR    "2 MB QSPI (XIP)")
+endif()
+
+# PICO_CYW43_SUPPORTED is set by the SDK when the selected board has a CYW43 chip.
+if(PICO_CYW43_SUPPORTED)
+    set(PICOOS_HAS_WIFI ON)
+else()
+    set(PICOOS_HAS_WIFI OFF)
+endif()
+
+message(STATUS "picoOS board          : ${PICO_BOARD}")
+message(STATUS "picoOS chip           : ${PICO_PLATFORM}")
+message(STATUS "picoOS WiFi           : ${PICOOS_HAS_WIFI}")
 
 # ---------------------------------------------------------------------------
 # Sources
@@ -81,7 +108,31 @@ if(PICOOS_LED_ENABLE)
     list(APPEND PICOOS_SOURCES drivers/led.c)
 endif()
 
+if(PICOOS_HAS_WIFI)
+    list(APPEND PICOOS_SOURCES kernel/wifi.c)
+    list(APPEND PICOOS_SOURCES apps/wifi_test.c)
+endif()
+
 add_executable(picoos ${PICOOS_SOURCES})
+
+# ---------------------------------------------------------------------------
+# Output file naming — board-specific with version suffix.
+#
+# Strip underscores from PICO_BOARD so that pico_w → picow, pico2_w → pico2w,
+# then append "os" and the version number.
+#
+# Examples:
+#   pico    → picoos-v0.1.4
+#   pico2   → pico2os-v0.1.4
+#   pico_w  → picowos-v0.1.4
+#   pico2_w → pico2wos-v0.1.4
+# ---------------------------------------------------------------------------
+set(_board_clean "${PICO_BOARD}")
+string(REPLACE "_" "" _board_clean "${_board_clean}")
+set(_output_name
+    "${_board_clean}os-v${PICOOS_VERSION_MAJOR}.${PICOOS_VERSION_MINOR}.${PICOOS_VERSION_EDIT}")
+message(STATUS "picoOS output name    : ${_output_name}")
+set_target_properties(picoos PROPERTIES OUTPUT_NAME "${_output_name}")
 
 # ---------------------------------------------------------------------------
 # Include paths
@@ -97,6 +148,9 @@ target_compile_definitions(picoos PRIVATE
     PICOOS_VERSION_MAJOR=${PICOOS_VERSION_MAJOR}
     PICOOS_VERSION_MINOR=${PICOOS_VERSION_MINOR}
     PICOOS_VERSION_EDIT=${PICOOS_VERSION_EDIT}
+    PICOOS_PLATFORM_STR="${PICOOS_PLATFORM_STR}"
+    PICOOS_SRAM_STR="${PICOOS_SRAM_STR}"
+    PICOOS_FLASH_STR="${PICOOS_FLASH_STR}"
 )
 
 if(PICOOS_DISPLAY_ENABLE)
@@ -115,6 +169,10 @@ if(PICOOS_LED_SHELL)
     target_compile_definitions(picoos PRIVATE PICOOS_LED_SHELL=1)
 endif()
 
+if(PICOOS_HAS_WIFI)
+    target_compile_definitions(picoos PRIVATE PICOOS_WIFI_ENABLE=1)
+endif()
+
 # ---------------------------------------------------------------------------
 # Link libraries
 # ---------------------------------------------------------------------------
@@ -125,6 +183,7 @@ set(PICOOS_LIBS
     hardware_irq
     hardware_flash
     hardware_sync
+    hardware_clocks
     pico_multicore
     pico_stdio_usb
 )
@@ -133,6 +192,10 @@ if(PICOOS_DISPLAY_ENABLE)
     list(APPEND PICOOS_LIBS hardware_spi hardware_pwm)
 elseif(PICOOS_LED_ENABLE)
     list(APPEND PICOOS_LIBS hardware_pwm)
+endif()
+
+if(PICOOS_HAS_WIFI)
+    list(APPEND PICOOS_LIBS pico_cyw43_arch_lwip_poll)
 endif()
 
 target_link_libraries(picoos ${PICOOS_LIBS})

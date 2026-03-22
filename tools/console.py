@@ -10,7 +10,7 @@ Usage
   python3 console.py --port /dev/ttyACM0   # use a specific port
   python3 console.py --baud 115200         # override baud rate (default 115200)
   python3 console.py --log output.log      # tee all console output to a file
-  python3 console.py --upload FILE DEST    # upload a file using 'write' command
+  python3 console.py --upload FILE DEST    # upload a file to the Pico filesystem
   python3 console.py --help
 
 Key bindings (interactive mode)
@@ -45,8 +45,12 @@ except ImportError:
 # Constants
 # ---------------------------------------------------------------------------
 
-PICO_USB_VID = 0x2E8A  # Raspberry Pi
-PICO_USB_PID = 0x000A  # Pico USB serial (CDC)
+PICO_USB_VID  = 0x2E8A   # Raspberry Pi
+PICO_USB_PIDS = {
+    0x000A,   # Pico / Pico W  (RP2040) — SDK CDC
+    0x0009,   # Pico 2 / Pico 2 W  (RP2350) — SDK CDC
+    0x000F,   # Pico 2  (RP2350) — MicroPython CDC
+}
 
 DEFAULT_BAUD = 115200
 
@@ -62,12 +66,12 @@ def find_pico_port():
     for port in ports:
         vid = getattr(port, "vid", None)
         pid = getattr(port, "pid", None)
-        if vid == PICO_USB_VID and pid == PICO_USB_PID:
+        if vid == PICO_USB_VID and pid in PICO_USB_PIDS:
             return port.device
         # Fall back to description matching for systems that do not expose
         # the VID/PID through the port info object.
         desc = (port.description or "").lower()
-        if "pico" in desc or "rp2040" in desc:
+        if "pico" in desc or "rp2040" in desc or "rp2350" in desc:
             return port.device
     return None
 
@@ -113,19 +117,22 @@ def reader_thread(ser: serial.Serial, tee: "Tee | None", stop_event: threading.E
                   disconnected: "threading.Event | None" = None):
     """Continuously read bytes from the serial port and print them to stdout.
     Also writes to the log file if a Tee is provided.
-    Sets *disconnected* if the port disappears unexpectedly."""
+    Sets *disconnected* if the port disappears unexpectedly.
+
+    Uses ser.read(ser.in_waiting or 1) which blocks up to ser.timeout seconds
+    when no data is queued.  This is more reliable than polling in_waiting
+    because some CDC implementations (e.g. RP2350) may not pre-populate
+    in_waiting before the first read call.
+    """
     while not stop_event.is_set():
         try:
-            waiting = ser.in_waiting
-            if waiting > 0:
-                data = ser.read(waiting)
+            data = ser.read(ser.in_waiting or 1)
+            if data:
                 text = data.decode("utf-8", errors="replace")
                 sys.stdout.write(text)
                 sys.stdout.flush()
                 if tee:
                     tee.write(data)
-            else:
-                time.sleep(0.01)
         except serial.SerialException:
             if disconnected:
                 disconnected.set()
@@ -140,14 +147,14 @@ def reader_thread(ser: serial.Serial, tee: "Tee | None", stop_event: threading.E
 # Interactive mode
 # ---------------------------------------------------------------------------
 
-def _wait_for_connection(port: "str | None", baud: int,
-                         poll_interval: float = 1.0,
+def _wait_for_connection(port: "str | None", baud: int, stdin_fd: int,
+                         poll_interval: float = 0.5,
                          quit_event: "threading.Event | None" = None) -> "serial.Serial | None":
     """Block until the Pico port is available, then return an open Serial.
 
     Returns None if the user presses Ctrl-C (\\x03) while waiting.
-    Uses select() on stdin so Ctrl-C is detected even in raw terminal mode,
-    where SIGINT is suppressed and the byte must be read explicitly.
+    Uses select() directly on the raw stdin fd so Ctrl-C is detected even
+    in raw terminal mode, where SIGINT is suppressed.
     """
     while True:
         if quit_event and quit_event.is_set():
@@ -156,8 +163,10 @@ def _wait_for_connection(port: "str | None", baud: int,
         if p:
             try:
                 ser = serial.Serial(p, baud, timeout=0.1)
-                time.sleep(0.2)
-                ser.reset_input_buffer()
+                # Brief settle for the CDC stack — do NOT reset_input_buffer()
+                # here because the Pico may already be sending its boot banner
+                # and we would silently discard it.
+                time.sleep(0.05)
                 return ser
             except serial.SerialException:
                 pass
@@ -165,20 +174,24 @@ def _wait_for_connection(port: "str | None", baud: int,
         deadline = time.monotonic() + poll_interval
         while time.monotonic() < deadline:
             remaining = deadline - time.monotonic()
-            r, _, _ = select.select([sys.stdin], [], [], min(remaining, 0.1))
+            r, _, _ = select.select([stdin_fd], [], [], min(remaining, 0.1))
             if r:
-                ch = sys.stdin.buffer.read(1)
+                ch = os.read(stdin_fd, 1)
                 if ch == b'\x03':  # Ctrl-C in raw mode
                     if quit_event:
                         quit_event.set()
                     return None
 
 
-def interactive_mode(port: "str | None", baud: int, tee: "Tee | None"):
+def interactive_mode(port: "str | None", baud: int, tee: "Tee | None",
+                     debug: bool = False):
     """Forward keystrokes to the Pico in raw terminal mode.
 
     Automatically reconnects when the Pico reboots or is briefly unplugged.
     Ctrl-C exits entirely.
+
+    All stdin reads use os.read(fd, 1) on the raw file descriptor to bypass
+    Python's BufferedReader, which can interfere with select() in raw mode.
     """
     fd = sys.stdin.fileno()
     old_settings = termios.tcgetattr(fd)
@@ -189,7 +202,7 @@ def interactive_mode(port: "str | None", baud: int, tee: "Tee | None"):
         quit_event = threading.Event()
 
         while True:  # outer reconnect loop
-            ser = _wait_for_connection(port, baud, quit_event=quit_event)
+            ser = _wait_for_connection(port, baud, fd, quit_event=quit_event)
             if ser is None:  # Ctrl-C pressed during reconnect wait
                 break
             sys.stdout.write(f"\r\n[console] Connected ({ser.port}).  "
@@ -197,7 +210,7 @@ def interactive_mode(port: "str | None", baud: int, tee: "Tee | None"):
             sys.stdout.flush()
 
             disconnected = threading.Event()
-            stop_event = threading.Event()
+            stop_event   = threading.Event()
             t = threading.Thread(target=reader_thread,
                                  args=(ser, tee, stop_event, disconnected),
                                  daemon=True)
@@ -205,19 +218,25 @@ def interactive_mode(port: "str | None", baud: int, tee: "Tee | None"):
 
             user_quit = False
             while not disconnected.is_set():
-                r, _, _ = select.select([sys.stdin], [], [], 0.2)
+                r, _, _ = select.select([fd], [], [], 0.2)
                 if not r:
                     continue
-                ch = sys.stdin.buffer.read(1)
+                # os.read bypasses Python's buffered I/O so raw-mode keystrokes
+                # are always delivered immediately after select() signals ready.
+                ch = os.read(fd, 1)
                 if not ch or ch == b'\x03':  # Ctrl-C
                     user_quit = True
                     quit_event.set()
                     break
-                # Map bare \n to \r so the Pico shell sees Enter correctly.
+                # Map bare \n → \r so the Pico shell sees Enter correctly.
                 if ch == b'\n':
                     ch = b'\r'
                 try:
+                    if debug:
+                        sys.stderr.write(f"[tx] {ch!r}\r\n")
+                        sys.stderr.flush()
                     ser.write(ch)
+                    ser.flush()
                     if tee:
                         tee.write(ch)
                 except serial.SerialException:
@@ -243,16 +262,18 @@ def interactive_mode(port: "str | None", baud: int, tee: "Tee | None"):
 # Upload mode
 # ---------------------------------------------------------------------------
 
+def _send_line(ser: serial.Serial, line: str, echo_wait: float = 0.05):
+    """Send a line to the Pico and wait briefly for it to be processed."""
+    ser.write(line.encode("utf-8"))
+    ser.flush()
+    time.sleep(echo_wait)
+
+
 def upload_file(ser: serial.Serial, local_path: str, remote_name: str):
-    """Upload a local file to the Pico by sending a 'write' shell command.
+    """Upload a local text file to the Pico filesystem.
 
-    The 'write' command in the picoOS shell takes:
-        write <filename> <data>
-    so we chunk the file content into multiple write calls if it is large.
-
-    For simplicity this implementation sends the entire file as a single
-    write command (suitable for small text files).  Binary files or files
-    larger than SHELL_LINE_MAX should be chunked — marked as a TODO.
+    Uses 'fs write <filename>' in interactive multi-line mode: each line of
+    the local file is sent individually, terminated by a '.' sentinel line.
     """
     if not os.path.isfile(local_path):
         print(f"[upload] ERROR: '{local_path}' is not a file.")
@@ -261,39 +282,39 @@ def upload_file(ser: serial.Serial, local_path: str, remote_name: str):
     with open(local_path, "rb") as f:
         content = f.read()
 
-    # Decode as UTF-8; the picoOS filesystem stores text.
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError:
-        print("[upload] ERROR: file contains non-UTF-8 data.  "
-              "Only text files are supported in this version.")
+        print("[upload] ERROR: file contains non-UTF-8 data. "
+              "Only text files are supported.")
         return False
 
-    # Strip the remote name of path separators for safety.
     remote_name = os.path.basename(remote_name)
+    lines = text.splitlines()
 
     print(f"[upload] Uploading '{local_path}' -> '{remote_name}' "
-          f"({len(text)} bytes)...")
+          f"({len(lines)} lines, {len(text)} bytes)...")
 
-    # Build the write command.
-    # NOTE: newlines inside the file content are not handled by the single-line
-    # shell protocol.  For multi-line files, consider a chunked protocol or
-    # a dedicated transfer command in a future phase.
-    safe_text = text.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
-    cmd = f"write {remote_name} {safe_text}\r\n"
+    # Enter multi-line write mode.
+    _send_line(ser, f"fs write {remote_name}\r\n", echo_wait=0.1)
 
-    ser.write(cmd.encode("utf-8"))
-    ser.flush()
+    for line in lines:
+        # Guard against a lone '.' which would be misinterpreted as the sentinel.
+        if line.strip() == ".":
+            line = ". "
+        _send_line(ser, f"{line}\r\n")
 
-    # Wait briefly for the Pico to process and echo a response.
-    time.sleep(0.5)
+    # Send sentinel to close the file.
+    _send_line(ser, ".\r\n", echo_wait=0.3)
+
+    # Collect and display the Pico's response.
     waiting = ser.in_waiting
     if waiting > 0:
         response = ser.read(waiting).decode("utf-8", errors="replace")
         sys.stdout.write(response)
         sys.stdout.flush()
 
-    print(f"[upload] Done.")
+    print("[upload] Done.")
     return True
 
 
@@ -325,11 +346,8 @@ def open_connection(port: "str | None", baud: int) -> serial.Serial:
 
     print(f"[console] Port {port} opened at {baud} baud")
 
-    # Give the CDC stack a moment to settle.
-    time.sleep(0.2)
-
-    # Read and discard any stale data in the buffer.
-    ser.reset_input_buffer()
+    # Brief settle for the CDC stack.
+    time.sleep(0.05)
 
     return ser
 
@@ -344,14 +362,14 @@ def print_device_info(port_device: str):
     for p in ports:
         if p.device == port_device:
             print(f"[console] Device info:")
-            print(f"           Port       : {p.device}")
-            print(f"           Description: {p.description}")
+            print(f"           Port        : {p.device}")
+            print(f"           Description : {p.description}")
             if p.vid is not None:
-                print(f"           VID:PID    : {p.vid:04X}:{p.pid:04X}")
+                print(f"           VID:PID     : {p.vid:04X}:{p.pid:04X}")
             if p.manufacturer:
                 print(f"           Manufacturer: {p.manufacturer}")
             if p.serial_number:
-                print(f"           Serial     : {p.serial_number}")
+                print(f"           Serial      : {p.serial_number}")
             return
 
 
@@ -396,6 +414,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="List all detected serial ports and exit.",
     )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Print each transmitted byte to stderr (for diagnosing input issues).",
+    )
     return parser
 
 
@@ -411,7 +434,6 @@ def main():
         list_serial_ports()
         return
 
-    # Set up log file tee.
     tee = None
     if args.log:
         tee = Tee(args.log)
@@ -419,7 +441,6 @@ def main():
 
     try:
         if args.upload:
-            # Upload is a one-shot operation — open a connection explicitly.
             ser = open_connection(args.port, args.baud)
             print_device_info(ser.port)
             try:
@@ -428,7 +449,7 @@ def main():
             finally:
                 ser.close()
         else:
-            interactive_mode(args.port, args.baud, tee)
+            interactive_mode(args.port, args.baud, tee, debug=args.debug)
     finally:
         if tee:
             tee.close()

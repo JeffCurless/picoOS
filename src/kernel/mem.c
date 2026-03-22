@@ -42,9 +42,9 @@ static uint8_t heap_memory[HEAP_SIZE] __attribute__((aligned(8)));
 static struct heap_block *heap_head = NULL;
 
 /* -------------------------------------------------------------------------
- * mem_init
+ * kmem_init
  * ------------------------------------------------------------------------- */
-void mem_init(void)
+void kmem_init(void)
 {
     memset(heap_memory, 0, sizeof(heap_memory));
 
@@ -134,9 +134,9 @@ void kfree(void *ptr)
 }
 
 /* -------------------------------------------------------------------------
- * mem_stats
+ * kmem_stats
  * ------------------------------------------------------------------------- */
-void mem_stats(uint32_t *used, uint32_t *free_bytes, uint32_t *largest)
+void kmem_stats(uint32_t *used, uint32_t *free_bytes, uint32_t *largest)
 {
     uint32_t total_used    = 0;
     uint32_t total_free    = 0;

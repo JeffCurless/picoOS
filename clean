@@ -1,0 +1,10 @@
+#!/usr/bin/bash
+
+mkdir -p kits
+for board in pico picow pico2 pico2w ; do 
+    echo "Cleaning  board_$board..."
+    if [ -d build_$board ] 
+    then
+        rm build_$board -r -f
+    fi
+done

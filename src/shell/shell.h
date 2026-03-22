@@ -54,4 +54,13 @@ void shell_print(const char *fmt, ...);
  */
 void shell_println(const char *s);
 
+/*
+ * shell_readline — read one line from the USB console into buf (max size-1
+ *                  chars plus NUL).  Echoes characters and handles backspace.
+ *                  Blocks until Enter is pressed.
+ *                  Returns the number of characters in the line (not counting
+ *                  the NUL terminator).
+ */
+int shell_readline(char *buf, uint32_t size);
+
 #endif /* SHELL_H */

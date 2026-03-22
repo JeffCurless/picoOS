@@ -1,6 +1,6 @@
 # Environment Setup, Build, and Flash Guide
 
-This guide covers everything needed to go from a fresh machine to a running picoOS image on a Raspberry Pi Pico.
+This guide covers everything needed to go from a fresh machine to a running picoOS image on a Raspberry Pi Pico or Pico 2.
 
 ---
 
@@ -8,7 +8,7 @@ This guide covers everything needed to go from a fresh machine to a running pico
 
 | Item | Notes |
 |------|-------|
-| Raspberry Pi Pico or Pico W | Any RP2040-based board works |
+| Raspberry Pi Pico, Pico W, Pico 2, or Pico 2 W | Any supported RP2040 or RP2350 board |
 | Micro-USB cable | Must carry data, not just power |
 | Development machine | Linux, macOS, or Windows with WSL2 |
 
@@ -87,31 +87,70 @@ cd picoOS
 
 ## 5. Build
 
+### Choose your board
+
+Pass `-DPICO_BOARD=<name>` on the CMake command line.  picoOS accepts underscore-free aliases and maps them internally to SDK-canonical names:
+
+| `-DPICO_BOARD=` | Board | Chip | WiFi |
+|----------------|-------|------|------|
+| `pico` | Raspberry Pi Pico | RP2040 | No |
+| `pico2` | Raspberry Pi Pico 2 | RP2350 | No |
+| `picow` | Raspberry Pi Pico W | RP2040 | Yes |
+| `pico2w` | Raspberry Pi Pico 2 W | RP2350 | Yes |
+
+If `-DPICO_BOARD` is omitted, CMake defaults to `pico`.
+
+### Configure and build
+
 ```bash
-mkdir build
-cd build
-cmake ..
-make -j$(nproc)
+# Configure (replace pico with your target board)
+cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico
+
+# Build
+make -j$(nproc) -C build
 ```
 
-CMake will automatically locate the Pico SDK via `PICO_SDK_PATH` and pull in `pico_sdk_import.cmake`.
-
-A successful build produces these files in `build/src/`:
+A successful build produces these files in `build/src/`, named after the board and version:
 
 | File | Purpose |
 |------|---------|
-| `picoos.uf2` | **Flash this** — UF2 image for drag-and-drop or `picotool` |
-| `picoos.elf` | ELF with debug symbols (used by GDB) |
-| `picoos.bin` | Raw binary |
-| `picoos.hex` | Intel HEX format |
-| `picoos.dis` | Disassembly listing |
+| `<board>os-v<ver>.uf2` | **Flash this** — UF2 image for drag-and-drop or `picotool` |
+| `<board>os-v<ver>.elf` | ELF with debug symbols (used by GDB) |
+| `<board>os-v<ver>.bin` | Raw binary |
+| `<board>os-v<ver>.dis` | Disassembly listing |
+| `<board>os-v<ver>.elf.map` | Linker map (used by `mem_report.py`) |
+
+For example, a `pico` build at version 0.1.4 produces `picoos-v0.1.4.uf2`.  A `pico2w` build produces `pico2wos-v0.1.4.uf2`.  All board variants can safely share the same `build/src/` output directory.
+
+### Build options (optional)
+
+The Display Pack drivers are ON by default.  Override on the CMake command line:
+
+```bash
+# No Display Pack hardware attached
+cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico \
+      -DPICOOS_DISPLAY_ENABLE=OFF
+
+# Display Pack present but suppress shell commands
+cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico \
+      -DPICOOS_DISPLAY_SHELL=OFF -DPICOOS_LED_SHELL=OFF
+```
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `PICOOS_DISPLAY_ENABLE` | ON | ST7789 driver + `/dev/display` (~32 KB framebuffer) |
+| `PICOOS_DISPLAY_SHELL` | ON | `display` shell command |
+| `PICOOS_LED_ENABLE` | ON | RGB LED driver + `/dev/led` |
+| `PICOOS_LED_SHELL` | ON | `led` shell command |
+
+Setting `PICOOS_DISPLAY_ENABLE=OFF` cascades OFF to all sub-features.  Setting any sub-feature ON automatically enables `PICOOS_DISPLAY_ENABLE`.
 
 ### Incremental builds
 
-After editing source files, just run `make` again from the `build/` directory:
+After editing source files, just run `make` again:
 
 ```bash
-cd build && make -j$(nproc)
+make -j$(nproc) -C build
 ```
 
 CMake tracks dependencies automatically — it will only recompile changed translation units.
@@ -119,9 +158,9 @@ CMake tracks dependencies automatically — it will only recompile changed trans
 ### Cleaning
 
 ```bash
-cd build && make clean      # remove compiled objects, keep CMake cache
+make -C build clean      # remove compiled objects, keep CMake cache
 # or wipe everything:
-rm -rf build/ && mkdir build && cd build && cmake .. && make -j$(nproc)
+rm -rf build && cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico && make -j$(nproc) -C build
 ```
 
 ---
@@ -133,11 +172,11 @@ rm -rf build/ && mkdir build && cd build && cmake .. && make -j$(nproc)
 1. Hold the **BOOTSEL** button on the Pico.
 2. While holding BOOTSEL, plug the USB cable into your machine.
 3. Release BOOTSEL. The Pico mounts as a USB mass-storage device named **RPI-RP2**.
-4. Copy `build/src/picoos.uf2` to the drive:
+4. Copy the `.uf2` file to the drive (substitute the actual filename for your board):
 
 ```bash
-cp build/src/picoos.uf2 /media/$USER/RPI-RP2/
-# macOS: cp build/src/picoos.uf2 /Volumes/RPI-RP2/
+cp build/src/picoos-v0.1.4.uf2 /media/$USER/RPI-RP2/
+# macOS: cp build/src/picoos-v0.1.4.uf2 /Volumes/RPI-RP2/
 ```
 
 5. The Pico unmounts and reboots into picoOS automatically.
@@ -154,7 +193,7 @@ sudo apt install picotool
 With the Pico in BOOTSEL mode:
 
 ```bash
-picotool load build/src/picoos.uf2 --force
+picotool load build/src/picoos-v0.1.4.uf2 --force
 picotool reboot
 ```
 
@@ -218,14 +257,29 @@ screen /dev/cu.usbmodem* 115200
 
 ## 8. First boot
 
-After flashing, the console should show:
+After flashing, the console should show something like:
 
 ```
-=== picoOS ===
-RP2040 dual-core educational OS
-Build: Mar  9 2026 14:23:01
+=======================================================
+picoOS  v0.1.4
+
+  Platform : RP2040, dual ARM Cortex-M0+ (133 MHz max)
+  Options  : none
+=======================================================
+
+Threads created:
+  TID 1  PID 1  pri 7  idle
+  TID 2  PID 2  pri 2  shell
+
+Starting scheduler...
 
 pico>
+```
+
+On a `picow` or `pico2w` build the Options line will include `WiFi`:
+
+```
+  Options  : WiFi
 ```
 
 Type `help` to list available shell commands.
@@ -236,11 +290,12 @@ Type `help` to list available shell commands.
 
 ### clangd (VS Code, Neovim, etc.)
 
-A `.clangd` file at the project root adds the correct include paths so the language server resolves kernel headers without needing the Pico SDK installed on the host.  For full SDK-aware completions and diagnostics, point clangd at the compile database generated by CMake:
+For full SDK-aware completions and diagnostics, point clangd at the compile database generated by CMake:
 
 ```bash
-cd build && cmake .. -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-ln -s build/compile_commands.json ../compile_commands.json
+cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico \
+      -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+ln -s build/compile_commands.json compile_commands.json
 ```
 
 Then open the project root in your editor.
@@ -257,7 +312,7 @@ Then open the project root in your editor.
 
 You need a second Pico flashed as a [Picoprobe](https://github.com/raspberrypi/picoprobe) (or a J-Link / CMSIS-DAP adapter) connected to the target Pico's SWD pins (SWDIO, SWDCLK, GND).
 
-Install OpenOCD with RP2040 support:
+Install OpenOCD with RP2040/RP2350 support:
 
 ```bash
 sudo apt install openocd
@@ -266,13 +321,17 @@ sudo apt install openocd
 In one terminal, start OpenOCD:
 
 ```bash
+# RP2040 (pico / picow)
 openocd -f interface/cmsis-dap.cfg -f target/rp2040.cfg
+
+# RP2350 (pico2 / pico2w)
+openocd -f interface/cmsis-dap.cfg -f target/rp2350.cfg
 ```
 
-In another terminal, launch GDB:
+In another terminal, launch GDB (substitute the actual ELF name for your board):
 
 ```bash
-arm-none-eabi-gdb build/src/picoos.elf
+arm-none-eabi-gdb build/src/picoos-v0.1.4.elf
 (gdb) target remote :3333
 (gdb) monitor reset init
 (gdb) continue
@@ -290,3 +349,4 @@ arm-none-eabi-gdb build/src/picoos.elf
 | Console output is garbled | Baud rate mismatch | picoOS uses 115200 — set your terminal to match |
 | `make` fails on `arm-none-eabi-gcc` not found | Toolchain not installed | Follow step 2 |
 | `picotool` can't find device | Pico not in BOOTSEL mode | Hold BOOTSEL while plugging in, or use `update` shell command |
+| No USB input on pico2_w | Stale build without M33 FPU fix | Ensure you are on the current branch and rebuild |
