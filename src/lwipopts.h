@@ -40,6 +40,7 @@
 #define LWIP_TCP                    1       /* available for future student use */
 #define LWIP_DHCP                   1       /* DHCP client for IP assignment    */
 #define LWIP_DNS                    0       /* not needed yet                   */
+#define LWIP_IGMP                   1       /* multicast group membership       */
 
 /* ---- TCP tuning (conservative for RP2040) --------------------------------- */
 #define TCP_MSS                     1460

@@ -100,14 +100,78 @@ source ~/.bashrc
 
 ## 4. Build picotool (optional — for scriptable flashing)
 
-`picotool` is not yet packaged for Fedora; build it from source. This step is optional — you can flash without it using BOOTSEL drag-and-drop.
+This step is optional — you can flash without it using BOOTSEL drag-and-drop (Method A in step 8).
+
+### Check the Fedora package first
+
+Recent Fedora releases may ship picotool directly:
+
+```bash
+dnf info picotool 2>/dev/null && sudo dnf install -y picotool
+```
+
+If that succeeds, skip to step 5.  If the package is not found, build from source below.
+
+### Build from source
+
+#### Prerequisites
+
+Ensure the build dependencies from step 1 are installed (`libusb1-devel`, `pkg-config`), then initialize the pico-sdk's mbedtls submodule — picotool requires it for binary signing and hashing:
+
+```bash
+cd ~/pico-sdk
+git submodule update --init lib/mbedtls
+```
+
+#### Clone and build
 
 ```bash
 git clone https://github.com/raspberrypi/picotool.git ~/picotool
 cd ~/picotool
-cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk"
+cmake -B build \
+    -DPICO_SDK_PATH="$HOME/pico-sdk" \
+    -DPICOTOOL_FLAT_INSTALL=1 \
+    -DCMAKE_INSTALL_PREFIX="$HOME/.local"
 cmake --build build -j$(nproc)
-sudo cmake --install build          # installs to /usr/local/bin
+cmake --install build
+```
+
+`PICOTOOL_FLAT_INSTALL=1` places the binary and its CMake config file together under `$HOME/.local/picotool/`, which makes it straightforward to point the pico-sdk at it in the next step.
+
+#### Make picotool visible to the pico-sdk
+
+Add both of the following to `~/.bashrc`:
+
+```bash
+export PATH="$HOME/.local/picotool:$PATH"
+export PICOTOOL_DIR="$HOME/.local/picotool"
+```
+
+`PICOTOOL_DIR` tells the pico-sdk's `Findpicotool.cmake` exactly where to find the installed CMake config file, preventing it from auto-fetching a second copy during your firmware builds.
+
+Reload:
+
+```bash
+source ~/.bashrc
+```
+
+Verify:
+
+```bash
+picotool version
+# picotool v2.x.x (x86_64-pc-linux-gnu, ...)
+```
+
+#### Build without USB support (offline / CI)
+
+If `libusb1-devel` is unavailable, add `-DPICOTOOL_NO_LIBUSB=1`. The resulting binary can still inspect and convert ELF/UF2 files but cannot communicate with a connected Pico over USB (`load`, `save`, `reboot` commands will be absent).
+
+```bash
+cmake -B build \
+    -DPICO_SDK_PATH="$HOME/pico-sdk" \
+    -DPICOTOOL_FLAT_INSTALL=1 \
+    -DPICOTOOL_NO_LIBUSB=1 \
+    -DCMAKE_INSTALL_PREFIX="$HOME/.local"
 ```
 
 ---
@@ -275,3 +339,6 @@ ln -sf build/compile_commands.json compile_commands.json
 | `RPI-RP2` not mounted | Fedora auto-mount disabled | `udisksctl mount -b /dev/sdX` or check `dmesg` |
 | `cmake` version too old | Fedora version ships cmake < 3.13 | `sudo dnf install cmake` or use `dnf module enable cmake` |
 | Build fails: missing `libusb` | Only affects picotool build | `sudo dnf install libusb1-devel` |
+| `picotool` build: `mbedtls` errors | mbedtls submodule not fetched | `cd ~/pico-sdk && git submodule update --init lib/mbedtls` |
+| pico-sdk fetches picotool during build | `PICOTOOL_DIR` not set | Add `export PICOTOOL_DIR="$HOME/.local/picotool"` to `~/.bashrc` |
+| `picotool: command not found` after install | `~/.local/picotool` not in PATH | Add `export PATH="$HOME/.local/picotool:$PATH"` to `~/.bashrc` |
