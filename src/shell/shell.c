@@ -19,6 +19,7 @@
  * ------------------------------------------------------------------------- */
 #ifdef PICOOS_DISPLAY_ENABLE
 #include "../drivers/display.h"
+#include "../kernel/dev.h"   /* DEV_DISPLAY, IOCTL_DISP_GET_BTNS, DISP_BTN_* */
 #endif
 
 /* -------------------------------------------------------------------------
@@ -513,6 +514,164 @@ static const shell_cmd_t builtin_cmds[] = {
 #define BUILTIN_CMD_COUNT ((int)(sizeof(builtin_cmds) / sizeof(builtin_cmds[0])))
 
 /* =========================================================================
+ * Button-binding — config-driven app launch from display pack buttons
+ *
+ * Reads config.txt at startup for BUTTONA=, BUTTONB=, BUTTONX=, BUTTONY=
+ * entries.  If any are present a background thread polls the buttons and
+ * spawns the named app on a press edge, refusing to start a second instance.
+ * All code is compiled only when PICOOS_DISPLAY_ENABLE is set.
+ * ========================================================================= */
+#ifdef PICOOS_DISPLAY_ENABLE
+
+#define BTN_CFG_BUFSZ  256u
+#define BTN_NAME_MAX    16u
+
+typedef struct {
+    uint8_t mask;                  /* DISP_BTN_A / B / X / Y             */
+    char    appname[BTN_NAME_MAX]; /* NUL-terminated app name to launch  */
+} btn_binding_t;
+
+static btn_binding_t btn_bindings[4];
+static int           btn_binding_count = 0;
+
+/* parse_btn_config — extract BUTTONA/B/X/Y=<appname> lines from buf. */
+static void parse_btn_config(const char *buf)
+{
+    static const struct { const char *key; size_t klen; uint8_t mask; } map[4] = {
+        { "BUTTONA=", 8u, DISP_BTN_A },
+        { "BUTTONB=", 8u, DISP_BTN_B },
+        { "BUTTONX=", 8u, DISP_BTN_X },
+        { "BUTTONY=", 8u, DISP_BTN_Y },
+    };
+    const char *p = buf;
+    while (*p) {
+        const char *eol = p;
+        while (*eol && *eol != '\n' && *eol != '\r') eol++;
+        size_t line_len = (size_t)(eol - p);
+
+        for (int i = 0; i < 4 && btn_binding_count < 4; i++) {
+            if (line_len <= map[i].klen) continue;
+            if (strncmp(p, map[i].key, map[i].klen) != 0) continue;
+            size_t vlen = line_len - map[i].klen;
+            if (vlen >= BTN_NAME_MAX) vlen = BTN_NAME_MAX - 1u;
+            btn_bindings[btn_binding_count].mask = map[i].mask;
+            memcpy(btn_bindings[btn_binding_count].appname, p + map[i].klen, vlen);
+            btn_bindings[btn_binding_count].appname[vlen] = '\0';
+            btn_binding_count++;
+            break;
+        }
+        p = eol;
+        while (*p == '\n' || *p == '\r') p++;
+    }
+}
+
+/* btn_monitor_thread — polls buttons at 100 ms; launches bound app on press. */
+static void btn_monitor_thread(void *arg)
+{
+    (void)arg;
+    /* Read the actual hardware state into prev before entering the loop.
+     * Without this, pins that float low before pull-ups are configured
+     * appear "pressed" on the first poll, triggering a spurious launch. */
+    uint8_t prev = 0u;
+    dev_ioctl(DEV_DISPLAY, IOCTL_DISP_GET_BTNS, &prev);
+    for (;;) {
+        sys_sleep(100);
+
+        uint8_t cur = 0u;
+        dev_ioctl(DEV_DISPLAY, IOCTL_DISP_GET_BTNS, &cur);
+        uint8_t pressed = cur & ~prev;   /* bits set only on the press edge */
+        prev = cur;
+        if (!pressed) continue;
+
+        for (int i = 0; i < btn_binding_count; i++) {
+            if (!(pressed & btn_bindings[i].mask)) continue;
+
+            /* Check if the app is already running */
+            bool running = false;
+            for (int j = 0; j < MAX_PROCESSES; j++) {
+                pcb_t *pr = task_get_process_slot(j);
+                if (pr && pr->alive &&
+                    strcmp(pr->name, btn_bindings[i].appname) == 0) {
+                    running = true;
+                    break;
+                }
+            }
+            if (running) {
+                printf("[shell] btn: '%s' already running\r\n",
+                       btn_bindings[i].appname);
+                continue;
+            }
+
+            /* Find entry point in app_table and launch */
+            for (int j = 0; j < app_table_size; j++) {
+                if (strcmp(app_table[j].name, btn_bindings[i].appname) != 0)
+                    continue;
+                static uint32_t btn_pid = 200u;
+                pcb_t *proc = task_create_process(btn_bindings[i].appname,
+                                                   btn_pid++);
+                if (!proc) {
+                    printf("[shell] btn: process pool full\r\n");
+                    break;
+                }
+                tcb_t *t = task_create_thread(proc, btn_bindings[i].appname,
+                                              app_table[j].entry, NULL,
+                                              app_table[j].priority,
+                                              DEFAULT_STACK_SIZE);
+                if (!t) {
+                    printf("[shell] btn: thread pool full\r\n");
+                    task_free_process(proc);
+                    break;
+                }
+                printf("[shell] btn: started '%s' PID %u TID %u\r\n",
+                       btn_bindings[i].appname, proc->pid, t->tid);
+                break;
+            }
+        }
+    }
+}
+
+/* shell_btn_init — read config.txt, parse button bindings, spawn monitor. */
+static void shell_btn_init(void)
+{
+    int fd = vfs_open("config.txt", VFS_O_RDONLY);
+    if (fd < 0) return;   /* no config file — nothing to do */
+
+    char buf[BTN_CFG_BUFSZ];
+    int n = vfs_read(fd, (uint8_t *)buf, sizeof(buf) - 1u);
+    vfs_close(fd);
+    if (n <= 0) return;
+    buf[n] = '\0';
+
+    parse_btn_config(buf);
+    if (btn_binding_count == 0) return;
+
+    /* Ensure GPIO pull-ups are configured — display_open() sets them.
+     * Safe to call multiple times; cray_one.c does the same after WiFi. */
+    dev_open(DEV_DISPLAY);
+    dev_ioctl(DEV_DISPLAY, IOCTL_DISP_CLEAR,  NULL);
+    dev_ioctl(DEV_DISPLAY, IOCTL_DISP_FLUSH,  NULL);
+
+    static const char     *btn_names[] = { "A",         "B",         "X",         "Y"         };
+    static const uint8_t   btn_masks[] = { DISP_BTN_A,  DISP_BTN_B,  DISP_BTN_X,  DISP_BTN_Y };
+    for (int i = 0; i < btn_binding_count; i++) {
+        for (int k = 0; k < 4; k++) {
+            if (btn_bindings[i].mask == btn_masks[k]) {
+                shell_print("[shell] btn %s -> %s\r\n",
+                            btn_names[k], btn_bindings[i].appname);
+                break;
+            }
+        }
+    }
+
+    pcb_t *kproc = task_get_kernel_proc();
+    if (!kproc) return;
+    task_create_thread(kproc, "btn-mon", btn_monitor_thread,
+                       NULL, 3u, DEFAULT_STACK_SIZE);
+}
+
+#endif /* PICOOS_DISPLAY_ENABLE */
+
+/* =========================================================================
  * shell_init
  * ========================================================================= */
 void shell_init(void)
@@ -520,6 +679,9 @@ void shell_init(void)
     for (int i = 0; i < BUILTIN_CMD_COUNT; i++) {
         shell_register_cmd(&builtin_cmds[i]);
     }
+#ifdef PICOOS_DISPLAY_ENABLE
+    shell_btn_init();
+#endif
 }
 
 /* =========================================================================

@@ -49,30 +49,42 @@ int wifi_connect(const char *ssid, const char *password)
     size_t ssid_len = strlen(ssid);
     size_t key_len  = (password && *password) ? strlen(password) : 0;
 
-    int rc = cyw43_wifi_join(&cyw43_state,
-                             ssid_len, (const uint8_t *)ssid,
-                             key_len,  (const uint8_t *)password,
-                             auth, NULL, 0);
-    if (rc != 0) {
-        g_state = WIFI_STATE_ERROR;
-        return rc;
+    /* The CYW43 chip occasionally returns CYW43_LINK_BADAUTH (-3) on the
+     * first join attempt even with correct credentials — a known transient
+     * in the driver.  Retry up to 3 times with a short back-off. */
+    for (int attempt = 1; attempt <= 3; attempt++) {
+        int rc = cyw43_wifi_join(&cyw43_state,
+                                 ssid_len, (const uint8_t *)ssid,
+                                 key_len,  (const uint8_t *)password,
+                                 auth, NULL, 0);
+        if (rc != 0) {
+            g_state = WIFI_STATE_ERROR;
+            return rc;
+        }
+
+        /* Wait for lwIP to complete association and DHCP (CYW43_LINK_UP).
+         * 200 iterations × 50 ms = 10 s per attempt. */
+        int status = CYW43_LINK_DOWN;
+        for (int i = 0; i < 200; i++) {
+            status = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
+            if (status == CYW43_LINK_UP) {
+                g_state = WIFI_STATE_UP;
+                return 0;
+            }
+            if (status < 0) break;
+            sys_sleep(50);
+        }
+
+        if (status == CYW43_LINK_UP) break;   /* connected — exit retry loop */
+
+        printf("[wifi] connect attempt %d failed (status %d)%s\r\n",
+               attempt, status, attempt < 3 ? " — retrying..." : "");
+
+        /* Leave the network before re-joining to reset chip state. */
+        cyw43_wifi_leave(&cyw43_state, CYW43_ITF_STA);
+        sys_sleep(500);
     }
 
-    /* The wifi-poll thread drives cyw43_arch_poll().  Wait here for lwIP to
-     * complete association and DHCP (CYW43_LINK_UP), or report a failure.
-     * 200 iterations × 50 ms = 10 s timeout. */
-    for (int i = 0; i < 200; i++) {
-        int status = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
-        if (status == CYW43_LINK_UP) {
-            g_state = WIFI_STATE_UP;
-            return 0;
-        }
-        if (status < 0) {
-            g_state = WIFI_STATE_ERROR;
-            return status;
-        }
-        sys_sleep(50);
-    }
     g_state = WIFI_STATE_ERROR;
     return -1;
 }

@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------------------
 set(PICOOS_VERSION_MAJOR 0)
 set(PICOOS_VERSION_MINOR 1)
-set(PICOOS_VERSION_EDIT  5)
+set(PICOOS_VERSION_EDIT  6)
 
 message(STATUS "picoOS version        : ${PICOOS_VERSION_MAJOR}.${PICOOS_VERSION_MINOR}.${PICOOS_VERSION_EDIT}")
 
@@ -65,10 +65,14 @@ if(PICO_RP2350)
     set(PICOOS_PLATFORM_STR "RP2350, dual ARM Cortex-M33 (150 MHz max)")
     set(PICOOS_SRAM_STR     "520 KB")
     set(PICOOS_FLASH_STR    "4 MB QSPI (XIP)")
+    set(PICOOS_FS_FLASH_SIZE "(3u * 1024u * 1024u)")   # 3 MB (4 MB total - 1 MB firmware)
+    set(PICOOS_FS_MAX_FILES  127u)
 else()
     set(PICOOS_PLATFORM_STR "RP2040, dual ARM Cortex-M0+ (133 MHz max)")
     set(PICOOS_SRAM_STR     "264 KB")
     set(PICOOS_FLASH_STR    "2 MB QSPI (XIP)")
+    set(PICOOS_FS_FLASH_SIZE "(1u * 1024u * 1024u)")   # 1 MB (2 MB total - 1 MB firmware)
+    set(PICOOS_FS_MAX_FILES  64u)
 endif()
 
 # PICO_CYW43_SUPPORTED is set by the SDK when the selected board has a CYW43 chip.
@@ -110,7 +114,9 @@ endif()
 
 if(PICOOS_HAS_WIFI)
     list(APPEND PICOOS_SOURCES kernel/wifi.c)
-    list(APPEND PICOOS_SOURCES apps/wifi_test.c)
+    if(PICOOS_DISPLAY_ENABLE)
+        list(APPEND PICOOS_SOURCES apps/cray_one.c)
+    endif()
 endif()
 
 add_executable(picoos ${PICOOS_SOURCES})
@@ -151,6 +157,8 @@ target_compile_definitions(picoos PRIVATE
     PICOOS_PLATFORM_STR="${PICOOS_PLATFORM_STR}"
     PICOOS_SRAM_STR="${PICOOS_SRAM_STR}"
     PICOOS_FLASH_STR="${PICOOS_FLASH_STR}"
+    FS_FLASH_SIZE=${PICOOS_FS_FLASH_SIZE}
+    FS_MAX_FILES=${PICOOS_FS_MAX_FILES}
 )
 
 if(PICOOS_DISPLAY_ENABLE)

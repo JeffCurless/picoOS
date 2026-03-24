@@ -6,8 +6,8 @@
 #include <stdint.h>
 #include "../shell/shell.h"
 
-#ifdef PICOOS_WIFI_ENABLE
-extern void wifi_test(void *arg);
+#if defined(PICOOS_WIFI_ENABLE) && defined(PICOOS_DISPLAY_ENABLE)
+extern void cray_one(void *arg);
 #endif
 
 /* =========================================================================
@@ -131,8 +131,8 @@ const app_entry_t app_table[] = {
     { "producer",  demo_producer, 4u },
     { "consumer",  demo_consumer, 4u },
     { "sensor",    demo_sensor,   5u },
-#ifdef PICOOS_WIFI_ENABLE
-    { "wifi-test", wifi_test,     3u },
+#if defined(PICOOS_WIFI_ENABLE) && defined(PICOOS_DISPLAY_ENABLE)
+    { "cray-one",  cray_one,      3u },
 #endif
 };
 

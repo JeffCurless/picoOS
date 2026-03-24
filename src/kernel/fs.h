@@ -7,24 +7,31 @@
 /* -------------------------------------------------------------------------
  * Filesystem constants
  * ------------------------------------------------------------------------- */
-#define FS_MAX_FILES      32u
+#ifndef FS_MAX_FILES
+#define FS_MAX_FILES      32u        /* override via CMake for board-specific sizing */
+#endif
 #define FS_NAME_MAX       16u
 #define FS_BLOCK_SIZE     4096u              /* matches flash erase sector   */
 #define FS_FLASH_OFFSET   (1024u * 1024u)   /* 1 MB into flash for FS region */
-#define FS_FLASH_SIZE     (512u  * 1024u)   /* 512 KB for filesystem        */
+#ifndef FS_FLASH_SIZE
+#define FS_FLASH_SIZE     (512u * 1024u)    /* override via CMake for board-specific sizing */
+#endif
 #define FS_SUPERBLOCK_MAGIC 0x50494353u     /* "PICS" in little-endian hex   */
 
 /* Maximum file data size: one flash sector (4 KB) per file.
  *
  * Flash layout (each row = one 4 KB sector):
- *   Sector 0       : Superblock (file metadata table)
- *   Sector 1       : File index 0 data
- *   Sector 2       : File index 1 data
+ *   Sector 0           : Superblock (file metadata table)
+ *   Sector 1           : File index 0 data
+ *   Sector 2           : File index 1 data
  *   ...
- *   Sector 32      : File index 31 data
+ *   Sector FS_MAX_FILES: File index (FS_MAX_FILES-1) data
  *
- * Total flash used: 33 * 4 KB = 132 KB (well within the 512 KB FS region).
- * RAM cost: ~1 KB superblock cache + 4 KB write scratch buffer.
+ * FS_MAX_FILES and FS_FLASH_SIZE are set per board by CMakeLists.txt:
+ *   RP2040: FS_MAX_FILES=64,  FS_FLASH_SIZE=1 MB  (2 MB flash - 1 MB firmware)
+ *   RP2350: FS_MAX_FILES=127, FS_FLASH_SIZE=3 MB  (4 MB flash - 1 MB firmware)
+ * Maximum is 127 files: superblock must fit in one 4 KB sector (12 + N×32 ≤ 4096).
+ * RAM cost: superblock cache (~2 KB RP2040 / ~4 KB RP2350) + 4 KB write scratch buffer.
  */
 #define FS_MAX_FILE_DATA    FS_BLOCK_SIZE   /* 4 KB max per file             */
 

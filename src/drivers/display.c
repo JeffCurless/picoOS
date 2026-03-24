@@ -317,6 +317,20 @@ static void display_flush_fb(void)
         return;
     }
 
+    /* Re-arm SPI0 before every flush.
+     *
+     * Other SDK subsystems active between flushes (notably the CYW43 WiFi
+     * driver's lwIP/PIO send path) can leave SPI0 in a state where
+     * spi_write_blocking() busy-waits forever.  Calling spi_init() +
+     * spi_set_format() resets the SPI0 peripheral and re-applies the
+     * correct settings; the ST7789 panel retains its configuration across
+     * an SPI peripheral reset so no display re-init is needed.
+     */
+    spi_init(spi0, 62500000u);
+    spi_set_format(spi0, 8u, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
+    gpio_set_function(DISP_PIN_SCK,  GPIO_FUNC_SPI);
+    gpio_set_function(DISP_PIN_MOSI, GPIO_FUNC_SPI);
+
     /* Column window: always the full logical width (physical 40–279). */
     st7789_cmd(ST7789_CASET);
     {
