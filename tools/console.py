@@ -296,16 +296,19 @@ def upload_file(ser: serial.Serial, local_path: str, remote_name: str):
           f"({len(lines)} lines, {len(text)} bytes)...")
 
     # Enter multi-line write mode.
-    _send_line(ser, f"fs write {remote_name}\r\n", echo_wait=0.1)
+    # Use bare \r (not \r\n): the Pico shell terminates lines on \r, and a
+    # trailing \n would be read as an extra empty line by shell_readline,
+    # inserting a blank line between every real line in the stored file.
+    _send_line(ser, f"fs write {remote_name}\r", echo_wait=0.1)
 
     for line in lines:
         # Guard against a lone '.' which would be misinterpreted as the sentinel.
         if line.strip() == ".":
             line = ". "
-        _send_line(ser, f"{line}\r\n")
+        _send_line(ser, f"{line}\r")
 
     # Send sentinel to close the file.
-    _send_line(ser, ".\r\n", echo_wait=0.3)
+    _send_line(ser, ".\r", echo_wait=0.3)
 
     # Collect and display the Pico's response.
     waiting = ser.in_waiting

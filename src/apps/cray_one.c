@@ -237,14 +237,18 @@ static void draw_initial_grid(void)
  * parse_config — scan a NUL-terminated text buffer for known KEY=VALUE pairs.
  *
  * Recognized keys:
- *   SSID=<string>        WiFi network name
- *   PASSWORD=<string>    WiFi password (may be absent for open networks)
+ *   SSID=<string>        WiFi network name (primary)
+ *   PASSWORD=<string>    WiFi password (primary; absent → open network)
+ *   SSIDALT=<string>     Alternate WiFi network name (fallback)
+ *   PASSWORDALT=<string> Alternate WiFi password (fallback)
  *   NODEID=<int>         This node's ID (0-based)
  *   MAXNODES=<int>       Total number of nodes in the cluster
  * ------------------------------------------------------------------------- */
 static void parse_config(const char *buf,
-                          char *ssid,     size_t ssid_sz,
-                          char *password, size_t pass_sz,
+                          char *ssid,      size_t ssid_sz,
+                          char *password,  size_t pass_sz,
+                          char *ssid_alt,  size_t ssid_alt_sz,
+                          char *pass_alt,  size_t pass_alt_sz,
                           int  *nodeid,
                           int  *maxnodes)
 {
@@ -254,11 +258,25 @@ static void parse_config(const char *buf,
         while (*eol && *eol != '\n' && *eol != '\r') eol++;
         size_t line_len = (size_t)(eol - p);
 
-        if (strncmp(p, "SSID=", 5) == 0) {
+        /* SSIDALT must be checked before SSID to avoid a prefix match. */
+        if (strncmp(p, "SSIDALT=", 8) == 0) {
+            size_t vlen = line_len - 8u;
+            if (vlen >= ssid_alt_sz) vlen = ssid_alt_sz - 1u;
+            memcpy(ssid_alt, p + 8, vlen);
+            ssid_alt[vlen] = '\0';
+
+        } else if (strncmp(p, "SSID=", 5) == 0) {
             size_t vlen = line_len - 5u;
             if (vlen >= ssid_sz) vlen = ssid_sz - 1u;
             memcpy(ssid, p + 5, vlen);
             ssid[vlen] = '\0';
+
+        /* PASSWORDALT must be checked before PASSWORD for the same reason. */
+        } else if (strncmp(p, "PASSWORDALT=", 12) == 0) {
+            size_t vlen = line_len - 12u;
+            if (vlen >= pass_alt_sz) vlen = pass_alt_sz - 1u;
+            memcpy(pass_alt, p + 12, vlen);
+            pass_alt[vlen] = '\0';
 
         } else if (strncmp(p, "PASSWORD=", 9) == 0) {
             size_t vlen = line_len - 9u;
@@ -404,11 +422,17 @@ void cray_one(void *arg)
     }
     buf[n] = '\0';
 
-    char ssid[CRED_MAXLEN]     = {0};
-    char password[CRED_MAXLEN] = {0};
+    char ssid[CRED_MAXLEN]      = {0};
+    char password[CRED_MAXLEN]  = {0};
+    char ssid_alt[CRED_MAXLEN]  = {0};
+    char pass_alt[CRED_MAXLEN]  = {0};
     int  nodeid   = 0;
     int  maxnodes = 1;
-    parse_config(buf, ssid, sizeof(ssid), password, sizeof(password),
+    parse_config(buf,
+                 ssid,     sizeof(ssid),
+                 password, sizeof(password),
+                 ssid_alt, sizeof(ssid_alt),
+                 pass_alt, sizeof(pass_alt),
                  &nodeid, &maxnodes);
 
     if (ssid[0] == '\0') {
@@ -430,11 +454,21 @@ void cray_one(void *arg)
     shell_print("[cray-one] SSID      : %s\r\n", ssid);
     shell_print("[cray-one] Password  : %s\r\n",
                 password[0] ? "(set)" : "(none — open network)");
+    if (ssid_alt[0]) {
+        shell_print("[cray-one] SSID alt  : %s\r\n", ssid_alt);
+        shell_print("[cray-one] Pass alt  : %s\r\n",
+                    pass_alt[0] ? "(set)" : "(none — open network)");
+    }
     shell_print("[cray-one] Node      : %d / %d\r\n", nodeid, maxnodes);
 
     /* ---- 2. Connect to WiFi first — display setup follows on success ---- */
-    shell_print("[cray-one] Connecting to WiFi...\r\n");
+    shell_print("[cray-one] Connecting to WiFi \"%s\"...\r\n", ssid);
     int rc = wifi_connect(ssid, password);
+    if (rc != 0 && ssid_alt[0] != '\0') {
+        shell_print("[cray-one] Primary failed (err %d) — trying \"%s\"...\r\n",
+                    rc, ssid_alt);
+        rc = wifi_connect(ssid_alt, pass_alt);
+    }
     if (rc != 0) {
         shell_print("[cray-one] Connection failed (err %d)\r\n", rc);
         return;
