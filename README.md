@@ -338,3 +338,9 @@ The project is designed to be modified.  Suggested starting points for students:
 3. **Extend the shell** — add new commands by calling `shell_register_cmd()` from any module
 4. **Launch Core 1 workers** — replace the Core 1 idle loop in `src/main.c` with real thread dispatch
 5. **Drive the display** — write a status dashboard using `/dev/display` ioctls
+
+---
+
+## License
+
+This project is source-available for educational and non-commercial use. You may study it, modify it, and share improvements, but you may not sell the software or remove the copyright/acknowledgement notice.
