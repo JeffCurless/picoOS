@@ -4,7 +4,7 @@ An educational operating system for the **Raspberry Pi Pico family (RP2040 / RP2
 
 ```
 =======================================================
-picoOS  v0.1.4
+picoOS  v0.1.7
 
   Platform : RP2040, dual ARM Cortex-M0+ (133 MHz max)
   Options  : none
@@ -26,7 +26,7 @@ pico> threads
 TID  PID  PRI  STATE     CPU-ms  STACK   NAME             CANARY
 ---  ---  ---  --------  ------  ------  ---------------  --------
 1    1    7    READY     142     2048    idle             OK
-2    2    2    RUNNING   1023    4096    shell            OK
+2    2    2    RUNNING   1023    2048    shell            OK
 ```
 
 ---
@@ -85,7 +85,7 @@ cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico
 make -j$(nproc) -C build
 
 # 4. Flash (hold BOOTSEL on Pico, then plug in USB)
-cp build/src/picoos-v0.1.4.uf2 /media/$USER/RPI-RP2/
+cp build/src/picoos-v0.1.7.uf2 /media/$USER/RPI-RP2/
 
 # 5. Open the console
 pip install pyserial
@@ -98,10 +98,10 @@ Pass `-DPICO_BOARD=<name>` to CMake.  picoOS accepts the underscore-free aliases
 
 | `-DPICO_BOARD=` | Board | Chip | WiFi | Output files |
 |----------------|-------|------|------|--------------|
-| `pico` | Raspberry Pi Pico | RP2040 | No | `picoos-v0.1.4.*` |
-| `pico2` | Raspberry Pi Pico 2 | RP2350 | No | `pico2os-v0.1.4.*` |
-| `picow` | Raspberry Pi Pico W | RP2040 | Yes | `picowos-v0.1.4.*` |
-| `pico2w` | Raspberry Pi Pico 2 W | RP2350 | Yes | `pico2wos-v0.1.4.*` |
+| `pico` | Raspberry Pi Pico | RP2040 | No | `picoos-v0.1.7.*` |
+| `pico2` | Raspberry Pi Pico 2 | RP2350 | No | `pico2os-v0.1.7.*` |
+| `picow` | Raspberry Pi Pico W | RP2040 | Yes | `picowos-v0.1.7.*` |
+| `pico2w` | Raspberry Pi Pico 2 W | RP2350 | Yes | `pico2wos-v0.1.7.*` |
 
 The output files (`.uf2`, `.bin`, `.elf`, `.elf.map`, `.dis`) are named after the board and include the version number, so builds for different boards can share the same output directory without conflict.
 
@@ -155,9 +155,10 @@ Once running, the USB shell accepts:
 | `mem` | Memory usage and heap stats |
 | `ls` | List filesystem files |
 | `cat <file>` | Print a file |
-| `write <file> <data>` | Create or overwrite a file |
+| `fs write <file> [text]` | Create or overwrite a file (omit `[text]` for multi-line mode; end with `.` alone) |
+| `fs append <file> <text>` | Append a line to an existing file |
+| `fs format` | Erase all files and reinitialise the filesystem |
 | `rm <file>` | Delete a file |
-| `format` | Erase all files and reinitialise the filesystem |
 | `run <app>` | Launch a built-in application |
 | `trace on\|off` | Enable/disable scheduler trace output |
 | `update` | Reboot into USB BOOTSEL mode for reflashing |
@@ -260,13 +261,13 @@ The `tools/mem_report.py` script derives live numbers from the linker map after 
 
 ```bash
 # Pass the board-named map file as a positional argument
-python3 tools/mem_report.py build/src/picoos-v0.1.4.elf.map
+python3 tools/mem_report.py build/src/picoos-v0.1.7.elf.map
 
 # Or use the --map option
-python3 tools/mem_report.py --map build/src/pico2wos-v0.1.4.elf.map
+python3 tools/mem_report.py --map build/src/pico2wos-v0.1.7.elf.map
 
 # One-line summary
-python3 tools/mem_report.py build/src/picoos-v0.1.4.elf.map --brief
+python3 tools/mem_report.py build/src/picoos-v0.1.7.elf.map --brief
 ```
 
 RP2040 typical breakdown with display and LED enabled:
@@ -293,7 +294,7 @@ Connects to the Pico over USB serial:
 - Auto-detection of the Pico by USB VID:PID (`2E8A:000A`)
 - Interactive shell in raw terminal mode (local echo disabled; Pico echoes instead)
 - `--log FILE` — tee all output to a log file
-- `--upload FILE DEST` — transfer a file using the `write` shell command
+- `--upload FILE DEST` — transfer a file using the `fs write` shell command
 - `--list-ports` — list available serial ports
 
 ```bash
@@ -303,11 +304,11 @@ python3 tools/console.py --help
 
 ### `tools/mem_report.py`
 
-Parses the linker map produced by every build and prints an SRAM usage breakdown by subsystem.  The map file is named after the board and version (e.g. `build/src/picoos-v0.1.4.elf.map`).
+Parses the linker map produced by every build and prints an SRAM usage breakdown by subsystem.  The map file is named after the board and version (e.g. `build/src/picoos-v0.1.7.elf.map`).
 
 ```bash
-python3 tools/mem_report.py build/src/picoos-v0.1.4.elf.map   # positional path
-python3 tools/mem_report.py --map build/src/picoos-v0.1.4.elf.map  # named option
+python3 tools/mem_report.py build/src/picoos-v0.1.7.elf.map   # positional path
+python3 tools/mem_report.py --map build/src/picoos-v0.1.7.elf.map  # named option
 python3 tools/mem_report.py --brief                             # one-line summary (uses default path)
 ```
 
