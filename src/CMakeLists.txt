@@ -112,8 +112,10 @@ message(STATUS "picoOS WiFi           : ${PICOOS_HAS_WIFI}")
 # ---------------------------------------------------------------------------
 option(PICOOS_INCLUDE_DEMO_APPS
     "Include built-in demo apps (producer/consumer/sensor) and their app_table" ON)
-set(PICOOS_APP_SOURCES      "" CACHE STRING "Extra app .c files from parent project (absolute paths)")
-set(PICOOS_APP_INCLUDE_DIRS "" CACHE STRING "Extra include dirs from parent project (absolute paths)")
+# PICOOS_APP_SOURCES and PICOOS_APP_INCLUDE_DIRS must be set as normal variables
+# by the parent CMakeLists.txt *before* add_subdirectory(picoOS/src).
+# Do NOT declare them as CACHE variables here — a CACHE declaration with an
+# empty default would shadow whatever the parent project passed in.
 
 message(STATUS "picoOS demo apps      : ${PICOOS_INCLUDE_DEMO_APPS}")
 

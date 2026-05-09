@@ -171,21 +171,26 @@ pico_sdk_init()
 # ---------------------------------------------------------------------------
 # Application injection
 #
-# PICOOS_INCLUDE_DEMO_APPS defaults OFF here so the project owns the app
-# table.  Pass -DPICOOS_INCLUDE_DEMO_APPS=ON on the cmake command line to
-# substitute the picoOS built-in demo apps instead (see "Building with demo
-# apps" below).
+# Use a project-owned option so the user can pass -DMYPROJECT_DEMO=ON to
+# substitute the picoOS built-in demo apps for hardware bring-up.
+#
+# IMPORTANT: set PICOOS_INCLUDE_DEMO_APPS and PICOOS_APP_SOURCES as normal
+# CMake variables (not CACHE variables) before add_subdirectory().  Passing
+# them as -D flags would create cache entries that conflict with picoOS's own
+# option() declarations inside the subdirectory.
 # ---------------------------------------------------------------------------
-if(NOT PICOOS_INCLUDE_DEMO_APPS)
-    set(PICOOS_INCLUDE_DEMO_APPS OFF)
+option(MYPROJECT_DEMO "Build with picoOS demo apps instead of project apps" OFF)
 
-    # Absolute paths are required because picoOS/src resolves relative paths
-    # against its own source directory, not the project root.
+if(MYPROJECT_DEMO)
+    set(PICOOS_INCLUDE_DEMO_APPS ON)
+else()
+    set(PICOOS_INCLUDE_DEMO_APPS OFF)
+    # Absolute paths are required — picoOS/src resolves relative paths against
+    # its own source directory, not the project root.
     set(PICOOS_APP_SOURCES
         ${CMAKE_CURRENT_SOURCE_DIR}/apps/app_table.c
         ${CMAKE_CURRENT_SOURCE_DIR}/apps/myapp.c
     )
-
     set(PICOOS_APP_INCLUDE_DIRS
         ${CMAKE_CURRENT_SOURCE_DIR}/apps
     )
@@ -194,7 +199,7 @@ endif()
 add_subdirectory(picoOS/src)
 ```
 
-When you add a new application file (e.g. `apps/otherapp.c`), append it to `PICOOS_APP_SOURCES` and add its entry to `apps/app_table.c`.
+When you add a new application file (e.g. `apps/otherapp.c`), append it to `PICOOS_APP_SOURCES` in `CMakeLists.txt` and add its entry to `apps/app_table.c`.
 
 ---
 
@@ -289,7 +294,7 @@ Flash the appropriate `.uf2` to your Pico:
 1. Hold **BOOTSEL** while plugging in USB.  The Pico mounts as a mass-storage drive.
 2. Copy the `.uf2` to the drive:
    ```bash
-   cp kits/picoos_D-v0.1.9.uf2 /media/$USER/RPI-RP2/
+   cp kits/picoos_D-v0.2.0.uf2 /media/$USER/RPI-RP2/
    ```
 3. The Pico reboots automatically.
 
@@ -311,33 +316,25 @@ Kill the app with `killproc <pid>` (find the PID with `ps`).
 
 The picoOS repo ships three demonstration apps — **producer**, **consumer**, and **sensor** — that exercise inter-process communication using message queues and semaphores.  These are useful for smoke-testing the kernel on new hardware or as reference code.
 
-To build your project firmware with the demo apps instead of your own app table, pass `-DPICOOS_INCLUDE_DEMO_APPS=ON`:
+The project `CMakeLists.txt` exposes a project-owned flag `MYPROJECT_DEMO` (rename this to match your project).  Pass it to `cmake` to swap in the picoOS demo apps:
 
 ```bash
 cmake -B build_pico_demo \
       -DPICO_SDK_PATH="$HOME/workspace/pico-sdk" \
       -DPICO_BOARD=pico \
       -DPICOOS_DISPLAY_ENABLE=ON \
-      -DPICOOS_INCLUDE_DEMO_APPS=ON
+      -DMYPROJECT_DEMO=ON
 make -j$(nproc) -C build_pico_demo
 ```
 
-When `PICOOS_INCLUDE_DEMO_APPS=ON`:
-- `picoOS/src/apps/demo.c` is compiled (it defines `app_table[]` with the three demo apps).
-- Your project's `apps/app_table.c` is **not** compiled (the `if(NOT PICOOS_INCLUDE_DEMO_APPS)` block in your `CMakeLists.txt` is skipped).
-- The shell `run` command will offer `producer`, `consumer`, and `sensor`.
+When `MYPROJECT_DEMO=ON`:
+- `picoOS/src/apps/demo.c` is compiled (defines `app_table[]` with the demo apps).
+- Your project's `apps/app_table.c` is **not** compiled — `PICOOS_APP_SOURCES` is not set.
+- The shell `run` command offers `producer`, `consumer`, and `sensor`.
 
-This also works on a Pico W with a display attached — the `cray-one` app (a WiFi + display demo) is automatically included:
+On a Pico W with a display attached the `cray-one` WiFi+display demo is also included automatically.
 
-```bash
-cmake -B build_picow_demo \
-      -DPICO_SDK_PATH="$HOME/workspace/pico-sdk" \
-      -DPICO_BOARD=picow \
-      -DPICOOS_DISPLAY_ENABLE=ON \
-      -DPICOOS_INCLUDE_DEMO_APPS=ON
-```
-
-To add a `demo` target to your `build` script so you can run `./build demo`, append a case to the script's `case` statement:
+To add a `demo` target to your `build` script:
 
 ```bash
 case "${1:-all}" in
@@ -345,12 +342,11 @@ case "${1:-all}" in
     pico)  BOARDS="pico picow" ;;
     pico2) BOARDS="pico2 pico2w" ;;
     demo)
-        # Build one demo variant per board family for hardware bring-up
         cmake -B build_pico_demo  -DPICO_SDK_PATH="$SDK" -DPICO_BOARD=pico  \
-              -DPICOOS_DISPLAY_ENABLE=ON -DPICOOS_INCLUDE_DEMO_APPS=ON
+              -DPICOOS_DISPLAY_ENABLE=ON -DMYPROJECT_DEMO=ON
         make -j"$JOBS" -C build_pico_demo
         cmake -B build_pico2_demo -DPICO_SDK_PATH="$SDK" -DPICO_BOARD=pico2 \
-              -DPICOOS_DISPLAY_ENABLE=ON -DPICOOS_INCLUDE_DEMO_APPS=ON
+              -DPICOOS_DISPLAY_ENABLE=ON -DMYPROJECT_DEMO=ON
         make -j"$JOBS" -C build_pico2_demo
         cp -f build_*_demo/picoOS/src/*.uf2 kits/
         exit 0
