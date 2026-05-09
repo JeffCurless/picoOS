@@ -110,6 +110,18 @@ int wifi_disconnect(void)
     return 0;
 }
 
+int wifi_scan_is_done(void)
+{
+    return g_scan_done ? 1 : 0;
+}
+
+int wifi_get_scan_results(const wifi_scan_result_t **out_results, int *out_count)
+{
+    *out_results = g_scan;
+    *out_count   = (int)g_scan_count;
+    return 0;
+}
+
 const char *wifi_get_ip_str(void)
 {
     static char buf[16];
