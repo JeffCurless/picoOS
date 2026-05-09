@@ -39,6 +39,8 @@ typedef struct {
 void         wifi_init(void);
 wifi_state_t wifi_get_state(void);
 int          wifi_scan(void);
+int          wifi_scan_is_done(void);
+int          wifi_get_scan_results(const wifi_scan_result_t **out_results, int *out_count);
 int          wifi_connect(const char *ssid, const char *password);
 int          wifi_disconnect(void);
 const char  *wifi_get_ip_str(void);  /* returns dotted-decimal IP, or "0.0.0.0" */
