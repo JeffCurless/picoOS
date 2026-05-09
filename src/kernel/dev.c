@@ -360,6 +360,7 @@ void dev_init(void)
 {
 #ifdef PICOOS_DISPLAY_ENABLE
     display_shell_register();   /* register 'display' shell command (no-op if PICOOS_DISPLAY_SHELL unset) */
+    dev_open(DEV_DISPLAY);      /* eager init — hardware ready before scheduler starts, splash fires here */
 #endif
 #ifdef PICOOS_LED_ENABLE
     led_shell_register();       /* register 'led' shell command (no-op if PICOOS_LED_SHELL unset) */

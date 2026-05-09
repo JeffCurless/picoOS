@@ -524,6 +524,22 @@ int display_open(void)
     if (!initialized) {
         display_hw_init();
         initialized = true;
+
+        /* Splash: blue fill + centered title, flushed immediately to give the
+         * earliest possible visual feedback and assess boot-splash feasibility. */
+        {
+#ifdef PICOOS_DISPLAY_PACK2
+            const uint8_t scale = 3u;
+#else
+            const uint8_t scale = 2u;
+#endif
+            int tx = (int)((DISP_WIDTH  - 6u * 8u * scale) / 2u);
+            int ty = (int)((DISP_HEIGHT - 8u * scale) / 2u);
+            memset(framebuffer, COLOR_BLUE, sizeof(framebuffer));
+            dirty_mark_all();
+            draw_text_impl(tx, ty, "picoOS", COLOR_WHITE, COLOR_BLUE, scale);
+            display_flush_fb();
+        }
     }
     write_cursor = 0u;
     return 0;
