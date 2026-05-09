@@ -31,6 +31,7 @@ typedef enum {
 
 typedef struct {
     char    ssid[33];
+    uint8_t bssid[6];
     int16_t rssi;
     uint8_t channel;
     uint8_t auth_mode;
@@ -56,6 +57,7 @@ typedef struct {
 typedef struct {
     uint8_t  ssid[32];
     uint8_t  ssid_len;
+    uint8_t  bssid[6];
     int16_t  rssi;
     uint8_t  channel;
     uint16_t auth_mode;

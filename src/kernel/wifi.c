@@ -37,6 +37,7 @@ static int scan_result_cb(void *env, const cyw43_ev_scan_result_t *r)
     int len = r->ssid_len < 32 ? r->ssid_len : 32;
     memcpy(g_scan[i].ssid, r->ssid, len);
     g_scan[i].ssid[len] = '\0';
+    memcpy(g_scan[i].bssid, r->bssid, 6);
     g_scan[i].rssi      = r->rssi;
     g_scan[i].channel   = r->channel;
     g_scan[i].auth_mode = (uint8_t)r->auth_mode;
