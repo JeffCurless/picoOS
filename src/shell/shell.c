@@ -686,6 +686,79 @@ static void shell_btn_init(void)
 #endif /* PICOOS_DISPLAY_ENABLE */
 
 /* =========================================================================
+ * AUTORUN — config-driven app launch on boot
+ *
+ * Reads config.txt for an AUTORUN=<appname> entry.  If found, spawns the
+ * named app after the shell initialises its command table but before the
+ * interactive prompt appears.
+ * ========================================================================= */
+
+#define AUTORUN_CFG_BUFSZ  256u
+#define AUTORUN_NAME_MAX    32u
+
+static void shell_autorun_init(void)
+{
+    int fd = vfs_open("config.txt", VFS_O_RDONLY);
+    if (fd < 0) return;
+
+    char buf[AUTORUN_CFG_BUFSZ];
+    int n = vfs_read(fd, (uint8_t *)buf, sizeof(buf) - 1u);
+    vfs_close(fd);
+    if (n <= 0) return;
+    buf[n] = '\0';
+
+    static const char key[] = "AUTORUN=";
+    static const size_t klen = sizeof(key) - 1u;
+    char appname[AUTORUN_NAME_MAX];
+    appname[0] = '\0';
+
+    const char *p = buf;
+    while (*p) {
+        const char *eol = p;
+        while (*eol && *eol != '\n' && *eol != '\r') eol++;
+        size_t line_len = (size_t)(eol - p);
+
+        if (line_len > klen && strncmp(p, key, klen) == 0) {
+            size_t vlen = line_len - klen;
+            if (vlen >= AUTORUN_NAME_MAX) vlen = AUTORUN_NAME_MAX - 1u;
+            memcpy(appname, p + klen, vlen);
+            appname[vlen] = '\0';
+            break;
+        }
+
+        p = eol;
+        while (*p == '\n' || *p == '\r') p++;
+    }
+
+    if (appname[0] == '\0') return;
+
+    for (int i = 0; i < app_table_size; i++) {
+        if (strcmp(app_table[i].name, appname) != 0) continue;
+
+        static uint32_t autorun_pid = 50u;
+        pcb_t *proc = task_create_process(appname, autorun_pid++);
+        if (!proc) {
+            printf("[shell] autorun: process pool full\r\n");
+            return;
+        }
+        tcb_t *t = task_create_thread(proc, appname,
+                                      app_table[i].entry, NULL,
+                                      app_table[i].priority,
+                                      DEFAULT_STACK_SIZE);
+        if (!t) {
+            printf("[shell] autorun: thread pool full\r\n");
+            task_free_process(proc);
+            return;
+        }
+        printf("[shell] autorun: started '%s' PID %u TID %u\r\n",
+               appname, proc->pid, t->tid);
+        return;
+    }
+
+    printf("[shell] autorun: app '%s' not found\r\n", appname);
+}
+
+/* =========================================================================
  * shell_init
  * ========================================================================= */
 void shell_init(void)
@@ -693,6 +766,7 @@ void shell_init(void)
     for (int i = 0; i < BUILTIN_CMD_COUNT; i++) {
         shell_register_cmd(&builtin_cmds[i]);
     }
+    shell_autorun_init();
 #ifdef PICOOS_DISPLAY_ENABLE
     shell_btn_init();
 #endif
