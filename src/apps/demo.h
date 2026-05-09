@@ -39,18 +39,9 @@ void demo_consumer(void *arg);
 void demo_sensor(void *arg);
 
 /* -------------------------------------------------------------------------
- * Application table
- *
- * The shell 'run' command looks up entries in this table to spawn apps as
- * new processes.
+ * Application table — type and extern declarations live in app_table.h so
+ * that external projects can include the ABI without pulling in demo internals.
  * ------------------------------------------------------------------------- */
-typedef struct {
-    const char *name;
-    void      (*entry)(void *);
-    uint8_t    priority;
-} app_entry_t;
-
-extern const app_entry_t app_table[];
-extern const int         app_table_size;
+#include "app_table.h"
 
 #endif /* APPS_DEMO_H */

@@ -13,10 +13,14 @@
  */
 
 /*
- * display.c — Pimoroni Pico Display Pack (ST7789, 240×135, RGB332) driver
+ * display.c — Pimoroni Pico Display Pack / Display Pack 2 (ST7789, RGB332) driver
+ *
+ * Target display is selected at compile time via PICOOS_DISPLAY_PACK2:
+ *   unset / 0 : Display Pack  — ST7789  240×135, ~32 KB framebuffer
+ *   1         : Display Pack 2 — ST7789V 320×240, ~75 KB framebuffer
  *
  * Registers as DEV_DISPLAY in the device table and as /dev/display in the VFS.
- * Maintains a 32 KB RGB332 framebuffer (expanded to RGB565 on flush).
+ * Maintains an RGB332 framebuffer (expanded to RGB565 on flush).
  * Callers draw into the framebuffer and trigger an SPI transfer with
  * IOCTL_DISP_FLUSH.  Only rows that have been modified since the last flush
  * are transmitted (dirty-row tracking).
@@ -48,10 +52,16 @@
 #define DISP_PIN_BTN_X 14u
 #define DISP_PIN_BTN_Y 15u
 
-/* Viewport offset inside the ST7789 320×240 physical array.
- * These match the CASET/RASET values sent during hw_init. */
+/* Viewport offset inside the ST7789 physical array.
+ * Display Pack uses a 240×135 window of the 320×240 physical array.
+ * Display Pack 2 uses the full 320×240 array, so both offsets are 0. */
+#ifdef PICOOS_DISPLAY_PACK2
+#define DISP_COL_OFFSET  0u
+#define DISP_ROW_OFFSET  0u
+#else
 #define DISP_COL_OFFSET 40u   /* physical col 40 = logical col 0 */
 #define DISP_ROW_OFFSET 53u   /* physical row 53 = logical row 0 */
+#endif
 
 /* ST7789 command bytes */
 #define ST7789_SWRESET 0x01u
@@ -289,17 +299,23 @@ static void display_hw_init(void)
     st7789_cmd(ST7789_MADCTL);
     st7789_data1(0x70u);            /* landscape, BGR */
 
-    /* Column address: 40 to 279 */
+    /* Column window: physical DISP_COL_OFFSET to DISP_COL_OFFSET + DISP_WIDTH - 1 */
     st7789_cmd(ST7789_CASET);
     {
-        uint8_t d[] = { 0x00u, 0x28u, 0x01u, 0x17u };
+        uint16_t cs = (uint16_t)DISP_COL_OFFSET;
+        uint16_t ce = (uint16_t)(DISP_COL_OFFSET + DISP_WIDTH - 1u);
+        uint8_t d[] = { (uint8_t)(cs >> 8), (uint8_t)(cs & 0xFFu),
+                        (uint8_t)(ce >> 8), (uint8_t)(ce & 0xFFu) };
         st7789_data(d, 4u);
     }
 
-    /* Row address: physical 53 to 187 (logical 0 to 134 = DISP_HEIGHT-1) */
+    /* Row window: physical DISP_ROW_OFFSET to DISP_ROW_OFFSET + DISP_HEIGHT - 1 */
     st7789_cmd(ST7789_RASET);
     {
-        uint8_t d[] = { 0x00u, 0x35u, 0x00u, 0xBBu };
+        uint16_t rs = (uint16_t)DISP_ROW_OFFSET;
+        uint16_t re = (uint16_t)(DISP_ROW_OFFSET + DISP_HEIGHT - 1u);
+        uint8_t d[] = { (uint8_t)(rs >> 8), (uint8_t)(rs & 0xFFu),
+                        (uint8_t)(re >> 8), (uint8_t)(re & 0xFFu) };
         st7789_data(d, 4u);
     }
 
@@ -345,15 +361,18 @@ static void display_flush_fb(void)
     gpio_set_function(DISP_PIN_SCK,  GPIO_FUNC_SPI);
     gpio_set_function(DISP_PIN_MOSI, GPIO_FUNC_SPI);
 
-    /* Column window: always the full logical width (physical 40–279). */
+    /* Column window: always the full logical width. */
     st7789_cmd(ST7789_CASET);
     {
-        uint8_t d[] = { 0x00u, 0x28u, 0x01u, 0x17u };
+        uint16_t cs = (uint16_t)DISP_COL_OFFSET;
+        uint16_t ce = (uint16_t)(DISP_COL_OFFSET + DISP_WIDTH - 1u);
+        uint8_t d[] = { (uint8_t)(cs >> 8), (uint8_t)(cs & 0xFFu),
+                        (uint8_t)(ce >> 8), (uint8_t)(ce & 0xFFu) };
         st7789_data(d, 4u);
     }
 
     /* Row window: dirty rows only.
-     * Physical row = logical row + DISP_ROW_OFFSET (53). */
+     * Physical row = logical row + DISP_ROW_OFFSET. */
     uint16_t row_phys_start = (uint16_t)(DISP_ROW_OFFSET + dirty_min);
     uint16_t row_phys_end   = (uint16_t)(DISP_ROW_OFFSET + dirty_max);
     st7789_cmd(ST7789_RASET);
@@ -717,8 +736,13 @@ static int cmd_display(int argc, char **argv)
         if (btns == 0u) { shell_println("(none pressed)"); }
 
     } else if (strcmp(sub, "info") == 0) {
-        shell_print("display: %ux%u  init=%s\r\n",
+        shell_print("display: %ux%u  model=%s  init=%s\r\n",
                     DISP_WIDTH, DISP_HEIGHT,
+#ifdef PICOOS_DISPLAY_PACK2
+                    "Display Pack 2",
+#else
+                    "Display Pack",
+#endif
                     initialized ? "yes" : "no");
 
     } else {
@@ -730,7 +754,11 @@ static int cmd_display(int argc, char **argv)
 
 static const shell_cmd_t display_cmd = {
     .name    = "display",
-    .help    = "ST7789 display: clear/fill/text/line/rect/backlight/buttons/info",
+#ifdef PICOOS_DISPLAY_PACK2
+    .help    = "ST7789V 320x240 display: clear/fill/text/line/rect/backlight/buttons/info",
+#else
+    .help    = "ST7789 240x135 display: clear/fill/text/line/rect/backlight/buttons/info",
+#endif
     .handler = cmd_display,
 };
 

@@ -228,6 +228,10 @@ static const shell_cmd_t wifi_cmd = {
 /* ---- wifi_init ----------------------------------------------------------- */
 void wifi_init(void)
 {
+    static bool initialized = false;
+    if (initialized) return;
+    initialized = true;
+
     if (cyw43_arch_init() != 0) {
         printf("[wifi] cyw43_arch_init failed\r\n");
         return;

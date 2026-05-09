@@ -82,6 +82,10 @@ typedef unsigned int uint;
 /* CMSIS-style register intrinsics ---------------------------------------- */
 static inline void     __disable_irq(void)          {}
 static inline void     __enable_irq(void)            {}
+
+/* Pico SDK interrupt save/restore (hardware/sync.h on ARM) ---------------- */
+static inline uint32_t save_and_disable_interrupts(void) { return 0; }
+static inline void     restore_interrupts(uint32_t s)    { (void)s; }
 static inline void     __dmb(void)                   {}
 static inline void     __dsb(void)                   {}
 static inline void     __isb(void)                   {}

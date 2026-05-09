@@ -19,7 +19,7 @@
 #include "../kernel/vfs.h"
 #include "../kernel/fs.h"
 #include "../kernel/syscall.h"
-#include "../apps/demo.h"
+#include "../apps/app_table.h"
 
 #include "../kernel/arch.h"   /* SDK wrappers + host stubs */
 

@@ -2,8 +2,8 @@
 # Version
 # ---------------------------------------------------------------------------
 set(PICOOS_VERSION_MAJOR 0)
-set(PICOOS_VERSION_MINOR 1)
-set(PICOOS_VERSION_EDIT  8)
+set(PICOOS_VERSION_MINOR 2)
+set(PICOOS_VERSION_EDIT  0)
 
 message(STATUS "picoOS version        : ${PICOOS_VERSION_MAJOR}.${PICOOS_VERSION_MINOR}.${PICOOS_VERSION_EDIT}")
 
@@ -22,6 +22,7 @@ message(STATUS "picoOS version        : ${PICOOS_VERSION_MAJOR}.${PICOOS_VERSION
 #   LED shell requires LED driver: PICOOS_LED_SHELL=ON forces PICOOS_LED_ENABLE=ON.
 # ---------------------------------------------------------------------------
 option(PICOOS_DISPLAY_ENABLE "Include Pimoroni Pico Display Pack driver"         ON)
+option(PICOOS_DISPLAY_PACK2  "Use Display Pack 2 (320x240) instead of Display Pack (240x135)" OFF)
 option(PICOOS_DISPLAY_SHELL  "Register 'display' shell command"                  ON)
 option(PICOOS_LED_ENABLE     "Include Pico Display Pack tri-color LED driver"    ON)
 option(PICOOS_LED_SHELL      "Register 'led' shell command"                      ON)
@@ -29,7 +30,7 @@ option(PICOOS_LED_SHELL      "Register 'led' shell command"                     
 # Push-down runs first: PICOOS_DISPLAY_ENABLE=OFF disables every sub-feature.
 # This gives the master switch priority over individual sub-feature defaults.
 if(NOT PICOOS_DISPLAY_ENABLE)
-    foreach(_feat PICOOS_DISPLAY_SHELL PICOOS_LED_ENABLE PICOOS_LED_SHELL)
+    foreach(_feat PICOOS_DISPLAY_PACK2 PICOOS_DISPLAY_SHELL PICOOS_LED_ENABLE PICOOS_LED_SHELL)
         if(${_feat})
             message(STATUS "PICOOS_DISPLAY_ENABLE=OFF — disabling ${_feat}")
             set(${_feat} OFF)
@@ -40,7 +41,7 @@ endif()
 # Pull-up runs second: any sub-feature explicitly ON enables the hardware driver.
 # (After push-down, sub-features are only ON if the user set them explicitly AND
 #  PICOOS_DISPLAY_ENABLE was not set to OFF.)
-if((PICOOS_DISPLAY_SHELL OR PICOOS_LED_ENABLE OR PICOOS_LED_SHELL) AND NOT PICOOS_DISPLAY_ENABLE)
+if((PICOOS_DISPLAY_PACK2 OR PICOOS_DISPLAY_SHELL OR PICOOS_LED_ENABLE OR PICOOS_LED_SHELL) AND NOT PICOOS_DISPLAY_ENABLE)
     message(STATUS "Display Pack sub-feature enabled — forcing PICOOS_DISPLAY_ENABLE=ON")
     set(PICOOS_DISPLAY_ENABLE ON)
 endif()
@@ -52,6 +53,13 @@ if(PICOOS_LED_SHELL AND NOT PICOOS_LED_ENABLE)
 endif()
 
 message(STATUS "picoOS display driver : ${PICOOS_DISPLAY_ENABLE}")
+if(PICOOS_DISPLAY_ENABLE)
+    if(PICOOS_DISPLAY_PACK2)
+        message(STATUS "picoOS display model  : Display Pack 2 (320x240)")
+    else()
+        message(STATUS "picoOS display model  : Display Pack (240x135)")
+    endif()
+endif()
 message(STATUS "picoOS display shell  : ${PICOOS_DISPLAY_SHELL}")
 message(STATUS "picoOS LED driver     : ${PICOOS_LED_ENABLE}")
 message(STATUS "picoOS LED shell      : ${PICOOS_LED_SHELL}")
@@ -87,6 +95,29 @@ message(STATUS "picoOS chip           : ${PICO_PLATFORM}")
 message(STATUS "picoOS WiFi           : ${PICOOS_HAS_WIFI}")
 
 # ---------------------------------------------------------------------------
+# External application injection
+#
+# When picoOS is used as a git submodule, the parent project sets:
+#   PICOOS_INCLUDE_DEMO_APPS=OFF   — exclude demo.c (and cray_one.c); the
+#                                    parent provides its own app_table[] via
+#                                    PICOOS_APP_SOURCES.
+#   PICOOS_APP_SOURCES             — list of absolute paths to extra .c files
+#                                    (must be absolute: they live outside
+#                                    CMAKE_CURRENT_SOURCE_DIR).
+#   PICOOS_APP_INCLUDE_DIRS        — list of absolute paths to extra include
+#                                    directories.
+#
+# Standalone picoOS builds leave all three at their defaults and are
+# completely unaffected.
+# ---------------------------------------------------------------------------
+option(PICOOS_INCLUDE_DEMO_APPS
+    "Include built-in demo apps (producer/consumer/sensor) and their app_table" ON)
+set(PICOOS_APP_SOURCES      "" CACHE STRING "Extra app .c files from parent project (absolute paths)")
+set(PICOOS_APP_INCLUDE_DIRS "" CACHE STRING "Extra include dirs from parent project (absolute paths)")
+
+message(STATUS "picoOS demo apps      : ${PICOOS_INCLUDE_DEMO_APPS}")
+
+# ---------------------------------------------------------------------------
 # Sources
 # ---------------------------------------------------------------------------
 set(PICOOS_SOURCES
@@ -101,8 +132,11 @@ set(PICOOS_SOURCES
     kernel/vfs.c
     kernel/fs.c
     shell/shell.c
-    apps/demo.c
 )
+
+if(PICOOS_INCLUDE_DEMO_APPS)
+    list(APPEND PICOOS_SOURCES apps/demo.c)
+endif()
 
 if(PICOOS_DISPLAY_ENABLE)
     list(APPEND PICOOS_SOURCES drivers/display.c)
@@ -114,29 +148,41 @@ endif()
 
 if(PICOOS_HAS_WIFI)
     list(APPEND PICOOS_SOURCES kernel/wifi.c)
-    if(PICOOS_DISPLAY_ENABLE)
+    if(PICOOS_DISPLAY_ENABLE AND PICOOS_INCLUDE_DEMO_APPS)
         list(APPEND PICOOS_SOURCES apps/cray_one.c)
     endif()
+endif()
+
+# Inject parent-project app sources (absolute paths required).
+if(PICOOS_APP_SOURCES)
+    list(APPEND PICOOS_SOURCES ${PICOOS_APP_SOURCES})
 endif()
 
 add_executable(picoos ${PICOOS_SOURCES})
 
 # ---------------------------------------------------------------------------
-# Output file naming — board-specific with version suffix.
+# Output file naming — board + display variant + version.
 #
 # Strip underscores from PICO_BOARD so that pico_w → picow, pico2_w → pico2w,
-# then append "os" and the version number.
+# then append "os", an optional display suffix (_D / _D2), and the version.
 #
-# Examples:
-#   pico    → picoos-v0.1.4
-#   pico2   → pico2os-v0.1.4
-#   pico_w  → picowos-v0.1.4
-#   pico2_w → pico2wos-v0.1.4
+# Examples (no display / Display Pack / Display Pack 2):
+#   pico    → picoos-v0.1.9        picoos_D-v0.1.9        picoos_D2-v0.1.9
+#   pico_w  → picowos-v0.1.9       picowos_D-v0.1.9       picowos_D2-v0.1.9
+#   pico2   → pico2os-v0.1.9       pico2os_D-v0.1.9       pico2os_D2-v0.1.9
+#   pico2_w → pico2wos-v0.1.9      pico2wos_D-v0.1.9      pico2wos_D2-v0.1.9
 # ---------------------------------------------------------------------------
 set(_board_clean "${PICO_BOARD}")
 string(REPLACE "_" "" _board_clean "${_board_clean}")
+if(PICOOS_DISPLAY_PACK2)
+    set(_disp_suffix "_D2")
+elseif(PICOOS_DISPLAY_ENABLE)
+    set(_disp_suffix "_D")
+else()
+    set(_disp_suffix "")
+endif()
 set(_output_name
-    "${_board_clean}os-v${PICOOS_VERSION_MAJOR}.${PICOOS_VERSION_MINOR}.${PICOOS_VERSION_EDIT}")
+    "${_board_clean}os${_disp_suffix}-v${PICOOS_VERSION_MAJOR}.${PICOOS_VERSION_MINOR}.${PICOOS_VERSION_EDIT}")
 message(STATUS "picoOS output name    : ${_output_name}")
 set_target_properties(picoos PROPERTIES OUTPUT_NAME "${_output_name}")
 
@@ -146,6 +192,11 @@ set_target_properties(picoos PROPERTIES OUTPUT_NAME "${_output_name}")
 target_include_directories(picoos PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
+
+# Inject parent-project include paths (absolute paths required).
+if(PICOOS_APP_INCLUDE_DIRS)
+    target_include_directories(picoos PRIVATE ${PICOOS_APP_INCLUDE_DIRS})
+endif()
 
 # ---------------------------------------------------------------------------
 # Compile-time definitions — version and feature flags
@@ -163,6 +214,10 @@ target_compile_definitions(picoos PRIVATE
 
 if(PICOOS_DISPLAY_ENABLE)
     target_compile_definitions(picoos PRIVATE PICOOS_DISPLAY_ENABLE=1)
+endif()
+
+if(PICOOS_DISPLAY_PACK2)
+    target_compile_definitions(picoos PRIVATE PICOOS_DISPLAY_PACK2=1)
 endif()
 
 if(PICOOS_DISPLAY_SHELL)

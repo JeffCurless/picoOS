@@ -120,7 +120,7 @@ A successful build produces these files in `build/src/`, named after the board a
 | `<board>os-v<ver>.dis` | Disassembly listing |
 | `<board>os-v<ver>.elf.map` | Linker map (used by `mem_report.py`) |
 
-For example, a `pico` build at version 0.1.4 produces `picoos-v0.1.4.uf2`.  A `pico2w` build produces `pico2wos-v0.1.4.uf2`.  All board variants can safely share the same `build/src/` output directory.
+Output names include the board, display variant suffix, and version.  For example, a `pico` + Display Pack build at v0.2.0 produces `picoos_D-v0.2.0.uf2`; without a display it produces `picoos-v0.2.0.uf2`; with Display Pack 2 it produces `picoos_D2-v0.2.0.uf2`.  All board and display variants can safely share the same `build/src/` output directory.
 
 ### Build options (optional)
 
@@ -138,10 +138,12 @@ cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico \
 
 | Flag | Default | Effect |
 |------|---------|--------|
-| `PICOOS_DISPLAY_ENABLE` | ON | ST7789 driver + `/dev/display` (~32 KB framebuffer) |
+| `PICOOS_DISPLAY_ENABLE` | ON | ST7789 driver + `/dev/display` |
+| `PICOOS_DISPLAY_PACK2` | OFF | Use Display Pack 2 (320×240, ~75 KB framebuffer) instead of Display Pack (240×135, ~32 KB) |
 | `PICOOS_DISPLAY_SHELL` | ON | `display` shell command |
 | `PICOOS_LED_ENABLE` | ON | RGB LED driver + `/dev/led` |
 | `PICOOS_LED_SHELL` | ON | `led` shell command |
+| `PICOOS_INCLUDE_DEMO_APPS` | ON | Built-in demo apps (producer/consumer/sensor); set `OFF` to supply your own app table |
 
 Setting `PICOOS_DISPLAY_ENABLE=OFF` cascades OFF to all sub-features.  Setting any sub-feature ON automatically enables `PICOOS_DISPLAY_ENABLE`.
 
@@ -175,8 +177,8 @@ rm -rf build && cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pic
 4. Copy the `.uf2` file to the drive (substitute the actual filename for your board):
 
 ```bash
-cp build/src/picoos-v0.1.4.uf2 /media/$USER/RPI-RP2/
-# macOS: cp build/src/picoos-v0.1.4.uf2 /Volumes/RPI-RP2/
+cp build/src/picoos_D-v0.2.0.uf2 /media/$USER/RPI-RP2/
+# macOS: cp build/src/picoos_D-v0.2.0.uf2 /Volumes/RPI-RP2/
 ```
 
 5. The Pico unmounts and reboots into picoOS automatically.
@@ -193,7 +195,7 @@ sudo apt install picotool
 With the Pico in BOOTSEL mode:
 
 ```bash
-picotool load build/src/picoos-v0.1.4.uf2 --force
+picotool load build/src/picoos_D-v0.2.0.uf2 --force
 picotool reboot
 ```
 
@@ -261,7 +263,7 @@ After flashing, the console should show something like:
 
 ```
 =======================================================
-picoOS  v0.1.4
+picoOS  v0.2.0
 
   Platform : RP2040, dual ARM Cortex-M0+ (133 MHz max)
   Options  : none
@@ -331,7 +333,7 @@ openocd -f interface/cmsis-dap.cfg -f target/rp2350.cfg
 In another terminal, launch GDB (substitute the actual ELF name for your board):
 
 ```bash
-arm-none-eabi-gdb build/src/picoos-v0.1.4.elf
+arm-none-eabi-gdb build/src/picoos_D-v0.2.0.elf
 (gdb) target remote :3333
 (gdb) monitor reset init
 (gdb) continue

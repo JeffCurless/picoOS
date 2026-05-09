@@ -1,9 +1,50 @@
 #!/usr/bin/bash
+# build — compile firmware variants and collect .uf2 images into kits/.
+#
+# Usage:
+#   ./build           build all 12 variants  (same as "all")
+#   ./build all       build all 12 variants
+#   ./build pico      build pico + picow  (6 variants)
+#   ./build pico2     build pico2 + pico2w  (6 variants)
+#
+# Build directories: build_<board>_ND | build_<board>_D | build_<board>_D2
+# Output naming:     <board>os-v<ver>  <board>os_D-v<ver>  <board>os_D2-v<ver>
+#
+# Override the SDK path: PICO_SDK_PATH=/path/to/pico-sdk ./build
+
+SDK="${PICO_SDK_PATH:-$HOME/workspace/pico-sdk}"
+JOBS="$(nproc)"
+
+case "${1:-all}" in
+    all)   BOARDS="pico picow pico2 pico2w" ;;
+    pico)  BOARDS="pico picow" ;;
+    pico2) BOARDS="pico2 pico2w" ;;
+    *)
+        echo "Usage: $0 [all|pico|pico2]" >&2
+        exit 1
+        ;;
+esac
 
 mkdir -p kits
-for board in pico picow pico2 pico2w ; do 
-    echo "Building board_$board..."
-    cmake -B build_$board -DPICO_SDK_PATH="$HOME/workspace/pico-sdk" -DPICO_BOARD=$board
-    make -j$NPROC -C build_$board
-    cp -f build_$board/src/*.uf2 kits/
+
+build_variant() {
+    local board="$1"     # pico | picow | pico2 | pico2w
+    local disp="$2"      # ND | D | D2
+    local flags="$3"     # extra cmake -D flags
+
+    local dir="build_${board}_${disp}"
+    echo "--- ${board} / ${disp} ---"
+    cmake -B "$dir" -DPICO_SDK_PATH="$SDK" -DPICO_BOARD="$board" $flags || return 1
+    make -j"$JOBS" -C "$dir"                                              || return 1
+    cp -f "$dir"/src/*.uf2 kits/
+}
+
+for board in $BOARDS; do
+    build_variant "$board" ND  "-DPICOOS_DISPLAY_ENABLE=OFF"
+    build_variant "$board" D   "-DPICOOS_DISPLAY_ENABLE=ON  -DPICOOS_DISPLAY_PACK2=OFF"
+    build_variant "$board" D2  "-DPICOOS_DISPLAY_ENABLE=ON  -DPICOOS_DISPLAY_PACK2=ON"
 done
+
+echo ""
+echo "Done. kits/ contents:"
+ls -1 kits/*.uf2

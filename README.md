@@ -4,7 +4,7 @@ An educational operating system for the **Raspberry Pi Pico family (RP2040 / RP2
 
 ```
 =======================================================
-picoOS  v0.1.8
+picoOS  v0.2.0
 
   Platform : RP2040, dual ARM Cortex-M0+ (133 MHz max)
   Options  : none
@@ -60,7 +60,7 @@ TID  PID  PRI  STATE     CPU-ms  STACK   NAME             CANARY
 | **Flash** | 2 MB QSPI (RP2040) / 4 MB QSPI (RP2350), execute-in-place via XIP |
 | **Console** | USB CDC serial (appears as `/dev/ttyACM0` on Linux) |
 | **Supported boards** | `pico`, `pico2`, `picow`, `pico2w` |
-| **Optional** | Pimoroni Pico Display Pack (ST7789 240×135, RGB LED, 4 buttons) |
+| **Optional** | Pimoroni Display Pack (ST7789 240×135) or Display Pack 2 (ST7789V 320×240); RGB LED, 4 buttons on both |
 
 ---
 
@@ -85,7 +85,7 @@ cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico
 make -j$(nproc) -C build
 
 # 4. Flash (hold BOOTSEL on Pico, then plug in USB)
-cp build/src/picoos-v0.1.8.uf2 /media/$USER/RPI-RP2/
+cp build/src/picoos_D-v0.2.0.uf2 /media/$USER/RPI-RP2/
 
 # 5. Open the console
 pip install pyserial
@@ -96,12 +96,12 @@ python3 tools/console.py
 
 Pass `-DPICO_BOARD=<name>` to CMake.  picoOS accepts the underscore-free aliases and maps them to the SDK-canonical names internally:
 
-| `-DPICO_BOARD=` | Board | Chip | WiFi | Output files |
-|----------------|-------|------|------|--------------|
-| `pico` | Raspberry Pi Pico | RP2040 | No | `picoos-v0.1.8.*` |
-| `pico2` | Raspberry Pi Pico 2 | RP2350 | No | `pico2os-v0.1.8.*` |
-| `picow` | Raspberry Pi Pico W | RP2040 | Yes | `picowos-v0.1.8.*` |
-| `pico2w` | Raspberry Pi Pico 2 W | RP2350 | Yes | `pico2wos-v0.1.8.*` |
+| `-DPICO_BOARD=` | Board | Chip | WiFi | Output files (Display Pack example) |
+|----------------|-------|------|------|--------------------------------------|
+| `pico` | Raspberry Pi Pico | RP2040 | No | `picoos_D-v0.2.0.*` |
+| `pico2` | Raspberry Pi Pico 2 | RP2350 | No | `pico2os_D-v0.2.0.*` |
+| `picow` | Raspberry Pi Pico W | RP2040 | Yes | `picowos_D-v0.2.0.*` |
+| `pico2w` | Raspberry Pi Pico 2 W | RP2350 | Yes | `pico2wos_D-v0.2.0.*` |
 
 The output files (`.uf2`, `.bin`, `.elf`, `.elf.map`, `.dis`) are named after the board and include the version number, so builds for different boards can share the same output directory without conflict.
 
@@ -111,10 +111,12 @@ The display and LED drivers are **enabled by default** but can be turned off whe
 
 | CMake flag | Default | Effect |
 |------------|---------|--------|
-| `PICOOS_DISPLAY_ENABLE` | `ON` | Compile the ST7789 driver; mount `/dev/display`; adds ~32 KB SRAM for the framebuffer |
+| `PICOOS_DISPLAY_ENABLE` | `ON` | Compile the ST7789 driver; mount `/dev/display` |
+| `PICOOS_DISPLAY_PACK2` | `OFF` | Use Display Pack 2 (320×240, ~75 KB framebuffer) instead of Display Pack (240×135, ~32 KB) |
 | `PICOOS_DISPLAY_SHELL` | `ON` | Register the `display` shell command (requires `PICOOS_DISPLAY_ENABLE`) |
 | `PICOOS_LED_ENABLE` | `ON` | Compile the RGB LED driver; mount `/dev/led` |
 | `PICOOS_LED_SHELL` | `ON` | Register the `led` shell command (requires `PICOOS_LED_ENABLE`) |
+| `PICOOS_INCLUDE_DEMO_APPS` | `ON` | Compile the built-in demo apps and their `app_table[]`; set `OFF` when providing custom apps via `PICOOS_APP_SOURCES` |
 
 Dependency rules enforced by CMake:
 - Setting `PICOOS_DISPLAY_ENABLE=OFF` cascades OFF to all sub-features — they all share the same hardware.
@@ -176,12 +178,15 @@ picoOS/
 ├── CMakeLists.txt          Top-level CMake build (board alias mapping lives here)
 ├── pico_sdk_import.cmake   Pico SDK discovery (standard boilerplate)
 ├── docs/
-│   ├── design.md           Architecture design document
-│   ├── setup.md            Environment setup, build, and flash guide
-│   ├── application.md      How to write and register a new app
-│   ├── picoOS_API.md       Developer API reference
-│   ├── imperfections.md    Catalogue of deliberate teaching imperfections
-│   └── studentwork.md      Suggested student exercises
+│   ├── design.md              Architecture design document
+│   ├── setup.md               Environment setup, build, and flash guide
+│   ├── application.md         How to write and register a new app
+│   ├── picoOS_API.md          Developer API reference
+│   ├── imperfections.md       Catalogue of deliberate teaching imperfections
+│   ├── studentwork.md         Student build guide (Fedora)
+│   ├── fedora-build.md        Full Fedora cross-compile setup guide
+│   ├── expandfilesystem.md    Filesystem sizing analysis and implementation notes
+│   └── project-submodule.md   Tutorial: using picoOS as a git submodule
 ├── src/
 │   ├── CMakeLists.txt      Source-level build: feature flags, sources, output naming
 │   ├── main.c              Boot sequence, process/thread creation
@@ -200,7 +205,8 @@ picoOS/
 │   ├── shell/
 │   │   └── shell.[ch]      USB CDC interactive shell
 │   ├── apps/
-│   │   └── demo.[ch]       Producer/consumer/sensor demo threads + app table
+│   │   ├── app_table.[ch]  Stable app registration ABI (app_entry_t, app_table extern)
+│   │   └── demo.[ch]       Built-in producer/consumer/sensor demo threads + app_table[]
 │   └── drivers/
 │       ├── display.[ch]    ST7789 240×135 driver — /dev/display (optional)
 │       └── led.[ch]        Pimoroni RGB LED driver — /dev/led (optional)
@@ -233,7 +239,7 @@ Both drivers expose their hardware through the VFS like any other built-in devic
 
 | Device path | Driver | Hardware |
 |-------------|--------|----------|
-| `/dev/display` | `drivers/display.c` | ST7789 240×135 over SPI0; DC=GPIO 16, CS=GPIO 17, SCK=GPIO 18, MOSI=GPIO 19, BL=GPIO 20; buttons on GPIO 12–15 |
+| `/dev/display` | `drivers/display.c` | ST7789 240×135 (Display Pack) or ST7789V 320×240 (Display Pack 2) — selected by `PICOOS_DISPLAY_PACK2`; SPI0: DC=GPIO 16, CS=17, SCK=18, MOSI=19, BL=20; buttons GPIO 12–15 |
 | `/dev/led` | `drivers/led.c` | Active-low RGB LED; PWM on GPIO 6 (R), 7 (G), 8 (B) |
 
 Use `ioctl` on `/dev/display` with `IOCTL_DISP_*` commands (clear, flush, draw pixel/line/rect/text, set backlight, read buttons) and on `/dev/led` with `IOCTL_LED_SET_RGB` / `IOCTL_LED_OFF`.
@@ -262,13 +268,13 @@ The `tools/mem_report.py` script derives live numbers from the linker map after 
 
 ```bash
 # Pass the board-named map file as a positional argument
-python3 tools/mem_report.py build/src/picoos-v0.1.8.elf.map
+python3 tools/mem_report.py build/src/picoos_D-v0.2.0.elf.map
 
 # Or use the --map option
-python3 tools/mem_report.py --map build/src/pico2wos-v0.1.8.elf.map
+python3 tools/mem_report.py --map build/src/pico2wos_D-v0.2.0.elf.map
 
 # One-line summary
-python3 tools/mem_report.py build/src/picoos-v0.1.8.elf.map --brief
+python3 tools/mem_report.py build/src/picoos_D-v0.2.0.elf.map --brief
 ```
 
 RP2040 typical breakdown with display and LED enabled:
@@ -305,11 +311,11 @@ python3 tools/console.py --help
 
 ### `tools/mem_report.py`
 
-Parses the linker map produced by every build and prints an SRAM usage breakdown by subsystem.  The map file is named after the board and version (e.g. `build/src/picoos-v0.1.8.elf.map`).
+Parses the linker map produced by every build and prints an SRAM usage breakdown by subsystem.  The map file is named after the board, display variant, and version (e.g. `build/src/picoos_D-v0.2.0.elf.map`).
 
 ```bash
-python3 tools/mem_report.py build/src/picoos-v0.1.8.elf.map   # positional path
-python3 tools/mem_report.py --map build/src/picoos-v0.1.8.elf.map  # named option
+python3 tools/mem_report.py build/src/picoos_D-v0.2.0.elf.map        # positional path
+python3 tools/mem_report.py --map build/src/picoos_D-v0.2.0.elf.map  # named option
 python3 tools/mem_report.py --brief                             # one-line summary (uses default path)
 ```
 

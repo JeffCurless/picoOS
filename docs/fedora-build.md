@@ -226,15 +226,16 @@ make -j$(nproc) -C build
 
 CMake automatically reads the `pico_sdk_import.cmake` at the project root, locates the ARM cross-compiler via `arm-none-eabi-gcc` in `PATH`, and sets `CMAKE_SYSTEM_PROCESSOR=arm` — no extra toolchain flags needed.
 
-A successful build produces these files in `build/src/`:
+A successful build produces these files in `build/src/`, named after the board,
+display variant, and version (e.g. `picoos_D-v0.2.0.*` for a pico + Display Pack build):
 
 | File | Purpose |
 |---|---|
-| `picoos.uf2` | **Flash this** — UF2 image for drag-and-drop or picotool |
-| `picoos.elf` | ELF with debug symbols (for GDB) |
-| `picoos.bin` | Raw binary |
-| `picoos.hex` | Intel HEX |
-| `picoos.dis` | Disassembly listing |
+| `<board>os[_D|_D2]-v<ver>.uf2` | **Flash this** — UF2 image for drag-and-drop or picotool |
+| `<board>os[_D|_D2]-v<ver>.elf` | ELF with debug symbols (for GDB) |
+| `<board>os[_D|_D2]-v<ver>.bin` | Raw binary |
+| `<board>os[_D|_D2]-v<ver>.hex` | Intel HEX |
+| `<board>os[_D|_D2]-v<ver>.dis` | Disassembly listing |
 
 ### Incremental builds
 
@@ -268,7 +269,7 @@ make -j$(nproc) -C build
 3. Copy the UF2:
 
    ```bash
-   cp build/src/picoos.uf2 /run/media/$USER/RPI-RP2/
+   cp build/src/picoos_D-v0.2.0.uf2 /run/media/$USER/RPI-RP2/
    sync
    ```
 
@@ -279,7 +280,7 @@ make -j$(nproc) -C build
 With the Pico in BOOTSEL mode:
 
 ```bash
-picotool load build/src/picoos.uf2 --force
+picotool load build/src/picoos_D-v0.2.0.uf2 --force
 picotool reboot
 ```
 

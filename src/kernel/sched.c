@@ -156,10 +156,19 @@ void sched_sleep(uint32_t ms)
     }
 
     current_tcb->wake_time_us = time_us_64() + (uint64_t)ms * 1000u;
-    current_tcb->state = THREAD_SLEEPING;
 
-    /* Remove from the ready queue so it doesn't get scheduled while asleep. */
+    /* Atomically mark SLEEPING and remove from the ready queue.
+     *
+     * Without this critical section, PendSV can fire between the two lines:
+     * sched_next_thread() would find the thread still in the ready queue,
+     * overwrite its state back to RUNNING, and return it as the "next" thread.
+     * The subsequent sched_remove_thread() + sched_yield() would then leave the
+     * thread in THREAD_READY state with no entry in any ready queue — causing it
+     * to be permanently unschedulable (the visible symptom: shell never wakes). */
+    uint32_t save = save_and_disable_interrupts();
+    current_tcb->state = THREAD_SLEEPING;
     sched_remove_thread((tcb_t *)current_tcb);
+    restore_interrupts(save);
 
     /* Yield so the scheduler picks the next runnable thread. */
     sched_yield();

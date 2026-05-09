@@ -1,11 +1,14 @@
-# Expanding the Filesystem Flash Region
+# Filesystem Flash Region — Sizing Analysis
+
+> **Status: Implemented.**  The per-board filesystem sizing described below is in place
+> as of v0.2.0.  This document records the analysis that drove the design decisions.
 
 ## Background
 
-The picoOS filesystem flash region is hardcoded in `src/kernel/fs.h` at a 1 MB offset
-with a 512 KB size — values chosen conservatively for the RP2040.  Now that picoOS runs
-on both RP2040 (2 MB flash) and RP2350 (4 MB flash), that single fixed configuration
-wastes a large amount of flash on both chips and does not scale with the board.
+The picoOS filesystem flash region started hardcoded in `src/kernel/fs.h` at a 1 MB
+offset with a 512 KB size — values chosen conservatively for the RP2040.  Since picoOS
+runs on both RP2040 (2 MB flash) and RP2350 (4 MB flash), a single fixed configuration
+wasted flash and did not scale with the board.
 
 ## Flash Layout Analysis
 
@@ -61,7 +64,7 @@ Changing the offset would invalidate any existing filesystem on a flashed device
 All supported boards have at least 1 MB of firmware headroom, so 1 MB is kept as a
 fixed constant — only `FS_FLASH_SIZE` and `FS_MAX_FILES` vary by chip.
 
-## Proposed Limits
+## Implemented Limits
 
 | Chip | FS_FLASH_SIZE | FS_MAX_FILES | Sectors used | Flash used | Superblock RAM |
 |------|--------------|-------------|-------------|-----------|---------------|
@@ -72,9 +75,9 @@ These values are intentionally conservative — they do not pack the FS region t
 flash limit, leaving room for future growth while still doubling (RP2040) or sextupling
 (RP2350) the file count relative to the current limit of 32.
 
-## Implementation
+## Implementation (completed)
 
-### 1. `src/kernel/fs.h` — guard the board-variable constants
+### 1. `src/kernel/fs.h` — guarded board-variable constants
 
 Wrap the two size constants in `#ifndef` guards so CMake can override them per board
 without touching the header:
@@ -96,7 +99,7 @@ without touching the header:
 
 `FS_FLASH_OFFSET` remains a plain `#define` — it is the same for all supported boards.
 
-### 2. `src/CMakeLists.txt` — board-specific definitions
+### 2. `src/CMakeLists.txt` — board-specific definitions (in place)
 
 In the existing `if(PICO_RP2350)` / `else()` block, add the FS variables:
 
@@ -122,7 +125,7 @@ target_compile_definitions(picoos PRIVATE
 )
 ```
 
-### 3. `CLAUDE.md` — update fs module description
+### 3. `CLAUDE.md` — updated fs module description (done)
 
 ```
 **fs** — flash-native filesystem (currently RAM-backed in current phase);

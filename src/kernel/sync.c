@@ -22,29 +22,53 @@
  * Spinlock
  * =========================================================================
  *
- * Teaching implementation: disable interrupts to prevent the ISR from
- * re-entering, then busy-wait on the lock word.  On single-core execution
- * the disable-irq alone is sufficient; the busy-wait handles the (unlikely)
- * case where two threads call spinlock_acquire at the same instant on
- * different cores.
+ * Two variants — see sync.h for the usage contract of each.
  *
- * A production SMP spinlock would use LDREX/STREX; this version trades
- * correctness on heavily loaded multi-core for clarity.
+ * spinlock_irq_acquire/release: saves interrupt state, disables IRQs while
+ * the lock is held, and restores on release.  Required whenever the critical
+ * section makes scheduler calls (sched_block, sched_remove_thread, etc.)
+ * that must be atomic with respect to PendSV.
+ *
+ * spinlock_acquire/release: plain busy-wait with no interrupt manipulation.
+ * Use only when the caller already controls interrupt state or the section
+ * contains no scheduler calls.
+ *
+ * A production SMP spinlock would use LDREX/STREX; both versions here rely
+ * on interrupt disable (or caller-guaranteed exclusion) for atomicity.
  * ========================================================================= */
+
+uint32_t spinlock_irq_acquire(spinlock_t *s)
+{
+    while (1) {
+        uint32_t save = save_and_disable_interrupts();
+        if (s->lock == 0u) {
+            s->lock = 1u;
+            __dmb();
+            return save;
+        }
+        restore_interrupts(save);
+        __nop();
+    }
+}
+
+void spinlock_irq_release(spinlock_t *s, uint32_t saved_irq)
+{
+    __dmb();
+    s->lock = 0u;
+    restore_interrupts(saved_irq);
+}
 
 void spinlock_acquire(spinlock_t *s)
 {
-    /* Keep trying until we atomically set lock from 0 to 1. */
     while (1) {
         __disable_irq();
         if (s->lock == 0u) {
             s->lock = 1u;
-            /* Barrier: ensure the write is visible before we proceed. */
             __dmb();
-            return;   /* interrupts remain disabled until release */
+            __enable_irq();
+            return;
         }
         __enable_irq();
-        /* Short pause — give other cores a chance to release. */
         __nop();
     }
 }
@@ -53,7 +77,6 @@ void spinlock_release(spinlock_t *s)
 {
     __dmb();
     s->lock = 0u;
-    __enable_irq();
 }
 
 /* =========================================================================
@@ -114,20 +137,20 @@ void kmutex_init(kmutex_t *m)
 void kmutex_lock(kmutex_t *m)
 {
     while (1) {
-        spinlock_acquire(&m->spin);
+        uint32_t irq_save = spinlock_irq_acquire(&m->spin);
 
         if (m->owner_tid == -1) {
             /* Mutex is free — claim it. */
             m->owner_tid = (int32_t)current_tcb->tid;
             m->count     = 1u;
-            spinlock_release(&m->spin);
+            spinlock_irq_release(&m->spin, irq_save);
             return;
         }
 
         /* Mutex is held by another thread — block and yield. */
         waiter_enqueue(&m->waiters, (tcb_t *)current_tcb);
         sched_block((tcb_t *)current_tcb);
-        spinlock_release(&m->spin);
+        spinlock_irq_release(&m->spin, irq_save);
 
         /* When we are unblocked the mutex may still be held; loop. */
         sched_yield();
@@ -136,7 +159,7 @@ void kmutex_lock(kmutex_t *m)
 
 void kmutex_unlock(kmutex_t *m)
 {
-    spinlock_acquire(&m->spin);
+    uint32_t irq_save = spinlock_irq_acquire(&m->spin);
 
     m->owner_tid = -1;
     m->count     = 0u;
@@ -147,7 +170,7 @@ void kmutex_unlock(kmutex_t *m)
         sched_unblock(next);
     }
 
-    spinlock_release(&m->spin);
+    spinlock_irq_release(&m->spin, irq_save);
 }
 
 /* =========================================================================
@@ -164,18 +187,18 @@ void ksemaphore_init(ksemaphore_t *s, int32_t initial_count)
 void ksemaphore_wait(ksemaphore_t *s)
 {
     while (1) {
-        spinlock_acquire(&s->spin);
+        uint32_t irq_save = spinlock_irq_acquire(&s->spin);
 
         if (s->count > 0) {
             s->count--;
-            spinlock_release(&s->spin);
+            spinlock_irq_release(&s->spin, irq_save);
             return;
         }
 
         /* Count is 0 — block without touching count. */
         waiter_enqueue(&s->waiters, (tcb_t *)current_tcb);
         sched_block((tcb_t *)current_tcb);
-        spinlock_release(&s->spin);
+        spinlock_irq_release(&s->spin, irq_save);
 
         sched_yield();
     }
@@ -183,7 +206,7 @@ void ksemaphore_wait(ksemaphore_t *s)
 
 void ksemaphore_signal(ksemaphore_t *s)
 {
-    spinlock_acquire(&s->spin);
+    uint32_t irq_save = spinlock_irq_acquire(&s->spin);
 
     s->count++;
 
@@ -193,7 +216,7 @@ void ksemaphore_signal(ksemaphore_t *s)
         sched_unblock(t);
     }
 
-    spinlock_release(&s->spin);
+    spinlock_irq_release(&s->spin, irq_save);
 }
 
 /* =========================================================================
@@ -261,7 +284,7 @@ void event_flags_init(event_flags_t *e)
 
 void event_flags_set(event_flags_t *e, uint32_t mask)
 {
-    spinlock_acquire(&e->spin);
+    uint32_t irq_save = spinlock_irq_acquire(&e->spin);
 
     e->flags |= mask;
 
@@ -304,20 +327,20 @@ void event_flags_set(event_flags_t *e, uint32_t mask)
         cur = next;
     }
 
-    spinlock_release(&e->spin);
+    spinlock_irq_release(&e->spin, irq_save);
 }
 
 void event_flags_clear(event_flags_t *e, uint32_t mask)
 {
-    spinlock_acquire(&e->spin);
+    uint32_t irq_save = spinlock_irq_acquire(&e->spin);
     e->flags &= ~mask;
-    spinlock_release(&e->spin);
+    spinlock_irq_release(&e->spin, irq_save);
 }
 
 uint32_t event_flags_wait(event_flags_t *e, uint32_t mask, bool wait_for_all)
 {
     while (1) {
-        spinlock_acquire(&e->spin);
+        uint32_t irq_save = spinlock_irq_acquire(&e->spin);
 
         bool satisfied;
         if (wait_for_all) {
@@ -328,7 +351,7 @@ uint32_t event_flags_wait(event_flags_t *e, uint32_t mask, bool wait_for_all)
 
         if (satisfied) {
             uint32_t result = e->flags;
-            spinlock_release(&e->spin);
+            spinlock_irq_release(&e->spin, irq_save);
             return result;
         }
 
@@ -336,7 +359,7 @@ uint32_t event_flags_wait(event_flags_t *e, uint32_t mask, bool wait_for_all)
         event_waiter_alloc((tcb_t *)current_tcb, mask, wait_for_all);
         waiter_enqueue(&e->waiters, (tcb_t *)current_tcb);
         sched_block((tcb_t *)current_tcb);
-        spinlock_release(&e->spin);
+        spinlock_irq_release(&e->spin, irq_save);
 
         sched_yield();
         /* Loop back to re-check in case of spurious wakeup. */
@@ -362,7 +385,7 @@ void mqueue_init(mqueue_t *q, uint32_t msg_size)
 void mqueue_send(mqueue_t *q, const void *msg)
 {
     while (1) {
-        spinlock_acquire(&q->spin);
+        uint32_t irq_save = spinlock_irq_acquire(&q->spin);
 
         if (q->count < MQ_MAX_MSG) {
             /* Space available — copy message into ring buffer. */
@@ -376,14 +399,14 @@ void mqueue_send(mqueue_t *q, const void *msg)
                 sched_unblock(receiver);
             }
 
-            spinlock_release(&q->spin);
+            spinlock_irq_release(&q->spin, irq_save);
             return;
         }
 
         /* Queue full — block sender. */
         waiter_enqueue(&q->send_waiters, (tcb_t *)current_tcb);
         sched_block((tcb_t *)current_tcb);
-        spinlock_release(&q->spin);
+        spinlock_irq_release(&q->spin, irq_save);
 
         sched_yield();
     }
@@ -392,7 +415,7 @@ void mqueue_send(mqueue_t *q, const void *msg)
 void mqueue_recv(mqueue_t *q, void *msg_out)
 {
     while (1) {
-        spinlock_acquire(&q->spin);
+        uint32_t irq_save = spinlock_irq_acquire(&q->spin);
 
         if (q->count > 0u) {
             /* Data available — copy out of ring buffer. */
@@ -406,14 +429,14 @@ void mqueue_recv(mqueue_t *q, void *msg_out)
                 sched_unblock(sender);
             }
 
-            spinlock_release(&q->spin);
+            spinlock_irq_release(&q->spin, irq_save);
             return;
         }
 
         /* Queue empty — block receiver. */
         waiter_enqueue(&q->recv_waiters, (tcb_t *)current_tcb);
         sched_block((tcb_t *)current_tcb);
-        spinlock_release(&q->spin);
+        spinlock_irq_release(&q->spin, irq_save);
 
         sched_yield();
     }

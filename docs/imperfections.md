@@ -108,9 +108,10 @@ without any per-object header overhead.
 
 ## 5. Linear file lookup
 
-**Current behavior**: `fs_open()` iterates all `FS_MAX_FILES` (32) directory
-entries sequentially, comparing names with `strncmp`. With 32 files this is
-negligible, but the pattern does not scale and illustrates a common
+**Current behavior**: `fs_open()` iterates all `FS_MAX_FILES` directory
+entries sequentially, comparing names with `strncmp`. `FS_MAX_FILES` is 64
+on RP2040 and 127 on RP2350 — at these sizes the scan is still fast in
+practice, but the linear pattern does not scale and illustrates a common
 beginner mistake.
 
 **File:line**: `src/kernel/fs.c:164`

@@ -24,7 +24,10 @@ virtual filesystem, device drivers, an interactive shell, and optional WiFi supp
 
 ## 2. Application Model
 
-Built-in apps are registered in `app_table[]` in `src/apps/demo.c` / `src/apps/demo.h`.
+Built-in apps are registered in `app_table[]`.  The type definition and extern declarations
+live in `src/apps/app_table.h` (the stable ABI header).  In a standalone picoOS build,
+`src/apps/demo.c` defines the table with the built-in demo apps.  When picoOS is used as a
+submodule, the parent project provides its own `app_table[]` definition.
 The shell `run <name>` command searches this table and spawns the matching entry as a new
 process.
 
@@ -50,7 +53,7 @@ void my_app(void *arg) {
 }
 ```
 
-**Step 2** — Add an entry to `app_table[]` in `src/apps/demo.c`:
+**Step 2** — Add an entry to `app_table[]`.  In a standalone build, edit `src/apps/demo.c`:
 
 ```c
 const app_entry_t app_table[] = {
@@ -321,7 +324,11 @@ dev_ioctl(DEV_GPIO, IOCTL_GPIO_GET_VAL, &val);
 
 Include: `src/drivers/display.h` for constants and arg structs.
 
-Panel: ST7789, 240×135 pixels, RGB332 framebuffer (1 byte/pixel).
+Panel dimensions depend on the compile-time flag:
+- Default (`PICOOS_DISPLAY_PACK2` not set): ST7789 **240×135**, ~32 KB framebuffer
+- `PICOOS_DISPLAY_PACK2=ON`: ST7789V **320×240**, ~75 KB framebuffer
+
+Both use RGB332 framebuffer (1 byte/pixel), expanded to RGB565 on SPI flush.
 
 ```c
 // Clear the framebuffer
@@ -526,7 +533,7 @@ typedef struct {
 
 | Constant | Value | Meaning |
 |----------|-------|---------|
-| `FS_MAX_FILES` | 32 | Maximum number of files |
+| `FS_MAX_FILES` | 64 (RP2040) / 127 (RP2350) | Maximum number of files — set per-board by CMake |
 | `FS_MAX_FILE_DATA` | 4096 bytes | Maximum size per file |
 | `FS_NAME_MAX` | 16 | Filename buffer (15 chars + NUL) |
 | `FS_BLOCK_SIZE` | 4096 bytes | Flash erase sector size |
@@ -678,10 +685,10 @@ heap, leaving ~32 KB for other allocations.
 | `MQ_MAX_MSG` | 16 | Messages per queue |
 | `MQ_MSG_SIZE` | 64 | Max bytes per message |
 | `VFS_MAX_OPEN` | 16 | Max simultaneous open VFS fds |
-| `FS_MAX_FILES` | 32 | Max files on filesystem |
+| `FS_MAX_FILES` | 64 / 127 | Max files — 64 on RP2040, 127 on RP2350 |
 | `FS_MAX_FILE_DATA` | 4096 | Max bytes per file |
 | `SHELL_MAX_CMDS` | 32 | Max registered shell commands |
 | `HEAP_SIZE` | 65536 | Kernel heap in bytes (64 KB) |
 | `WIFI_MAX_SCAN_RESULTS` | 16 | Max WiFi scan results stored |
-| `DISP_WIDTH` | 240 | Display width in pixels |
-| `DISP_HEIGHT` | 135 | Display height in pixels |
+| `DISP_WIDTH` | 240 or 320 | Display width — 240 (Display Pack) / 320 (Display Pack 2) |
+| `DISP_HEIGHT` | 135 or 240 | Display height — 135 (Display Pack) / 240 (Display Pack 2) |

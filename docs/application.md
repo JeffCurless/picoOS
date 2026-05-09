@@ -130,24 +130,19 @@ void myapp(void *arg);
 
 ## Step 3 — Add the source file to the build
 
-Open `src/CMakeLists.txt` and add your file to the `add_executable` list:
+Open `src/CMakeLists.txt` and append your file to the `PICOOS_SOURCES` list.
+The list is assembled near the top of the file before `add_executable`:
 
 ```cmake
-add_executable(picoos
+set(PICOOS_SOURCES
     main.c
     kernel/task.c
-    kernel/sched.c
-    kernel/sched_asm.S
-    kernel/mem.c
-    kernel/sync.c
-    kernel/syscall.c
-    kernel/dev.c
-    kernel/vfs.c
-    kernel/fs.c
+    ...
     shell/shell.c
-    apps/demo.c
-    apps/myapp.c       # ← add this line
 )
+
+# Add your app source here:
+list(APPEND PICOOS_SOURCES apps/myapp.c)
 ```
 
 No other CMake changes are needed.  The include paths for all kernel and app
@@ -165,13 +160,14 @@ cd /path/to/picoOS/build
 make -j$(nproc)
 ```
 
-The output is `build/src/picoos.uf2`.
+The output is in `build/src/` and named after the board and display variant,
+for example `picoos_D-v0.2.0.uf2` for a pico + Display Pack build.
 
 Flash to the Pico:
 
 ```bash
 # Option A: drag-and-drop (hold BOOTSEL while plugging in USB)
-cp build/src/picoos.uf2 /media/$USER/RPI-RP2/
+cp build/src/picoos_D-v0.2.0.uf2 /media/$USER/RPI-RP2/
 
 # Option B: from the running shell (reboots into BOOTSEL automatically)
 pico> update
@@ -381,13 +377,13 @@ Pass one of the constants from `kernel/task.h` as the stack size when the
 thread is created by `run`.  The `run` command always uses `DEFAULT_STACK_SIZE`
 (2 KB).  If your app uses deep call chains, large local arrays, or heavy printf
 formatting, it may need more stack — in that case launch it programmatically
-from `main.c` using `task_create_thread` with `SERVICE_STACK_SIZE` (4 KB)
+from `main.c` using `task_create_thread` with `DEEP_STACK_SIZE` (3 KB)
 instead.
 
 | Constant | Size | Suitable for |
 |----------|------|--------------|
 | `DEFAULT_STACK_SIZE` | 2 KB | Simple loops, small local variables |
-| `SERVICE_STACK_SIZE` | 4 KB | Shell, apps with deep stacks or heavy printf |
+| `DEEP_STACK_SIZE` | 3 KB | Apps with deep call chains or heavy printf |
 | `IDLE_STACK_SIZE` | 512 B | Idle thread only |
 
 A stack canary (`0xDEADBEEF`) is placed at the base of every stack.  Check it
@@ -396,17 +392,16 @@ stack has overflowed.
 
 ### Thread limits
 
-`MAX_THREADS` is 16.  At boot the system creates:
+`MAX_THREADS` is 16.  At boot the system creates two threads:
 
 | Thread | Priority |
 |--------|----------|
 | idle | 7 |
 | shell | 2 |
-| producer (demo) | 4 |
-| consumer (demo) | 4 |
-| sensor (demo) | 5 |
 
-That leaves **11 free thread slots**.  Each `run` invocation consumes one slot.
+That leaves **14 free thread slots**.  Each `run` invocation consumes one slot.
+The demo apps (producer/consumer/sensor) are **not** started at boot — they are
+launched on demand via `run producer`, `run consumer`, `run sensor`.
 
 ---
 
@@ -478,7 +473,7 @@ following the same pattern used by `demo_ipc_init()` in `demo.c`.
 
 | Symptom | Likely cause |
 |---------|--------------|
-| App does not appear in `run` list | Entry not added to `app_table[]` in `demo.c` |
+| App does not appear in `run` list | Entry not added to `app_table[]` in `demo.c` (standalone) or your `app_table.c` (submodule) |
 | Linker error: undefined reference | Source file not added to `src/CMakeLists.txt` |
 | App works once, `run` fails the second time | `MAX_THREADS` exhausted — check `threads` output |
 | Console freezes when app is running | App using `sleep_ms()` instead of `sys_sleep()` |

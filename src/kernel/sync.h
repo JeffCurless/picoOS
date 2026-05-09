@@ -22,18 +22,34 @@
 /* -------------------------------------------------------------------------
  * Spinlock
  *
- * Used internally by all higher-level primitives to protect their state.
- * On a single-core build (or when both cores share data), this provides
- * mutual exclusion via interrupt disabling + busy-wait.
+ * Two variants are provided:
  *
- * Teaching note: a real SMP spinlock would use LL/SC or LDREX/STREX; here
- * we use the simpler interrupt-disable approach which is correct for the
- * teaching workload and lets students see the concept clearly.
+ *   spinlock_irq_acquire / spinlock_irq_release
+ *     Saves the current interrupt state, disables interrupts, and acquires
+ *     the lock.  The saved state is returned and must be passed back to
+ *     spinlock_irq_release so the interrupt state is correctly restored.
+ *     Use this variant whenever the critical section calls scheduler
+ *     primitives (sched_block, sched_yield, etc.) that must not be
+ *     preempted by PendSV between a state write and a queue operation.
+ *
+ *   spinlock_acquire / spinlock_release
+ *     Acquires and releases the lock without touching interrupt state.
+ *     Use only when the caller already manages interrupts (e.g. IRQs are
+ *     already disabled) or the critical section contains no scheduler calls.
+ *
+ * Teaching note: a production SMP spinlock would use LDREX/STREX for the
+ * test-and-set; here we rely on interrupt disable for atomicity, which is
+ * sufficient for the RP2040 teaching workload.
  * ------------------------------------------------------------------------- */
 typedef struct {
     volatile uint32_t lock;   /* 0 = free, 1 = held */
 } spinlock_t;
 
+/* IRQ-aware pair — saves and restores interrupt enable state. */
+uint32_t spinlock_irq_acquire(spinlock_t *s);
+void     spinlock_irq_release(spinlock_t *s, uint32_t saved_irq);
+
+/* Plain pair — does not touch interrupt state. */
 void spinlock_acquire(spinlock_t *s);
 void spinlock_release(spinlock_t *s);
 

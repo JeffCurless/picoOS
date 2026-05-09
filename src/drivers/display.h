@@ -13,10 +13,15 @@
  */
 
 /*
- * display.h — Pimoroni Pico Display Pack driver interface
+ * display.h — Pimoroni Pico Display Pack / Display Pack 2 driver interface
  *
- * Hardware: ST7789 240×135 RGB332 framebuffer (converted to RGB565 on flush), SPI0.
- * GPIO pinout: SCK=18, MOSI=19, CS=17, DC=16, BL=20, BTN A=12 B=13 X=14 Y=15
+ * Select the target display at build time:
+ *   default (PICOOS_DISPLAY_PACK2 not set): Display Pack  — ST7789  240×135
+ *   -DPICOOS_DISPLAY_PACK2=1              : Display Pack 2 — ST7789V 320×240
+ *
+ * GPIO pinout (identical for both models):
+ *   SPI0: SCK=18, MOSI=19, CS=17, DC=16, BL=20
+ *   Buttons: A=12, B=13, X=14, Y=15
  *
  * The display device is exposed at /dev/display through the VFS and is
  * registered in the device table as DEV_DISPLAY.  See dev.h for the full
@@ -29,10 +34,17 @@
 #include <stdint.h>
 
 /* -------------------------------------------------------------------------
- * Panel geometry
+ * Panel geometry — set by the PICOOS_DISPLAY_PACK2 compile flag.
+ * Display Pack  : ST7789  240×135 (physical panel 320×240, viewport offset 40/53)
+ * Display Pack 2: ST7789V 320×240 (full panel, no viewport offset)
  * ------------------------------------------------------------------------- */
+#ifdef PICOOS_DISPLAY_PACK2
+#define DISP_WIDTH   320u
+#define DISP_HEIGHT  240u
+#else
 #define DISP_WIDTH   240u
 #define DISP_HEIGHT  135u
+#endif
 
 /* -------------------------------------------------------------------------
  * Color helpers — RGB332 (8-bit: R[7:5] G[4:2] B[1:0])

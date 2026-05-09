@@ -20,10 +20,7 @@ __pycache__/
 pico-sdk/
 
 # Build areas
-build_pico/
-build_pico2/
-build_picow/
-build_pico2w/
+build_pico*/
 kits/
 
 # Log files from the console tool

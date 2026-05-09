@@ -182,6 +182,14 @@ static int     g_nodeid   = 0;
 static int     g_maxnodes = 1;
 static uint8_t g_my_colors[MAXNODES_MAX]; /* current color set, one per slot */
 
+#ifdef __arm__
+/* Survive a thread kill: store PCB and multicast state so the next run can
+ * clean up before allocating new resources. */
+static struct udp_pcb *g_pcb         = NULL;
+static ip4_addr_t      g_mcast_group_addr;
+static bool            g_mcast_active = false;
+#endif
+
 /* -------------------------------------------------------------------------
  * draw_block — fill one grid cell with a solid color.
  *
@@ -541,6 +549,19 @@ void cray_one(void *arg)
 
     cyw43_arch_lwip_begin();
 
+    /* Release any PCB left behind by a previous run that was killed before
+     * reaching the normal cleanup path. */
+    if (g_pcb != NULL) {
+        if (g_mcast_active) {
+            const ip4_addr_t *prev =
+                netif_ip4_addr(&cyw43_state.netif[CYW43_ITF_STA]);
+            igmp_leavegroup(prev, &g_mcast_group_addr);
+            g_mcast_active = false;
+        }
+        udp_remove(g_pcb);
+        g_pcb = NULL;
+    }
+
     struct udp_pcb *pcb = udp_new();
     if (pcb == NULL) {
         cyw43_arch_lwip_end();
@@ -557,8 +578,16 @@ void cray_one(void *arg)
 
     const ip4_addr_t *my_addr =
         netif_ip4_addr(&cyw43_state.netif[CYW43_ITF_STA]);
-    igmp_joingroup(my_addr, &mcast_group);
+    if (igmp_joingroup(my_addr, &mcast_group) != ERR_OK) {
+        udp_remove(pcb);
+        cyw43_arch_lwip_end();
+        shell_print("[cray-one] ERROR: igmp_joingroup failed\r\n");
+        return;
+    }
     udp_recv(pcb, mcast_recv_cb, NULL);
+    g_pcb = pcb;
+    g_mcast_group_addr = mcast_group;
+    g_mcast_active = true;
 
     cyw43_arch_lwip_end();
 
@@ -608,6 +637,8 @@ void cray_one(void *arg)
     my_addr = netif_ip4_addr(&cyw43_state.netif[CYW43_ITF_STA]);
     igmp_leavegroup(my_addr, &mcast_group);
     udp_remove(pcb);
+    g_pcb = NULL;
+    g_mcast_active = false;
     cyw43_arch_lwip_end();
 
     shell_print("[cray-one] Link lost — stopped\r\n");
