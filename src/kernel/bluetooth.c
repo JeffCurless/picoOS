@@ -65,21 +65,38 @@ static int alloc_slot(void)
     return g_scan_count++;
 }
 
-/* ---- BLE AD data: extract Local Name (types 0x08 shortened / 0x09 full) -- */
-static void extract_ble_name(const uint8_t *ad_data, uint8_t ad_len, char *out, int out_len)
+/* ---- BLE AD data parser: extracts name, flags, TX power, company ID ------- */
+static void extract_ble_adv_data(const uint8_t *ad_data, uint8_t ad_len,
+                                  bt_scan_result_t *dev)
 {
-    out[0] = '\0';
     ad_context_t ctx;
     ad_iterator_init(&ctx, ad_len, ad_data);
     while (ad_iterator_has_more(&ctx)) {
-        uint8_t type    = ad_iterator_get_data_type(&ctx);
-        uint8_t dlen    = ad_iterator_get_data_len(&ctx);
-        const uint8_t *d = ad_iterator_get_data(&ctx);
-        if ((type == 0x08u || type == 0x09u) && dlen > 0 && d != NULL) {
-            int copy = (dlen < (uint8_t)(out_len - 1)) ? dlen : (out_len - 1);
-            memcpy(out, d, (size_t)copy);
-            out[copy] = '\0';
-            return;
+        uint8_t        type = ad_iterator_get_data_type(&ctx);
+        uint8_t        dlen = ad_iterator_get_data_len(&ctx);
+        const uint8_t *d    = ad_iterator_get_data(&ctx);
+        if (d == NULL || dlen == 0) { ad_iterator_next(&ctx); continue; }
+        switch (type) {
+        case 0x08u: /* Shortened Local Name */
+        case 0x09u: /* Complete Local Name */
+            if (dev->name[0] == '\0') {
+                int copy = (dlen < (uint8_t)(BT_NAME_LEN - 1)) ? dlen : (BT_NAME_LEN - 1);
+                memcpy(dev->name, d, (size_t)copy);
+                dev->name[copy] = '\0';
+            }
+            break;
+        case 0x01u: /* Flags */
+            dev->flags = d[0];
+            break;
+        case 0x0Au: /* TX Power Level */
+            dev->tx_power = (int8_t)d[0];
+            break;
+        case 0xFFu: /* Manufacturer Specific Data — first 2 bytes are company ID (LE) */
+            if (dlen >= 2)
+                dev->company_id = (uint16_t)((uint16_t)d[1] << 8 | d[0]);
+            break;
+        default:
+            break;
         }
         ad_iterator_next(&ctx);
     }
@@ -106,16 +123,19 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
         if (idx < 0) return;
 
         reverse_bd_addr(addr, g_scan[idx].addr);
-        g_scan[idx].name[0]       = '\0';
-        g_scan[idx].type          = BT_DEVTYPE_CLASSIC;
+        g_scan[idx].name[0]         = '\0';
+        g_scan[idx].type            = BT_DEVTYPE_CLASSIC;
         g_scan[idx].class_of_device =
             gap_event_inquiry_result_get_class_of_device(packet);
-        g_scan[idx].dev_class     =
+        g_scan[idx].dev_class       =
             cod_to_devclass(g_scan[idx].class_of_device);
-        g_scan[idx].rssi          =
+        g_scan[idx].rssi            =
             gap_event_inquiry_result_get_rssi_available(packet)
                 ? gap_event_inquiry_result_get_rssi(packet)
                 : -127;
+        g_scan[idx].tx_power        = BT_TX_POWER_UNKNOWN;
+        g_scan[idx].flags           = BT_FLAGS_NONE;
+        g_scan[idx].company_id      = BT_COMPANY_NONE;
 
         /* Request the human-readable name asynchronously. */
         gap_remote_name_request(
@@ -161,15 +181,19 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
         if (idx < 0) return;
 
         reverse_bd_addr(addr, g_scan[idx].addr);
+        g_scan[idx].name[0]         = '\0';
         g_scan[idx].type            = BT_DEVTYPE_BLE;
         g_scan[idx].dev_class       = BT_CLASS_UNKNOWN;
         g_scan[idx].class_of_device = 0;
         g_scan[idx].rssi            =
             gap_event_advertising_report_get_rssi(packet);
+        g_scan[idx].tx_power        = BT_TX_POWER_UNKNOWN;
+        g_scan[idx].flags           = BT_FLAGS_NONE;
+        g_scan[idx].company_id      = BT_COMPANY_NONE;
 
         uint8_t       ad_len  = gap_event_advertising_report_get_data_length(packet);
         const uint8_t *ad_data = gap_event_advertising_report_get_data(packet);
-        extract_ble_name(ad_data, ad_len, g_scan[idx].name, BT_NAME_LEN);
+        extract_ble_adv_data(ad_data, ad_len, &g_scan[idx]);
     }
 }
 

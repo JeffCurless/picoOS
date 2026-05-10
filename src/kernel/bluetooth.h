@@ -51,13 +51,21 @@ typedef enum {
 #define BT_ADDR_LEN          6
 #define BT_NAME_LEN         32
 
+/* Sentinel values used when a field was not present in the advertising data. */
+#define BT_TX_POWER_UNKNOWN  ((int8_t)  127)
+#define BT_FLAGS_NONE        ((uint8_t) 0xFFu)
+#define BT_COMPANY_NONE      ((uint16_t)0xFFFFu)
+
 typedef struct {
     uint8_t       addr[BT_ADDR_LEN];
     char          name[BT_NAME_LEN];
     int8_t        rssi;
     bt_devtype_t  type;
     bt_devclass_t dev_class;
-    uint32_t      class_of_device;  /* raw 24-bit CoD; 0 for BLE devices */
+    uint32_t      class_of_device;  /* raw 24-bit CoD; 0 for BLE devices      */
+    int8_t        tx_power;         /* TX Power Level dBm (AD 0x0A)            */
+    uint8_t       flags;            /* AD Flags byte (AD 0x01)                 */
+    uint16_t      company_id;       /* Manufacturer company ID (AD 0xFF)       */
 } bt_scan_result_t;
 
 void          bt_init(void);
