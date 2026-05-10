@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------------------
 set(PICOOS_VERSION_MAJOR 0)
 set(PICOOS_VERSION_MINOR 2)
-set(PICOOS_VERSION_EDIT  0)
+set(PICOOS_VERSION_EDIT  1)
 
 message(STATUS "picoOS version        : ${PICOOS_VERSION_MAJOR}.${PICOOS_VERSION_MINOR}.${PICOOS_VERSION_EDIT}")
 
@@ -95,6 +95,26 @@ message(STATUS "picoOS chip           : ${PICO_PLATFORM}")
 message(STATUS "picoOS WiFi           : ${PICOOS_HAS_WIFI}")
 
 # ---------------------------------------------------------------------------
+# Bluetooth detection
+# Bluetooth is only available when the board has a CYW43 chip (pico_w / pico2_w).
+# It is a strict subset of the WiFi feature: no CYW43 → no BT.
+# Override on the cmake command line:
+#   cmake -B build -DPICOOS_BT_ENABLE=OFF   # disable BT even on CYW43 boards
+# ---------------------------------------------------------------------------
+option(PICOOS_BT_ENABLE "Include Bluetooth scanning support (requires CYW43)" ON)
+
+if(PICOOS_HAS_WIFI AND PICOOS_BT_ENABLE)
+    set(PICOOS_HAS_BT ON)
+else()
+    set(PICOOS_HAS_BT OFF)
+    if(PICOOS_BT_ENABLE AND NOT PICOOS_HAS_WIFI)
+        message(STATUS "picoOS Bluetooth: disabled (board has no CYW43)")
+    endif()
+endif()
+
+message(STATUS "picoOS Bluetooth      : ${PICOOS_HAS_BT}")
+
+# ---------------------------------------------------------------------------
 # External application injection
 #
 # When picoOS is used as a git submodule, the parent project sets:
@@ -153,6 +173,10 @@ if(PICOOS_HAS_WIFI)
     if(PICOOS_DISPLAY_ENABLE AND PICOOS_INCLUDE_DEMO_APPS)
         list(APPEND PICOOS_SOURCES apps/cray_one.c)
     endif()
+endif()
+
+if(PICOOS_HAS_BT)
+    list(APPEND PICOOS_SOURCES kernel/bluetooth.c)
 endif()
 
 # Inject parent-project app sources (absolute paths required).
@@ -238,6 +262,10 @@ if(PICOOS_HAS_WIFI)
     target_compile_definitions(picoos PRIVATE PICOOS_WIFI_ENABLE=1)
 endif()
 
+if(PICOOS_HAS_BT)
+    target_compile_definitions(picoos PRIVATE PICOOS_BT_ENABLE=1)
+endif()
+
 # ---------------------------------------------------------------------------
 # Link libraries
 # ---------------------------------------------------------------------------
@@ -261,6 +289,14 @@ endif()
 
 if(PICOOS_HAS_WIFI)
     list(APPEND PICOOS_LIBS pico_cyw43_arch_lwip_poll)
+endif()
+
+if(PICOOS_HAS_BT)
+    list(APPEND PICOOS_LIBS
+        pico_btstack_ble
+        pico_btstack_classic
+        pico_btstack_cyw43
+    )
 endif()
 
 target_link_libraries(picoos ${PICOOS_LIBS})

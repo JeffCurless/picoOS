@@ -497,6 +497,9 @@ static int cmd_info(int argc, char **argv)
 #ifdef PICOOS_WIFI_ENABLE
     shell_print("WiFi      : CYW43 (enabled)\r\n");
 #endif
+#ifdef PICOOS_BT_ENABLE
+    shell_print("Bluetooth : CYW43 (enabled)\r\n");
+#endif
 #ifdef PICOOS_DISPLAY_ENABLE
     shell_print("Display   : %ux%u RGB332 ST7789\r\n", DISP_WIDTH, DISP_HEIGHT);
 #endif
