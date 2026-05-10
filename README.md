@@ -4,7 +4,7 @@ An educational operating system for the **Raspberry Pi Pico family (RP2040 / RP2
 
 ```
 =======================================================
-picoOS  v0.2.0
+picoOS  v0.2.1
 
   Platform : RP2040, dual ARM Cortex-M0+ (133 MHz max)
   Options  : none
@@ -46,6 +46,7 @@ TID  PID  PRI  STATE     CPU-ms  STACK   NAME             CANARY
 | Producer/consumer IPC demo | `src/apps/demo.c` |
 | Interactive USB shell | `src/shell/shell.c` |
 | WiFi (pico_w / pico2_w only) | `src/kernel/wifi.c` |
+| Bluetooth scanning + device-type detection (pico_w / pico2_w only) | `src/kernel/bluetooth.c` |
 | ST7789 display driver (optional) | `src/drivers/display.c` |
 | RGB LED driver (optional) | `src/drivers/led.c` |
 
@@ -85,7 +86,7 @@ cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico
 make -j$(nproc) -C build
 
 # 4. Flash (hold BOOTSEL on Pico, then plug in USB)
-cp build/src/picoos_D-v0.2.0.uf2 /media/$USER/RPI-RP2/
+cp build/src/picoos_D-v0.2.1.uf2 /media/$USER/RPI-RP2/
 
 # 5. Open the console
 pip install pyserial
@@ -96,12 +97,12 @@ python3 tools/console.py
 
 Pass `-DPICO_BOARD=<name>` to CMake.  picoOS accepts the underscore-free aliases and maps them to the SDK-canonical names internally:
 
-| `-DPICO_BOARD=` | Board | Chip | WiFi | Output files (Display Pack example) |
-|----------------|-------|------|------|--------------------------------------|
-| `pico` | Raspberry Pi Pico | RP2040 | No | `picoos_D-v0.2.0.*` |
-| `pico2` | Raspberry Pi Pico 2 | RP2350 | No | `pico2os_D-v0.2.0.*` |
-| `picow` | Raspberry Pi Pico W | RP2040 | Yes | `picowos_D-v0.2.0.*` |
-| `pico2w` | Raspberry Pi Pico 2 W | RP2350 | Yes | `pico2wos_D-v0.2.0.*` |
+| `-DPICO_BOARD=` | Board | Chip | WiFi + BT | Output files (Display Pack example) |
+|----------------|-------|------|-----------|--------------------------------------|
+| `pico` | Raspberry Pi Pico | RP2040 | No | `picoos_D-v0.2.1.*` |
+| `pico2` | Raspberry Pi Pico 2 | RP2350 | No | `pico2os_D-v0.2.1.*` |
+| `picow` | Raspberry Pi Pico W | RP2040 | Yes | `picowos_D-v0.2.1.*` |
+| `pico2w` | Raspberry Pi Pico 2 W | RP2350 | Yes | `pico2wos_D-v0.2.1.*` |
 
 The output files (`.uf2`, `.bin`, `.elf`, `.elf.map`, `.dis`) are named after the board and include the version number, so builds for different boards can share the same output directory without conflict.
 
@@ -116,6 +117,7 @@ The display and LED drivers are **enabled by default** but can be turned off whe
 | `PICOOS_DISPLAY_SHELL` | `ON` | Register the `display` shell command (requires `PICOOS_DISPLAY_ENABLE`) |
 | `PICOOS_LED_ENABLE` | `ON` | Compile the RGB LED driver; mount `/dev/led` |
 | `PICOOS_LED_SHELL` | `ON` | Register the `led` shell command (requires `PICOOS_LED_ENABLE`) |
+| `PICOOS_BT_ENABLE` | `ON` | Compile Bluetooth scanning support; auto-disabled on boards without CYW43 |
 | `PICOOS_INCLUDE_DEMO_APPS` | `ON` | Compile the built-in demo apps and their `app_table[]`; set `OFF` when providing custom apps via `PICOOS_APP_SOURCES` |
 
 Dependency rules enforced by CMake:
@@ -168,6 +170,7 @@ Once running, the USB shell accepts:
 | `display <subcmd>` | Drive the ST7789 display *(registered when `PICOOS_DISPLAY_SHELL=ON`)* |
 | `led <r> <g> <b>` | Set RGB LED color 0–255 per channel *(registered when `PICOOS_LED_SHELL=ON`)* |
 | `wifi [status\|scan\|connect\|disconnect]` | WiFi management *(registered when built for pico_w / pico2_w)* |
+| `bt [status\|scan]` | Bluetooth scan — lists nearby Classic and BLE devices with device type *(registered when built for pico_w / pico2_w)* |
 
 ---
 
@@ -201,7 +204,8 @@ picoOS/
 │   │   ├── dev.[ch]        Device abstraction layer
 │   │   ├── vfs.[ch]        VFS routing (device files vs. filesystem)
 │   │   ├── fs.[ch]         Flash-native persistent filesystem
-│   │   └── wifi.[ch]       CYW43 WiFi module — scan, connect, poll thread (pico_w/pico2_w)
+│   │   ├── wifi.[ch]       CYW43 WiFi module — scan, connect, poll thread (pico_w/pico2_w)
+│   │   └── bluetooth.[ch]  CYW43 Bluetooth module — Classic + BLE scan, device-type detection (pico_w/pico2_w)
 │   ├── shell/
 │   │   └── shell.[ch]      USB CDC interactive shell
 │   ├── apps/
@@ -244,9 +248,23 @@ Both drivers expose their hardware through the VFS like any other built-in devic
 
 Use `ioctl` on `/dev/display` with `IOCTL_DISP_*` commands (clear, flush, draw pixel/line/rect/text, set backlight, read buttons) and on `/dev/led` with `IOCTL_LED_SET_RGB` / `IOCTL_LED_OFF`.
 
-### WiFi module (pico_w / pico2_w)
+### WiFi and Bluetooth modules (pico_w / pico2_w)
 
 When built for a CYW43-equipped board (`PICO_BOARD=picow` or `pico2w`), `kernel/wifi.c` is compiled in.  `wifi_init()` — called from `main.c` — initialises the CYW43 radio, enables STA mode, spawns a low-priority `wifi-poll` thread (priority 6) in the kernel process, and registers the `wifi` shell command.  Scan results and connection state are managed internally; the poll thread calls `cyw43_arch_poll()` every 10 ms.
+
+When `PICOOS_BT_ENABLE` is also on (the default for CYW43 boards), `kernel/bluetooth.c` is compiled in and `bt_init()` is called immediately after `wifi_init()`.  It hooks BTstack into the same CYW43 async context that WiFi already uses — no separate poll thread is needed, since `cyw43_arch_poll()` drives both stacks.  `bt_init()` registers the `bt` shell command and powers on the BT radio asynchronously (completes once the scheduler starts).
+
+The `bt scan` command runs a simultaneous Classic BR/EDR inquiry (~6.4 s) and BLE passive scan, then prints a table of discovered devices:
+
+```
+Address            RSSI  Type     Class       Name
+-----------------  ----  -------  ----------  ----
+AA:BB:CC:DD:EE:FF   -52  Classic  phone       iPhone
+11:22:33:44:55:66   -71  Classic  audio       JBL Flip 5
+77:88:99:AA:BB:CC   -85  BLE      unknown     Tile
+```
+
+Classic device type is derived from the Bluetooth **Class of Device (CoD)** major class field.  BLE device type defaults to `unknown`; the advertised local name is shown when present in the advertising data.
 
 ### Deliberately imperfect
 
@@ -271,7 +289,7 @@ The `tools/mem_report.py` script derives live numbers from the linker map after 
 python3 tools/mem_report.py build/src/picoos_D-v0.2.0.elf.map
 
 # Or use the --map option
-python3 tools/mem_report.py --map build/src/pico2wos_D-v0.2.0.elf.map
+python3 tools/mem_report.py --map build/src/pico2wos_D-v0.2.1.elf.map
 
 # One-line summary
 python3 tools/mem_report.py build/src/picoos_D-v0.2.0.elf.map --brief

@@ -73,6 +73,10 @@
 #ifdef PICOOS_WIFI_ENABLE
 #include "pico/cyw43_arch.h"
 #endif
+#ifdef PICOOS_BT_ENABLE
+#include "pico/btstack_cyw43.h"
+#include "btstack.h"
+#endif
 
 #else /* ── Host / LSP stub definitions ──────────────────────────────────── */
 

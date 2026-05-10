@@ -26,6 +26,9 @@
 #ifdef PICOOS_WIFI_ENABLE
 #include "kernel/wifi.h"
 #endif
+#ifdef PICOOS_BT_ENABLE
+#include "kernel/bluetooth.h"
+#endif
 
 /* -------------------------------------------------------------------------
  * trace_enabled
@@ -138,10 +141,13 @@ int main(void)
 #ifdef PICOOS_WIFI_ENABLE
            " WiFi"
 #endif
+#ifdef PICOOS_BT_ENABLE
+           " Bluetooth"
+#endif
 #ifdef PICOOS_DISPLAY_ENABLE
            " DISPLAY_PACK"
 #endif
-#if !defined(PICOOS_WIFI_ENABLE) && !defined(PICOOS_DISPLAY_ENABLE)
+#if !defined(PICOOS_WIFI_ENABLE) && !defined(PICOOS_BT_ENABLE) && !defined(PICOOS_DISPLAY_ENABLE)
            " none"
 #endif
            "\r\n");
@@ -187,6 +193,9 @@ int main(void)
      * ------------------------------------------------------------------ */
 #ifdef PICOOS_WIFI_ENABLE
     wifi_init();
+#endif
+#ifdef PICOOS_BT_ENABLE
+    bt_init();   /* must run after wifi_init() — hooks into CYW43 async context */
 #endif
 
     /* ------------------------------------------------------------------

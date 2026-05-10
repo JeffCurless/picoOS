@@ -8,7 +8,8 @@ A developer reference for writing built-in applications that run on picoOS.
 
 picoOS is a dual-core preemptive operating system for the Raspberry Pi Pico family
 (RP2040 and RP2350). It provides threads, processes, synchronization primitives, a
-virtual filesystem, device drivers, an interactive shell, and optional WiFi support.
+virtual filesystem, device drivers, an interactive shell, optional WiFi support, and
+optional Bluetooth scanning support.
 
 **Key constraints:**
 - No MPU — there is no hardware memory isolation between processes.
@@ -479,6 +480,90 @@ typedef struct {
 Up to `WIFI_MAX_SCAN_RESULTS` (16) results are stored internally.  The poll thread
 manages `cyw43_arch_poll()` so applications do not need to call it directly.
 
+### 6.6 Bluetooth (requires `PICOOS_BT_ENABLE` — pico_w / pico2_w builds only)
+
+Include: `src/kernel/bluetooth.h`
+
+`bt_init()` is called automatically by `main.c` after `wifi_init()` when `PICOOS_BT_ENABLE`
+is defined.  It hooks BTstack into the CYW43 async context already created by `wifi_init()`
+and powers on the BT radio asynchronously.  No separate poll thread is created — the
+existing `wifi-poll` thread drives both stacks via `cyw43_arch_poll()`.
+
+```c
+// Query current state
+bt_state_t s = bt_get_state();
+// Returns: BT_STATE_OFF, BT_STATE_IDLE, BT_STATE_SCANNING, or BT_STATE_ERROR
+
+// Start a simultaneous Classic inquiry (~6.4 s) + BLE passive scan
+bt_scan();
+
+// Poll for completion (or sleep-loop as shown in cmd_bt)
+while (!bt_scan_is_done()) { sys_sleep(100); }
+
+// Retrieve results
+const bt_scan_result_t *results;
+int count;
+bt_get_scan_results(&results, &count);
+for (int i = 0; i < count; i++) {
+    const bt_scan_result_t *r = &results[i];
+    // r->addr[6]          — device address (big-endian byte order)
+    // r->name             — device name (empty string if unavailable)
+    // r->rssi             — signal strength in dBm
+    // r->type             — BT_DEVTYPE_CLASSIC or BT_DEVTYPE_BLE
+    // r->dev_class        — bt_devclass_t (see table below)
+    // r->class_of_device  — raw 24-bit CoD (Classic only; 0 for BLE)
+}
+```
+
+**`bt_state_t`:**
+
+| Value | Meaning |
+|-------|---------|
+| `BT_STATE_OFF` | BT radio not yet powered on |
+| `BT_STATE_IDLE` | Radio up, no active scan |
+| `BT_STATE_SCANNING` | Classic inquiry + BLE scan in progress |
+| `BT_STATE_ERROR` | Initialization failed |
+
+**`bt_devclass_t`** — derived from the Classic Bluetooth Class of Device major class field:
+
+| Value | String (`bt_devclass_str()`) | CoD major class |
+|-------|------------------------------|----------------|
+| `BT_CLASS_UNKNOWN` | `"unknown"` | BLE devices; or CoD = 0 |
+| `BT_CLASS_COMPUTER` | `"computer"` | 0x01 |
+| `BT_CLASS_PHONE` | `"phone"` | 0x02 |
+| `BT_CLASS_NETWORK` | `"network"` | 0x03 |
+| `BT_CLASS_AUDIO` | `"audio"` | 0x04 |
+| `BT_CLASS_PERIPHERAL` | `"peripheral"` | 0x05 (mouse, keyboard, etc.) |
+| `BT_CLASS_IMAGING` | `"imaging"` | 0x06 (printer, scanner, camera) |
+| `BT_CLASS_WEARABLE` | `"wearable"` | 0x07 |
+| `BT_CLASS_TOY` | `"toy"` | 0x08 |
+| `BT_CLASS_HEALTH` | `"health"` | 0x09 |
+| `BT_CLASS_OTHER` | `"other"` | All other major classes |
+
+**Shell command:**
+
+```
+bt status     — print current state (off / idle / scanning / error)
+bt scan       — run a combined Classic + BLE scan (~7 s) and print a device table
+```
+
+**`bt_scan_result_t`** (from `src/kernel/bluetooth.h`):
+
+```c
+typedef struct {
+    uint8_t       addr[6];           /* device address — bytes [5:0] = MSB:LSB */
+    char          name[32];          /* device name; empty string if not available */
+    int8_t        rssi;              /* received signal strength in dBm */
+    bt_devtype_t  type;              /* BT_DEVTYPE_CLASSIC or BT_DEVTYPE_BLE */
+    bt_devclass_t dev_class;         /* major device class */
+    uint32_t      class_of_device;   /* raw 24-bit CoD (0 for BLE) */
+} bt_scan_result_t;
+```
+
+Up to `BT_MAX_SCAN_RESULTS` (20) devices are stored.  Duplicates are suppressed by
+address.  Classic scan duration is fixed at 5 × 1.28 s ≈ 6.4 s; the BLE scan runs
+concurrently and stops when the Classic inquiry completes.
+
 ---
 
 ## 7. Filesystem
@@ -690,5 +775,6 @@ heap, leaving ~32 KB for other allocations.
 | `SHELL_MAX_CMDS` | 32 | Max registered shell commands |
 | `HEAP_SIZE` | 65536 | Kernel heap in bytes (64 KB) |
 | `WIFI_MAX_SCAN_RESULTS` | 16 | Max WiFi scan results stored |
+| `BT_MAX_SCAN_RESULTS` | 20 | Max Bluetooth scan results stored |
 | `DISP_WIDTH` | 240 or 320 | Display width — 240 (Display Pack) / 320 (Display Pack 2) |
 | `DISP_HEIGHT` | 135 or 240 | Display height — 135 (Display Pack) / 240 (Display Pack 2) |
