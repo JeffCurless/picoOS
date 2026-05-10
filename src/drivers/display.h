@@ -47,6 +47,13 @@
 #endif
 
 /* -------------------------------------------------------------------------
+ * Font cell dimensions (pixels at scale=1).
+ * Use these to calculate column/row counts instead of hardcoding 8.
+ * ------------------------------------------------------------------------- */
+#define FONT_W  12u
+#define FONT_H  12u
+
+/* -------------------------------------------------------------------------
  * Color helpers — RGB332 (8-bit: R[7:5] G[4:2] B[1:0])
  *
  * Takes full 8-bit r, g, b components and packs the top bits.
