@@ -167,7 +167,59 @@ rm -rf build && cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pic
 
 ---
 
-## 6. Flash to the Pico
+## 6. Run the host-native test suites
+
+The kernel subsystems ship with unit tests that run on your development machine — no Pico hardware, no cross-compiler, and no Pico SDK needed.  The tests compile `mem.c`, `sync.c`, `fs.c`, and `vfs.c` directly against the host `gcc` toolchain, using lightweight stubs for hardware and scheduler dependencies.
+
+### Prerequisites
+
+The host `gcc` toolchain and `cmake` are already installed from step 2.  No additional packages are required.
+
+### Run
+
+From the project root:
+
+```bash
+./build tests
+```
+
+This configures `tests/build/` if necessary, compiles all four test binaries, and runs them via CTest.  A passing run looks like:
+
+```
+--- tests ---
+Test project /home/user/picoOS/tests/build
+    Start 1: mem
+1/4 Test #1: mem ..............................   Passed    0.03 sec
+    Start 2: sync
+2/4 Test #2: sync .............................   Passed    0.00 sec
+    Start 3: fs
+3/4 Test #3: fs ...............................   Passed    0.00 sec
+    Start 4: vfs
+4/4 Test #4: vfs ..............................   Passed    0.00 sec
+
+100% tests passed, 0 tests failed out of 4
+```
+
+### What is tested
+
+| Binary | Module | Cases | Coverage |
+|--------|--------|-------|---------|
+| `test_mem` | `src/kernel/mem.c` | 14 | Zero alloc, alignment, exhaustion, fragmentation, coalescing, random sizes |
+| `test_sync` | `src/kernel/sync.c` | 31 | Spinlock, mutex, semaphore, event flags, message queue — non-blocking paths |
+| `test_fs` | `src/kernel/fs.c` | 17 | Format, CRUD, limits, name boundary, truncate, append, persistence, corruption |
+| `test_vfs` | `src/kernel/vfs.c` | 10 | Device/file routing, FD exhaustion, double-close, mount table limits |
+
+See **[docs/testing.md](testing.md)** for a full description of each test case and instructions for adding new ones.
+
+### Clean the test build
+
+```bash
+./clean          # removes tests/build along with all firmware build directories
+```
+
+---
+
+## 7. Flash to the Pico
 
 ### Method A — drag and drop (no extra tools)
 
@@ -211,7 +263,7 @@ The Pico will reappear as **RPI-RP2**.  Then copy the new `.uf2` as above.
 
 ---
 
-## 7. Connect to the console
+## 8. Connect to the console
 
 picoOS outputs a USB CDC serial port.  Once the Pico is running, a `/dev/ttyACM0` device (Linux) or `/dev/cu.usbmodem*` device (macOS) appears.
 
@@ -257,7 +309,7 @@ screen /dev/cu.usbmodem* 115200
 
 ---
 
-## 8. First boot
+## 9. First boot
 
 After flashing, the console should show something like:
 
@@ -288,7 +340,7 @@ Type `help` to list available shell commands.
 
 ---
 
-## 9. Editor / IDE setup
+## 10. Editor / IDE setup
 
 ### clangd (VS Code, Neovim, etc.)
 
@@ -310,7 +362,7 @@ Then open the project root in your editor.
 
 ---
 
-## 10. Debugging with GDB (optional)
+## 11. Debugging with GDB (optional)
 
 You need a second Pico flashed as a [Picoprobe](https://github.com/raspberrypi/picoprobe) (or a J-Link / CMSIS-DAP adapter) connected to the target Pico's SWD pins (SWDIO, SWDCLK, GND).
 
@@ -341,7 +393,7 @@ arm-none-eabi-gdb build/src/picoos_D-v0.2.0.elf
 
 ---
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---------|-------------|-----|

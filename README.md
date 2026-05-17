@@ -49,6 +49,7 @@ TID  PID  PRI  STATE     CPU-ms  STACK   NAME             CANARY
 | Bluetooth scanning + device-type detection (pico_w / pico2_w only) | `src/kernel/bluetooth.c` |
 | ST7789 display driver (optional) | `src/drivers/display.c` |
 | RGB LED driver (optional) | `src/drivers/led.c` |
+| Host-native kernel unit tests | `tests/` — see [docs/testing.md](docs/testing.md) |
 
 ---
 
@@ -69,6 +70,7 @@ TID  PID  PRI  STATE     CPU-ms  STACK   NAME             CANARY
 
 Full build and flash instructions are in **[docs/setup.md](docs/setup.md)**.
 How to write and register a new application is in **[docs/application.md](docs/application.md)**.
+How the test suites work is in **[docs/testing.md](docs/testing.md)**.
 The short version:
 
 ```bash
@@ -91,6 +93,9 @@ cp build/src/picoos_D-v0.2.1.uf2 /media/$USER/RPI-RP2/
 # 5. Open the console
 pip install pyserial
 python3 tools/console.py
+
+# Run the host-native test suites (no hardware required)
+./build tests
 ```
 
 ### Board selection
@@ -214,6 +219,21 @@ picoOS/
 │   └── drivers/
 │       ├── display.[ch]    ST7789 240×135 driver — /dev/display (optional)
 │       └── led.[ch]        Pimoroni RGB LED driver — /dev/led (optional)
+├── tests/
+│   ├── CMakeLists.txt      Standalone host CMake project; four CTest targets
+│   ├── framework.h         Minimal BEGIN_TEST / CHECK / END_TEST / SUMMARY macros
+│   ├── mem/
+│   │   └── test_mem.c      Heap allocator tests (14 cases)
+│   ├── sync/
+│   │   ├── mock_sched.c    Scheduler stubs for host compilation
+│   │   └── test_sync.c     Spinlock, mutex, semaphore, event flags, mqueue (31 cases)
+│   ├── fs/
+│   │   ├── mock_flash.c/h  RAM-backed flash mock (erase, program, XIP reads)
+│   │   └── test_fs.c       Filesystem CRUD, limits, persistence, corruption (17 cases)
+│   └── vfs/
+│       ├── mock_dev.c/h    Device-layer call-counting stubs
+│       ├── mock_fs.c/h     Filesystem-layer call-counting stubs
+│       └── test_vfs.c      VFS routing, FD exhaustion, delegation (10 cases)
 └── tools/
     ├── console.py          Host-side terminal companion (pyserial)
     ├── mem_report.py       SRAM usage report derived from the linker map
