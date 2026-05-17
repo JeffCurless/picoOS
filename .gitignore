@@ -22,6 +22,7 @@ pico-sdk/
 # Build areas
 build_pico*/
 kits/
+tests/build
 
 # Log files from the console tool
 *.log

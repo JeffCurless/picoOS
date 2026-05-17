@@ -142,11 +142,21 @@ static inline void multicore_lockout_end_blocking(void)        {}
 static inline void multicore_lockout_victim_init(void)         {}
 
 /* Pico SDK flash ---------------------------------------------------------- */
+#ifdef HOST_TEST
+/* In host test builds the flash functions and XIP base are provided by the
+ * test-suite mock (tests/fs/mock_flash.c) so that fs.c can be compiled and
+ * run against a RAM-backed store without any real RP2040 hardware. */
+extern uintptr_t host_xip_base;
+#define XIP_BASE (host_xip_base)
+void flash_range_erase(uint32_t offset, size_t count);
+void flash_range_program(uint32_t offset, const uint8_t *data, size_t count);
+#else
 #define XIP_BASE  ((uintptr_t)0x10000000u)
-static inline void     flash_range_erase(uint32_t offset, size_t count)                    { (void)offset; (void)count; }
-static inline void     flash_range_program(uint32_t offset, const uint8_t *data, size_t count) { (void)offset; (void)data; (void)count; }
-static inline uint32_t save_and_disable_interrupts(void)                                   { return 0; }
-static inline void     restore_interrupts(uint32_t status)                                 { (void)status; }
+static inline void flash_range_erase(uint32_t offset, size_t count)
+    { (void)offset; (void)count; }
+static inline void flash_range_program(uint32_t offset, const uint8_t *data, size_t count)
+    { (void)offset; (void)data; (void)count; }
+#endif
 
 /* TinyUSB stub ------------------------------------------------------------ */
 static inline void tud_task(void) {}

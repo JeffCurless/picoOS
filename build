@@ -2,10 +2,11 @@
 # build — compile firmware variants and collect .uf2 images into kits/.
 #
 # Usage:
-#   ./build           build all 12 variants  (same as "all")
-#   ./build all       build all 12 variants
+#   ./build           build all 12 firmware variants  (same as "all")
+#   ./build all       build all 12 firmware variants
 #   ./build pico      build pico + picow  (6 variants)
 #   ./build pico2     build pico2 + pico2w  (6 variants)
+#   ./build tests     build and run host-native unit tests
 #
 # Build directories: build_<board>_ND | build_<board>_D | build_<board>_D2
 # Output naming:     <board>os-v<ver>  <board>os_D-v<ver>  <board>os_D2-v<ver>
@@ -15,12 +16,26 @@
 SDK="${PICO_SDK_PATH:-$HOME/workspace/pico-sdk}"
 JOBS="$(nproc)"
 
+# ---------------------------------------------------------------------------
+# Host-native test suite
+# ---------------------------------------------------------------------------
+run_tests() {
+    echo "--- tests ---"
+    cmake -B tests/build tests/ || return 1
+    make -j"$JOBS" -C tests/build || return 1
+    ctest --test-dir tests/build --output-on-failure
+}
+
 case "${1:-all}" in
+    tests)
+        run_tests
+        exit $?
+        ;;
     all)   BOARDS="pico picow pico2 pico2w" ;;
     pico)  BOARDS="pico picow" ;;
     pico2) BOARDS="pico2 pico2w" ;;
     *)
-        echo "Usage: $0 [all|pico|pico2]" >&2
+        echo "Usage: $0 [all|pico|pico2|tests]" >&2
         exit 1
         ;;
 esac

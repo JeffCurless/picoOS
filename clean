@@ -1,5 +1,5 @@
 #!/usr/bin/bash
-# clean — remove all variant build directories
+# clean — remove all variant build directories and the test build directory
 
 mkdir -p kits
 
@@ -12,3 +12,8 @@ for board in pico picow pico2 pico2w; do
         fi
     done
 done
+
+if [ -d "tests/build" ]; then
+    echo "Cleaning tests/build..."
+    rm -rf "tests/build"
+fi
