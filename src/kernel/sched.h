@@ -101,4 +101,19 @@ void sched_add_thread(tcb_t *t);
  */
 void sched_remove_thread(tcb_t *t);
 
+/* -------------------------------------------------------------------------
+ * Deadlock panic — defined in sched.c, callable from sync.c (spinlock
+ * timeouts) and from sched_next_thread() (BLOCKED-thread scanner).
+ *
+ * Only compiled when PICOOS_LOCK_DEBUG is set.  Mirrors stack_overflow_panic:
+ * enables IRQs, prints diagnostics, pumps USB ~500 ms, then halts.
+ * ------------------------------------------------------------------------- */
+#ifdef PICOOS_LOCK_DEBUG
+void __attribute__((noreturn)) lock_deadlock_panic(
+    const char *lock_type,
+    const char *wait_file, int wait_line,
+    uint32_t    wait_tid,  const char *wait_name,
+    const char *hold_file, int hold_line, int32_t hold_tid);
+#endif
+
 #endif /* KERNEL_SCHED_H */

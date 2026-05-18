@@ -12,6 +12,15 @@
  * without prior written permission from the copyright holder.
  */
 
+/* Compile-time version string: "picoOS M.m.e" */
+#define PICOOS_XSTR(x) PICOOS_STR(x)
+#define PICOOS_STR(x)  #x
+#define PICOOS_SPLASH_TEXT \
+    "picoOS " \
+    PICOOS_XSTR(PICOOS_VERSION_MAJOR) "." \
+    PICOOS_XSTR(PICOOS_VERSION_MINOR) "." \
+    PICOOS_XSTR(PICOOS_VERSION_EDIT)
+
 /*
  * display.c — Pimoroni Pico Display Pack / Display Pack 2 (ST7789, RGB332) driver
  *
@@ -355,7 +364,16 @@ static void display_flush_fb(void)
      * spi_set_format() resets the SPI0 peripheral and re-applies the
      * correct settings; the ST7789 panel retains its configuration across
      * an SPI peripheral reset so no display re-init is needed.
+     *
+     * The re-arm and the first SPI command are wrapped in a critical
+     * section to prevent the USB stdio background alarm IRQ (which fires
+     * every ~1 ms and calls tud_task()) from firing between the re-arm
+     * and the first spi_write_blocking() call.  That IRQ can leave SPI0
+     * in a bad state, causing spi_write_blocking() to busy-wait forever.
+     * The critical window is only the handful of setup commands (~50 µs),
+     * not the full pixel-data loop, so USB is not disrupted.
      */
+    uint32_t irq_save = save_and_disable_interrupts();
     spi_init(spi0, 62500000u);
     spi_set_format(spi0, 8u, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
     gpio_set_function(DISP_PIN_SCK,  GPIO_FUNC_SPI);
@@ -385,6 +403,7 @@ static void display_flush_fb(void)
     }
 
     st7789_cmd(ST7789_RAMWR);
+    restore_interrupts(irq_save);   /* re-enable IRQs before the long pixel loop */
 
     /* Stream dirty rows, expanding RGB332 → RGB565 for the ST7789.
      * Bit-replication fills the full output range:
@@ -533,11 +552,11 @@ int display_open(void)
 #else
             const uint8_t scale = 2u;
 #endif
-            int tx = (int)((DISP_WIDTH  - 6u * 8u * scale) / 2u);
+            int tx = (int)((DISP_WIDTH  - (sizeof(PICOOS_SPLASH_TEXT) - 1u) * 8u * scale) / 2u);
             int ty = (int)((DISP_HEIGHT - 8u * scale) / 2u);
             memset(framebuffer, COLOR_BLUE, sizeof(framebuffer));
             dirty_mark_all();
-            draw_text_impl(tx, ty, "picoOS", COLOR_WHITE, COLOR_BLUE, scale);
+            draw_text_impl(tx, ty, PICOOS_SPLASH_TEXT, COLOR_WHITE, COLOR_BLUE, scale);
             display_flush_fb();
         }
     }

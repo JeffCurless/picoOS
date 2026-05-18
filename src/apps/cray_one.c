@@ -17,6 +17,7 @@
 #include "kernel/wifi.h"
 #include "kernel/vfs.h"
 #include "kernel/syscall.h"
+#include "kernel/sync.h"
 #include "kernel/dev.h"
 #include "drivers/display.h"
 #include "shell/shell.h"
@@ -43,6 +44,7 @@
 
 #define MCAST_PORT           4210u
 #define ANNOUNCE_INTERVAL_MS 2000u
+#define DISPLAY_INTERVAL_MS   100u
 
 /* Maximum supported cluster size — bounds message buffer and color arrays */
 #define MAXNODES_MAX         16u
@@ -50,6 +52,16 @@
 /* "<nodeid>:<c0>,<c1>,...,<cN-1>\0"
  * worst case: 2 + 1 + MAXNODES_MAX*3 - 1 + 1 = MAXNODES_MAX*3 + 3 = 51 for N=16 */
 #define MSG_MAX              64u
+
+/* Compile-time sanity: MAXNODES_MAX <= 99 keeps node-ID at most 2 decimal digits,
+ * which is what the MSG_WORST formula assumes.  If MAXNODES_MAX is ever raised past
+ * 99 the second assert catches the resulting buffer overflow automatically. */
+_Static_assert(MAXNODES_MAX <= 99u,
+    "MAXNODES_MAX > 99: MSG_MAX formula assumes 2-digit node IDs; "
+    "increase MSG_MAX and update this assertion");
+_Static_assert(MAXNODES_MAX * 3u + 3u <= MSG_MAX,
+    "MSG_MAX too small for MAXNODES_MAX color payload; "
+    "raise MSG_MAX or lower MAXNODES_MAX");
 
 /* -------------------------------------------------------------------------
  * Display grid
@@ -174,13 +186,30 @@ static const uint8_t color_palette[] = {
 #define PALETTE_SIZE  (sizeof(color_palette) / sizeof(color_palette[0]))
 
 /* -------------------------------------------------------------------------
+ * Receive message — enqueued by mcast_recv_cb, consumed by the main loop.
+ * Sized to fit within MQ_MSG_SIZE (64 bytes):
+ *   4 (sender) + 4 (num_colors) + 16 (colors) = 24 bytes.
+ * ------------------------------------------------------------------------- */
+typedef struct {
+    int     sender;
+    int     num_colors;
+    uint8_t colors[MAXNODES_MAX];
+} rx_msg_t;
+_Static_assert(sizeof(rx_msg_t) <= MQ_MSG_SIZE,
+    "rx_msg_t exceeds MQ_MSG_SIZE; raise MQ_MSG_SIZE or shrink rx_msg_t");
+
+/* -------------------------------------------------------------------------
  * Shared state — written during init, read-only from the RX callback.
  * g_rx_count is written from the RX callback (poll-thread context).
  * ------------------------------------------------------------------------- */
 static volatile uint32_t g_rx_count = 0;
 static int     g_nodeid   = 0;
 static int     g_maxnodes = 1;
-static uint8_t g_my_colors[MAXNODES_MAX]; /* current color set, one per slot */
+static uint8_t       g_my_colors[MAXNODES_MAX]; /* current color set, one per slot */
+static mqueue_t      g_rx_mq;                  /* peer updates → display thread   */
+static event_flags_t g_cray_done;              /* thread completion signals        */
+static volatile bool g_cray_running    = false;
+static volatile bool g_my_colors_dirty = false;
 
 #ifdef __arm__
 /* Survive a thread kill: store PCB and multicast state so the next run can
@@ -188,6 +217,9 @@ static uint8_t g_my_colors[MAXNODES_MAX]; /* current color set, one per slot */
 static struct udp_pcb *g_pcb         = NULL;
 static ip4_addr_t      g_mcast_group_addr;
 static bool            g_mcast_active = false;
+
+/* Set by mcast_recv_cb on any parse error; cleared + checked each TX cycle. */
+static volatile bool   g_net_error   = false;
 #endif
 
 /* -------------------------------------------------------------------------
@@ -361,6 +393,7 @@ static void mcast_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     const char *colon = msg;
     while (*colon && *colon != ':') colon++;
     if (*colon != ':') {
+        g_net_error = true;
         return;   /* malformed message */
     }
 
@@ -389,20 +422,143 @@ static void mcast_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
         if (*q == ',') q++;
     }
     if (rx_num == 0) {
+        g_net_error = true;
         return;   /* malformed — no colors */
     }
 
     /* Ignore self and out-of-range senders */
     if (sender == g_nodeid || sender < 0 || sender >= g_maxnodes) {
+        if (sender != g_nodeid) {
+            /* Out-of-range drop: helps diagnose MAXNODES misconfiguration. */
+            printf("[cray-one] RX dropped: sender=%d (nodeid=%d maxnodes=%d)\r\n",
+                   sender, g_nodeid, g_maxnodes);
+            g_net_error = true;
+        }
         return;
     }
 
     uint32_t count = ++g_rx_count;
-    printf("[cray-one] #%lu RX node %d colors 0x%02X... (%d)\r\n",
-           (unsigned long)count, sender, (unsigned)rx_colors[0], rx_num);
+    char rx_color_str[MAXNODES_MAX * 3 + 1];
+    int rcp = 0;
+    for (int ci = 0; ci < rx_num; ci++)
+        rcp += snprintf(rx_color_str + rcp, sizeof(rx_color_str) - (size_t)rcp,
+                        ci ? ",%02X" : "%02X", (unsigned)rx_colors[ci]);
+    printf("[cray-one] #%lu RX node %d colors %s\r\n",
+           (unsigned long)count, sender, rx_color_str);
 
-    paint_node_blocks(sender, rx_colors, rx_num);
-    dev_ioctl(DEV_DISPLAY, IOCTL_DISP_FLUSH, NULL);
+    /* Enqueue for the main loop to paint — no display work in this callback. */
+    rx_msg_t m;
+    m.sender     = sender;
+    m.num_colors = rx_num;
+    memcpy(m.colors, rx_colors, (size_t)rx_num);
+    if (!mqueue_try_send(&g_rx_mq, &m)) {
+        printf("[cray-one] RX queue full — drop node %d\r\n", sender);
+        g_net_error = true;
+    }
+}
+#endif /* __arm__ */
+
+/* -------------------------------------------------------------------------
+ * cray_tx_thread — picks new colors and broadcasts them every
+ * ANNOUNCE_INTERVAL_MS.  Sets g_my_colors_dirty so cray_disp_thread repaints
+ * the local node's blocks.  Signals g_cray_done bit 0x1 on exit.
+ * ------------------------------------------------------------------------- */
+#ifdef __arm__
+static void cray_tx_thread(void *arg)
+{
+    (void)arg;
+
+    char     msg[MSG_MAX];
+    uint32_t tx_count = 0;
+
+    while (g_cray_running && wifi_get_state() == WIFI_STATE_UP) {
+#ifdef PICOOS_LED_ENABLE
+        {
+            uint32_t led_color = g_net_error ? 0xFF0000u : 0x0000FFu;
+            dev_ioctl(DEV_LED, IOCTL_LED_SET_RGB, &led_color);
+            g_net_error = false;
+        }
+#endif
+        /* Pick a new color set; volatile dirty flag tells display thread. */
+        for (int i = 0; i < g_maxnodes && i < (int)MAXNODES_MAX; i++)
+            g_my_colors[i] = color_palette[rng_next() % PALETTE_SIZE];
+        g_my_colors_dirty = true;
+
+        /* Build "<nodeid>:<c0>,<c1>,...,<cN-1>" */
+        int pos = snprintf(msg, sizeof(msg), "%d:", g_nodeid);
+        for (int i = 0; i < g_maxnodes && i < (int)MAXNODES_MAX; i++)
+            pos += snprintf(msg + pos, sizeof(msg) - (size_t)pos,
+                            i ? ",%02X" : "%02X", (unsigned)g_my_colors[i]);
+        size_t mlen = (size_t)pos;
+
+        cyw43_arch_lwip_begin();
+        struct pbuf *pb = pbuf_alloc(PBUF_TRANSPORT, (u16_t)mlen, PBUF_RAM);
+        if (pb != NULL) {
+            memcpy(pb->payload, msg, mlen);
+            err_t tx_err = udp_sendto(g_pcb, pb,
+                                      (const ip_addr_t *)&g_mcast_group_addr,
+                                      MCAST_PORT);
+            pbuf_free(pb);
+            if (tx_err == ERR_OK) {
+                tx_count++;
+                printf("[cray-one] TX #%lu %s\r\n",
+                       (unsigned long)tx_count, msg);
+            } else {
+                printf("[cray-one] TX #%lu sendto err %d — skipping\r\n",
+                       (unsigned long)(tx_count + 1u), (int)tx_err);
+#ifdef PICOOS_LED_ENABLE
+                { uint32_t c = 0xFF0000u; dev_ioctl(DEV_LED, IOCTL_LED_SET_RGB, &c); }
+#endif
+            }
+        } else {
+            printf("[cray-one] TX #%lu pbuf_alloc failed — skipping\r\n",
+                   (unsigned long)(tx_count + 1u));
+#ifdef PICOOS_LED_ENABLE
+            { uint32_t c = 0xFF0000u; dev_ioctl(DEV_LED, IOCTL_LED_SET_RGB, &c); }
+#endif
+        }
+        cyw43_arch_lwip_end();
+
+        sys_sleep(ANNOUNCE_INTERVAL_MS);
+    }
+
+    g_cray_running = false;     /* stop cray_disp_thread */
+    event_flags_set(&g_cray_done, 0x1u);
+}
+
+/* -------------------------------------------------------------------------
+ * cray_disp_thread — wakes every 50 ms, repaints any nodes with pending
+ * updates (own or peer), then flushes the display in a single SPI pass.
+ * Signals g_cray_done bit 0x2 on exit.
+ * ------------------------------------------------------------------------- */
+static void cray_disp_thread(void *arg)
+{
+    (void)arg;
+
+    while (g_cray_running) {
+        bool did_paint = false;
+
+        /* Process exactly one update per tick: own-block repaint takes
+         * priority; otherwise dequeue one peer update. */
+        if (g_my_colors_dirty) {
+            g_my_colors_dirty = false;
+            paint_node_blocks(g_nodeid, g_my_colors, g_maxnodes);
+            did_paint = true;
+        } else {
+            rx_msg_t rx;
+            if (mqueue_try_recv(&g_rx_mq, &rx)) {
+                paint_node_blocks(rx.sender, rx.colors, rx.num_colors);
+                did_paint = true;
+            }
+        }
+
+        if (did_paint)
+            dev_ioctl(DEV_DISPLAY, IOCTL_DISP_FLUSH, NULL);
+
+        sys_sleep(DISPLAY_INTERVAL_MS);
+    }
+
+    event_flags_set(&g_cray_done, 0x2u);
 }
 #endif /* __arm__ */
 
@@ -416,21 +572,27 @@ static void mcast_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
  * 3. Picks a deterministic random color (seeded by NODEID)
  * 4. Renders the 4×7 grid with own blocks highlighted
  * 5. Joins multicast group 239.255.0.1 / UDP port 4210
- * 6. Loops every 2 s: broadcasts "<NODEID>:<color_hex>" to the group;
- *    refreshes own blocks locally after each send (in case the router
- *    does not loop back the multicast).
- *    Incoming datagrams from peer nodes trigger mcast_recv_cb which
- *    paints their blocks on the display
+ * 6. Spawns cray_tx_thread (2 s TX cycle) and cray_disp_thread (50 ms
+ *    display poll); waits for both to finish via event flags
+ * 7. Cleans up PCB / display / LED
  * ------------------------------------------------------------------------- */
 void cray_one(void *arg)
 {
     (void)arg;
+
+#ifdef PICOOS_LED_ENABLE
+    dev_open(DEV_LED);
+    { uint32_t c = 0x0000FFu; dev_ioctl(DEV_LED, IOCTL_LED_SET_RGB, &c); }
+#endif
 
     /* ---- 1. Read and parse config.txt ---- */
     int fd = vfs_open(CONFIG_FILE, VFS_O_RDONLY);
     if (fd < 0) {
         shell_print("[cray-one] ERROR: config.txt not found\r\n");
         shell_print("[cray-one] Required fields: SSID, PASSWORD, NODEID, MAXNODES\r\n");
+#ifdef PICOOS_LED_ENABLE
+        { uint32_t c = 0xFF0000u; dev_ioctl(DEV_LED, IOCTL_LED_SET_RGB, &c); }
+#endif
         return;
     }
 
@@ -440,6 +602,9 @@ void cray_one(void *arg)
 
     if (n <= 0) {
         shell_print("[cray-one] ERROR: config.txt is empty or unreadable\r\n");
+#ifdef PICOOS_LED_ENABLE
+        { uint32_t c = 0xFF0000u; dev_ioctl(DEV_LED, IOCTL_LED_SET_RGB, &c); }
+#endif
         return;
     }
     buf[n] = '\0';
@@ -459,14 +624,31 @@ void cray_one(void *arg)
 
     if (ssid[0] == '\0') {
         shell_print("[cray-one] ERROR: SSID= not found in config.txt\r\n");
+#ifdef PICOOS_LED_ENABLE
+        { uint32_t c = 0xFF0000u; dev_ioctl(DEV_LED, IOCTL_LED_SET_RGB, &c); }
+#endif
         return;
     }
     if (maxnodes < 1) {
         shell_print("[cray-one] ERROR: MAXNODES must be >= 1\r\n");
+#ifdef PICOOS_LED_ENABLE
+        { uint32_t c = 0xFF0000u; dev_ioctl(DEV_LED, IOCTL_LED_SET_RGB, &c); }
+#endif
+        return;
+    }
+    if (maxnodes > (int)MAXNODES_MAX) {
+        shell_print("[cray-one] ERROR: MAXNODES=%d exceeds built-in limit %u\r\n",
+                    maxnodes, MAXNODES_MAX);
+#ifdef PICOOS_LED_ENABLE
+        { uint32_t c = 0xFF0000u; dev_ioctl(DEV_LED, IOCTL_LED_SET_RGB, &c); }
+#endif
         return;
     }
     if (nodeid < 0 || nodeid >= maxnodes) {
         shell_print("[cray-one] ERROR: NODEID must be 0 .. MAXNODES-1\r\n");
+#ifdef PICOOS_LED_ENABLE
+        { uint32_t c = 0xFF0000u; dev_ioctl(DEV_LED, IOCTL_LED_SET_RGB, &c); }
+#endif
         return;
     }
 
@@ -493,6 +675,9 @@ void cray_one(void *arg)
     }
     if (rc != 0) {
         shell_print("[cray-one] Connection failed (err %d)\r\n", rc);
+#ifdef PICOOS_LED_ENABLE
+        { uint32_t c = 0xFF0000u; dev_ioctl(DEV_LED, IOCTL_LED_SET_RGB, &c); }
+#endif
         return;
     }
     shell_print("[cray-one] Connected — IP: %s\r\n", wifi_get_ip_str());
@@ -566,6 +751,9 @@ void cray_one(void *arg)
     if (pcb == NULL) {
         cyw43_arch_lwip_end();
         shell_print("[cray-one] ERROR: udp_new failed\r\n");
+#ifdef PICOOS_LED_ENABLE
+        { uint32_t c = 0xFF0000u; dev_ioctl(DEV_LED, IOCTL_LED_SET_RGB, &c); }
+#endif
         return;
     }
 
@@ -573,6 +761,9 @@ void cray_one(void *arg)
         udp_remove(pcb);
         cyw43_arch_lwip_end();
         shell_print("[cray-one] ERROR: udp_bind failed\r\n");
+#ifdef PICOOS_LED_ENABLE
+        { uint32_t c = 0xFF0000u; dev_ioctl(DEV_LED, IOCTL_LED_SET_RGB, &c); }
+#endif
         return;
     }
 
@@ -582,6 +773,9 @@ void cray_one(void *arg)
         udp_remove(pcb);
         cyw43_arch_lwip_end();
         shell_print("[cray-one] ERROR: igmp_joingroup failed\r\n");
+#ifdef PICOOS_LED_ENABLE
+        { uint32_t c = 0xFF0000u; dev_ioctl(DEV_LED, IOCTL_LED_SET_RGB, &c); }
+#endif
         return;
     }
     udp_recv(pcb, mcast_recv_cb, NULL);
@@ -595,42 +789,20 @@ void cray_one(void *arg)
                 "announcing every %u ms\r\n",
                 MCAST_PORT, ANNOUNCE_INTERVAL_MS);
 
-    /* ---- 6. Announce / listen loop ---- */
-    char msg[MSG_MAX];
-    uint32_t tx_count = 0;
-    while (wifi_get_state() == WIFI_STATE_UP) {
-        /* Pick a new set of MAXNODES colors each transmission */
-        for (int i = 0; i < g_maxnodes && i < (int)MAXNODES_MAX; i++)
-            g_my_colors[i] = color_palette[rng_next() % PALETTE_SIZE];
+    /* ---- 6. Spawn TX and display threads; wait for both to finish ---- */
+    mqueue_init(&g_rx_mq, sizeof(rx_msg_t));
+    event_flags_init(&g_cray_done);
+    g_my_colors_dirty = false;
+    g_cray_running    = true;
 
-        /* Build "<nodeid>:<c0>,<c1>,...,<cN-1>" */
-        int pos = snprintf(msg, sizeof(msg), "%d:", g_nodeid);
-        for (int i = 0; i < g_maxnodes && i < (int)MAXNODES_MAX; i++)
-            pos += snprintf(msg + pos, sizeof(msg) - (size_t)pos,
-                            i ? ",%02X" : "%02X", (unsigned)g_my_colors[i]);
-        size_t mlen = (size_t)pos;
+    uint32_t pid = (uint32_t)sys_getpid();
+    syscall_dispatch(SYS_THREAD_CREATE, pid,
+                     (uint32_t)(uintptr_t)cray_tx_thread,   0u, 0u);
+    syscall_dispatch(SYS_THREAD_CREATE, pid,
+                     (uint32_t)(uintptr_t)cray_disp_thread, 0u, 0u);
 
-        cyw43_arch_lwip_begin();
-        struct pbuf *pb = pbuf_alloc(PBUF_TRANSPORT, (u16_t)mlen, PBUF_RAM);
-        if (pb != NULL) {
-            memcpy(pb->payload, msg, mlen);
-            udp_sendto(pcb, pb, (const ip_addr_t *)&mcast_group, MCAST_PORT);
-            pbuf_free(pb);
-            tx_count++;
-            printf("[cray-one] TX #%lu node %d colors 0x%02X...\r\n",
-                   (unsigned long)tx_count, g_nodeid, (unsigned)g_my_colors[0]);
-        } else {
-            printf("[cray-one] TX #%lu pbuf_alloc failed — skipping\r\n",
-                   (unsigned long)(tx_count + 1u));
-        }
-        cyw43_arch_lwip_end();
-
-        /* Refresh own blocks locally — multicast loopback is not guaranteed */
-        paint_node_blocks(g_nodeid, g_my_colors, g_maxnodes);
-        dev_ioctl(DEV_DISPLAY, IOCTL_DISP_FLUSH, NULL);
-
-        sys_sleep(ANNOUNCE_INTERVAL_MS);
-    }
+    /* Block until TX thread sets 0x1 and display thread sets 0x2. */
+    event_flags_wait(&g_cray_done, 0x3u, true);
 
     /* ---- 7. Cleanup ---- */
     cyw43_arch_lwip_begin();
@@ -641,7 +813,14 @@ void cray_one(void *arg)
     g_mcast_active = false;
     cyw43_arch_lwip_end();
 
-    shell_print("[cray-one] Link lost — stopped\r\n");
+    dev_close(DEV_DISPLAY);
+
+#ifdef PICOOS_LED_ENABLE
+    dev_ioctl(DEV_LED, IOCTL_LED_OFF, NULL);
+    dev_close(DEV_LED);
+#endif
+
+    shell_print("[cray-one] stopped\r\n");
 #endif /* __arm__ */
 }
 

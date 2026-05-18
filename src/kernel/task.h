@@ -98,6 +98,21 @@ typedef struct tcb {
     uint64_t        cpu_time_us;    /* Accumulated CPU time in microseconds  */
     char            name[16];       /* Human-readable name (NUL-terminated)  */
     struct tcb     *next;           /* Intrusive linked-list pointer         */
+
+#ifdef PICOOS_LOCK_DEBUG
+    /* -----------------------------------------------------------------------
+     * Deadlock detection — populated by the _dbg lock variants before
+     * calling sched_block(), cleared after the thread is unblocked.
+     * The SysTick scanner in sched.c checks these fields every 1 ms.
+     * ----------------------------------------------------------------------- */
+    uint64_t        blk_time_us;      /* absolute time sched_block() was called    */
+    const char     *blk_file;         /* source file of the blocking lock call     */
+    int             blk_line;         /* source line of the blocking lock call     */
+    const char     *blk_what;         /* tag: "mutex"|"semaphore"|"event_flags"|.. */
+    int32_t         blk_holder_tid;   /* TID of lock holder recorded at block time */
+    const char     *blk_holder_file;  /* file where holder acquired the lock       */
+    int             blk_holder_line;  /* line where holder acquired the lock       */
+#endif
 } tcb_t;
 
 /* -------------------------------------------------------------------------

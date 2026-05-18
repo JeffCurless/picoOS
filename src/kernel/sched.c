@@ -15,6 +15,9 @@
 #include "sched.h"
 #include "task.h"
 #include "arch.h"
+#ifdef PICOOS_LOCK_DEBUG
+#include "sync.h"   /* for PICOOS_LOCK_TIMEOUT_MS */
+#endif
 
 #include <stdint.h>
 #include <stddef.h>
@@ -42,6 +45,47 @@ volatile uint32_t  tick_count  = 0;
 
 /* One singly-linked READY list per priority level (0 = highest). */
 static tcb_t *ready_queues[NUM_PRIORITIES];
+
+/* -------------------------------------------------------------------------
+ * Deadlock detection state (debug builds only)
+ *
+ * g_deadlock_victim is set by the SysTick scanner when a BLOCKED thread
+ * has exceeded PICOOS_LOCK_TIMEOUT_MS.  sched_next_thread() checks it and
+ * calls lock_deadlock_panic() in PendSV context (same env as stack overflow).
+ * ------------------------------------------------------------------------- */
+#ifdef PICOOS_LOCK_DEBUG
+static volatile tcb_t *g_deadlock_victim = NULL;
+
+void __attribute__((noreturn)) lock_deadlock_panic(
+    const char *lock_type,
+    const char *wait_file, int wait_line,
+    uint32_t    wait_tid,  const char *wait_name,
+    const char *hold_file, int hold_line, int32_t hold_tid)
+{
+    __enable_irq();   /* allow USB IRQ to drain the CDC TX ring-buffer */
+
+    printf("\r\n\r\n"
+           "!!! DEADLOCK DETECTED !!!\r\n"
+           "  Lock     : %s\r\n"
+           "  Waiting  : TID %u \"%s\"  at %s:%d  (> %u ms)\r\n"
+           "  Holder   : TID %d  at %s:%d\r\n"
+           "System halted. Reboot required.\r\n\r\n",
+           lock_type ? lock_type : "?",
+           (unsigned)wait_tid, wait_name ? wait_name : "?",
+           wait_file ? wait_file : "?", wait_line,
+           (unsigned)PICOOS_LOCK_TIMEOUT_MS,
+           (int)hold_tid,
+           hold_file ? hold_file : "(no single holder)", hold_line);
+
+    /* Pump USB for ~0.5 s so the message reaches the host terminal. */
+    for (int i = 0; i < 50; i++) {
+        tud_task();
+        sleep_ms(10);
+    }
+
+    for (;;) { __wfi(); }
+}
+#endif
 
 /* Countdown to the next forced context switch. */
 static uint32_t current_slice_remaining = TIME_SLICE_MS;
@@ -241,6 +285,20 @@ static void __attribute__((noreturn)) stack_overflow_panic(const tcb_t *t)
  * ------------------------------------------------------------------------- */
 tcb_t *sched_next_thread(void)
 {
+#ifdef PICOOS_LOCK_DEBUG
+    /* Called from PendSV with PRIMASK set — same environment as
+     * stack_overflow_panic().  lock_deadlock_panic() calls __enable_irq()
+     * before printing so USB output still reaches the host. */
+    if (g_deadlock_victim != NULL) {
+        const tcb_t *v = (const tcb_t *)g_deadlock_victim;
+        lock_deadlock_panic(
+            v->blk_what        ? v->blk_what        : "?",
+            v->blk_file        ? v->blk_file        : "?", v->blk_line,
+            v->tid, v->name,
+            v->blk_holder_file,  v->blk_holder_line, v->blk_holder_tid);
+    }
+#endif
+
     /* ---- Stack canary check for the outgoing thread ---- */
     if (current_tcb != NULL && current_tcb->stack_base != NULL) {
         if (*(const uint32_t *)current_tcb->stack_base != STACK_CANARY) {
@@ -367,6 +425,24 @@ void isr_systick(void)
         /* Pend a context switch. */
         SCB->ICSR |= SCB_ICSR_PENDSVSET_Msk;
     }
+
+#ifdef PICOOS_LOCK_DEBUG
+    /* Deadlock scanner: find BLOCKED threads that have been waiting longer
+     * than PICOOS_LOCK_TIMEOUT_MS.  Only the first victim is recorded;
+     * sched_next_thread() reads it and calls lock_deadlock_panic(). */
+    if (g_deadlock_victim == NULL) {
+        for (int _di = 0; _di < MAX_THREADS; _di++) {
+            tcb_t *_dt = task_get_thread_slot(_di);
+            if (_dt == NULL) continue;
+            if (_dt->state == THREAD_BLOCKED && _dt->blk_time_us != 0u &&
+                now > _dt->blk_time_us + (uint64_t)PICOOS_LOCK_TIMEOUT_MS * 1000u) {
+                g_deadlock_victim = _dt;
+                SCB->ICSR |= SCB_ICSR_PENDSVSET_Msk;
+                break;
+            }
+        }
+    }
+#endif
 }
 
 /* -------------------------------------------------------------------------
@@ -436,45 +512,68 @@ void sched_start(void)
     }
 
     if (first == NULL) {
-        /* Nothing to run — should never happen if the idle thread exists. */
+        printf("\r\nPANIC: sched_start — no ready thread\r\n");
         for (;;) { __wfi(); }
     }
 
     first->state = THREAD_RUNNING;
     current_tcb  = first;
 
-    /* Point the PSP at the top of the hardware exception frame within
-     * the thread's initial stack (just above the xpsr word).
-     * saved_sp points to the r4 word (the bottom of the 16-word frame).
-     * The hardware frame starts 8 words above saved_sp. */
-    uint32_t *hw_frame_bottom = first->saved_sp + 8;  /* r0 word */
-    uint32_t  psp_init        = (uint32_t)(uintptr_t)(hw_frame_bottom + 8); /* past xpsr */
+    /* Compute the initial PSP value and read entry/arg from the exception frame
+     * that task_create_thread() laid down.  These MUST be read before switching
+     * to PSP, because any function call after __set_PSP(psp_init) pushes data
+     * onto the new stack starting at psp_init — which sits exactly at the top of
+     * the initial exception frame.  Calling printf() or anything else after the
+     * switch corrupts saved_sp[8..15] (the pc field at saved_sp[14] in
+     * particular) and turns the subsequent entry(arg) into a hard-fault.
+     *
+     * Frame layout set by task_create_thread():
+     *   saved_sp[0..7]  = r4-r11   (software frame)
+     *   saved_sp[8]     = r0 (arg)
+     *   saved_sp[14]    = pc (entry)
+     *   saved_sp[15]    = xpsr
+     *   psp_init        = &saved_sp[16]  (one past xpsr — the initial PSP value)
+     */
+    uint32_t *hw_frame_bottom = first->saved_sp + 8;
+    uint32_t  psp_init        = (uint32_t)(uintptr_t)(hw_frame_bottom + 8);
 
-    /* Switch to PSP and set its value.
-     * CONTROL register bit 1 (SPSEL) selects PSP in Thread mode. */
+    /* Read entry and arg into register-class locals before any function call
+     * and before the PSP switch.  Declared 'register' so the compiler is
+     * explicitly told to keep these in CPU registers; if they were spilled to
+     * the stack after __set_PSP they would be loaded from the wrong stack. */
+    register void (*entry)(void *) = (void (*)(void *))((uintptr_t)first->saved_sp[14]);
+    register void  *arg            = (void *)(uintptr_t)first->saved_sp[8];
+
+    /* Diagnostic checkpoint — all printfs BEFORE the stack switch.
+    printf("[sched] starting TID %u \"%s\"  entry=0x%08X  PSP=0x%08X\r\n",
+           (unsigned)first->tid, first->name,
+           (unsigned)(uintptr_t)entry, (unsigned)psp_init);
+    */
+    stdio_flush();
+
+    /* 3. Set PSP to the top of the first thread's initial exception frame. */
     __set_PSP(psp_init);
+
+    /* 4. Switch Thread mode to use PSP (CONTROL.SPSEL = 1).
+     *    After __isb() every subsequent Thread-mode stack operation uses PSP.
+     *    DO NOT call any C function between here and entry(arg): the compiler
+     *    may spill locals to the new stack and overwrite the exception frame. */
     __set_CONTROL(__get_CONTROL() | 0x02u);
     __isb();
 
-    /* Configure SysTick for a 1 ms period.
-     * Use clock_get_hz() so this is correct regardless of board or clock speed. */
-    SysTick_Config(clock_get_hz(clk_sys) / 1000u);   /* 1 ms tick, any clock speed */
+    /* 5. Start the SysTick timer (1 ms period). */
+    SysTick_Config(clock_get_hz(clk_sys) / 1000u);
 
-    /* Enable global interrupts. */
+    /* 6. Enable global interrupts — SysTick and PendSV may now fire. */
     __enable_irq();
 
-    /* Retrieve entry and arg from the initialised stack frame.
-     * The hardware frame we laid down is:
-     *   saved_sp[0..7]  = r4-r11 (software frame)
-     *   saved_sp[8]     = r0  (= arg)
-     *   saved_sp[14]    = pc  (= entry)
-     */
-    void (*entry)(void *) = (void (*)(void *))((uintptr_t)first->saved_sp[14]);
-    void  *arg            = (void *)(uintptr_t)first->saved_sp[8];
-
-    /* Call the first thread's entry directly. */
+    /* 7. Call the thread's entry function directly.  The SysTick/PendSV
+     *    machinery will preempt it on the first tick if a higher-priority
+     *    thread becomes ready.  entry and arg are in CPU registers here
+     *    (not on any stack), so the PSP switch above cannot corrupt them. */
     entry(arg);
 
+    /* Unreachable in normal operation. */
     /* If entry returns, loop forever (the idle thread never returns). */
     for (;;) { __wfi(); }
 }

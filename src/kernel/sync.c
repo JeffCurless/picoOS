@@ -18,6 +18,17 @@
 
 #include <string.h>
 
+/* Prevent the PICOOS_LOCK_DEBUG macro wrappers declared in sync.h from
+ * expanding function-definition tokens below.  External callers still use
+ * the macro versions (via their own #include "sync.h"). */
+#ifdef PICOOS_LOCK_DEBUG
+#undef kmutex_lock
+#undef ksemaphore_wait
+#undef event_flags_wait
+#undef mqueue_send
+#undef mqueue_recv
+#endif
+
 /* =========================================================================
  * Spinlock
  * =========================================================================
@@ -39,15 +50,31 @@
 
 uint32_t spinlock_irq_acquire(spinlock_t *s)
 {
+#ifdef PICOOS_LOCK_DEBUG
+    uint64_t deadline = time_us_64() + (uint64_t)PICOOS_LOCK_TIMEOUT_MS * 1000u;
+#endif
     while (1) {
         uint32_t save = save_and_disable_interrupts();
         if (s->lock == 0u) {
             s->lock = 1u;
             __dmb();
+#ifdef PICOOS_LOCK_DEBUG
+            s->acq_tid  = (current_tcb != NULL) ? (int32_t)current_tcb->tid : -1;
+            /* acq_file/acq_line are set by higher-level _dbg variants */
+#endif
             return save;
         }
         restore_interrupts(save);
         __nop();
+#ifdef PICOOS_LOCK_DEBUG
+        if (time_us_64() > deadline) {
+            lock_deadlock_panic("spinlock",
+                "(spin-wait)", 0,
+                current_tcb ? (uint32_t)current_tcb->tid : 0u,
+                current_tcb ? current_tcb->name : "?",
+                s->acq_file, s->acq_line, s->acq_tid);
+        }
+#endif
     }
 }
 
@@ -55,21 +82,41 @@ void spinlock_irq_release(spinlock_t *s, uint32_t saved_irq)
 {
     __dmb();
     s->lock = 0u;
+#ifdef PICOOS_LOCK_DEBUG
+    s->acq_tid  = -1;
+    s->acq_file = NULL;
+    s->acq_line = 0;
+#endif
     restore_interrupts(saved_irq);
 }
 
 void spinlock_acquire(spinlock_t *s)
 {
+#ifdef PICOOS_LOCK_DEBUG
+    uint64_t deadline = time_us_64() + (uint64_t)PICOOS_LOCK_TIMEOUT_MS * 1000u;
+#endif
     while (1) {
         __disable_irq();
         if (s->lock == 0u) {
             s->lock = 1u;
             __dmb();
             __enable_irq();
+#ifdef PICOOS_LOCK_DEBUG
+            s->acq_tid  = (current_tcb != NULL) ? (int32_t)current_tcb->tid : -1;
+#endif
             return;
         }
         __enable_irq();
         __nop();
+#ifdef PICOOS_LOCK_DEBUG
+        if (time_us_64() > deadline) {
+            lock_deadlock_panic("spinlock",
+                "(spin-wait)", 0,
+                current_tcb ? (uint32_t)current_tcb->tid : 0u,
+                current_tcb ? current_tcb->name : "?",
+                s->acq_file, s->acq_line, s->acq_tid);
+        }
+#endif
     }
 }
 
@@ -77,6 +124,11 @@ void spinlock_release(spinlock_t *s)
 {
     __dmb();
     s->lock = 0u;
+#ifdef PICOOS_LOCK_DEBUG
+    s->acq_tid  = -1;
+    s->acq_file = NULL;
+    s->acq_line = 0;
+#endif
 }
 
 /* =========================================================================
@@ -132,6 +184,14 @@ void kmutex_init(kmutex_t *m)
     m->owner_tid  = -1;
     m->count      = 0u;
     m->waiters    = NULL;
+#ifdef PICOOS_LOCK_DEBUG
+    m->spin.acq_file = NULL;
+    m->spin.acq_line = 0;
+    m->spin.acq_tid  = -1;
+    m->acq_file      = NULL;
+    m->acq_line      = 0;
+    m->acq_time_us   = 0u;
+#endif
 }
 
 void kmutex_lock(kmutex_t *m)
@@ -163,6 +223,11 @@ void kmutex_unlock(kmutex_t *m)
 
     m->owner_tid = -1;
     m->count     = 0u;
+#ifdef PICOOS_LOCK_DEBUG
+    m->acq_file    = NULL;
+    m->acq_line    = 0;
+    m->acq_time_us = 0u;
+#endif
 
     /* Wake the first waiting thread (FIFO policy). */
     tcb_t *next = waiter_dequeue(&m->waiters);
@@ -173,6 +238,45 @@ void kmutex_unlock(kmutex_t *m)
     spinlock_irq_release(&m->spin, irq_save);
 }
 
+#ifdef PICOOS_LOCK_DEBUG
+void kmutex_lock_dbg(kmutex_t *m, const char *file, int line)
+{
+    while (1) {
+        uint32_t irq_save = spinlock_irq_acquire(&m->spin);
+
+        if (m->owner_tid == -1) {
+            m->owner_tid   = (int32_t)current_tcb->tid;
+            m->count       = 1u;
+            m->acq_file    = file;
+            m->acq_line    = line;
+            m->acq_time_us = time_us_64();
+            /* Record location on the spinlock for spinlock-level diagnostics. */
+            m->spin.acq_file = file;
+            m->spin.acq_line = line;
+            spinlock_irq_release(&m->spin, irq_save);
+            return;
+        }
+
+        /* Record blocking info on the TCB before yielding. */
+        ((tcb_t *)current_tcb)->blk_time_us     = time_us_64();
+        ((tcb_t *)current_tcb)->blk_file        = file;
+        ((tcb_t *)current_tcb)->blk_line        = line;
+        ((tcb_t *)current_tcb)->blk_what        = "mutex";
+        ((tcb_t *)current_tcb)->blk_holder_tid  = m->owner_tid;
+        ((tcb_t *)current_tcb)->blk_holder_file = m->acq_file;
+        ((tcb_t *)current_tcb)->blk_holder_line = m->acq_line;
+
+        waiter_enqueue(&m->waiters, (tcb_t *)current_tcb);
+        sched_block((tcb_t *)current_tcb);
+        spinlock_irq_release(&m->spin, irq_save);
+        sched_yield();
+
+        /* Unblocked — clear block marker and loop to re-check. */
+        ((tcb_t *)current_tcb)->blk_time_us = 0u;
+    }
+}
+#endif
+
 /* =========================================================================
  * Semaphore
  * ========================================================================= */
@@ -182,6 +286,11 @@ void ksemaphore_init(ksemaphore_t *s, int32_t initial_count)
     s->spin.lock = 0u;
     s->count     = initial_count;
     s->waiters   = NULL;
+#ifdef PICOOS_LOCK_DEBUG
+    s->spin.acq_file = NULL;
+    s->spin.acq_line = 0;
+    s->spin.acq_tid  = -1;
+#endif
 }
 
 void ksemaphore_wait(ksemaphore_t *s)
@@ -218,6 +327,36 @@ void ksemaphore_signal(ksemaphore_t *s)
 
     spinlock_irq_release(&s->spin, irq_save);
 }
+
+#ifdef PICOOS_LOCK_DEBUG
+void ksemaphore_wait_dbg(ksemaphore_t *s, const char *file, int line)
+{
+    while (1) {
+        uint32_t irq_save = spinlock_irq_acquire(&s->spin);
+
+        if (s->count > 0) {
+            s->count--;
+            spinlock_irq_release(&s->spin, irq_save);
+            return;
+        }
+
+        ((tcb_t *)current_tcb)->blk_time_us     = time_us_64();
+        ((tcb_t *)current_tcb)->blk_file        = file;
+        ((tcb_t *)current_tcb)->blk_line        = line;
+        ((tcb_t *)current_tcb)->blk_what        = "semaphore";
+        ((tcb_t *)current_tcb)->blk_holder_tid  = -1;
+        ((tcb_t *)current_tcb)->blk_holder_file = NULL;
+        ((tcb_t *)current_tcb)->blk_holder_line = 0;
+
+        waiter_enqueue(&s->waiters, (tcb_t *)current_tcb);
+        sched_block((tcb_t *)current_tcb);
+        spinlock_irq_release(&s->spin, irq_save);
+        sched_yield();
+
+        ((tcb_t *)current_tcb)->blk_time_us = 0u;
+    }
+}
+#endif
 
 /* =========================================================================
  * Event flags
@@ -280,6 +419,11 @@ void event_flags_init(event_flags_t *e)
     e->spin.lock = 0u;
     e->flags     = 0u;
     e->waiters   = NULL;
+#ifdef PICOOS_LOCK_DEBUG
+    e->spin.acq_file = NULL;
+    e->spin.acq_line = 0;
+    e->spin.acq_tid  = -1;
+#endif
 }
 
 void event_flags_set(event_flags_t *e, uint32_t mask)
@@ -366,6 +510,45 @@ uint32_t event_flags_wait(event_flags_t *e, uint32_t mask, bool wait_for_all)
     }
 }
 
+#ifdef PICOOS_LOCK_DEBUG
+uint32_t event_flags_wait_dbg(event_flags_t *e, uint32_t mask, bool wait_for_all,
+                               const char *file, int line)
+{
+    while (1) {
+        uint32_t irq_save = spinlock_irq_acquire(&e->spin);
+
+        bool satisfied;
+        if (wait_for_all) {
+            satisfied = ((e->flags & mask) == mask);
+        } else {
+            satisfied = ((e->flags & mask) != 0u);
+        }
+
+        if (satisfied) {
+            uint32_t result = e->flags;
+            spinlock_irq_release(&e->spin, irq_save);
+            return result;
+        }
+
+        ((tcb_t *)current_tcb)->blk_time_us     = time_us_64();
+        ((tcb_t *)current_tcb)->blk_file        = file;
+        ((tcb_t *)current_tcb)->blk_line        = line;
+        ((tcb_t *)current_tcb)->blk_what        = "event_flags";
+        ((tcb_t *)current_tcb)->blk_holder_tid  = -1;
+        ((tcb_t *)current_tcb)->blk_holder_file = NULL;
+        ((tcb_t *)current_tcb)->blk_holder_line = 0;
+
+        event_waiter_alloc((tcb_t *)current_tcb, mask, wait_for_all);
+        waiter_enqueue(&e->waiters, (tcb_t *)current_tcb);
+        sched_block((tcb_t *)current_tcb);
+        spinlock_irq_release(&e->spin, irq_save);
+        sched_yield();
+
+        ((tcb_t *)current_tcb)->blk_time_us = 0u;
+    }
+}
+#endif
+
 /* =========================================================================
  * Message queue
  * ========================================================================= */
@@ -380,6 +563,11 @@ void mqueue_init(mqueue_t *q, uint32_t msg_size)
     q->send_waiters = NULL;
     q->recv_waiters = NULL;
     memset(q->buf, 0, sizeof(q->buf));
+#ifdef PICOOS_LOCK_DEBUG
+    q->spin.acq_file = NULL;
+    q->spin.acq_line = 0;
+    q->spin.acq_tid  = -1;
+#endif
 }
 
 void mqueue_send(mqueue_t *q, const void *msg)
@@ -441,3 +629,121 @@ void mqueue_recv(mqueue_t *q, void *msg_out)
         sched_yield();
     }
 }
+
+bool mqueue_try_send(mqueue_t *q, const void *msg)
+{
+    uint32_t irq_save = spinlock_irq_acquire(&q->spin);
+
+    if (q->count >= MQ_MAX_MSG) {
+        spinlock_irq_release(&q->spin, irq_save);
+        return false;
+    }
+
+    memcpy(q->buf[q->tail], msg, q->msg_size);
+    q->tail = (q->tail + 1u) % MQ_MAX_MSG;
+    q->count++;
+
+    tcb_t *receiver = waiter_dequeue(&q->recv_waiters);
+    if (receiver != NULL) {
+        sched_unblock(receiver);
+    }
+
+    spinlock_irq_release(&q->spin, irq_save);
+    return true;
+}
+
+bool mqueue_try_recv(mqueue_t *q, void *msg_out)
+{
+    uint32_t irq_save = spinlock_irq_acquire(&q->spin);
+
+    if (q->count == 0u) {
+        spinlock_irq_release(&q->spin, irq_save);
+        return false;
+    }
+
+    memcpy(msg_out, q->buf[q->head], q->msg_size);
+    q->head = (q->head + 1u) % MQ_MAX_MSG;
+    q->count--;
+
+    tcb_t *sender = waiter_dequeue(&q->send_waiters);
+    if (sender != NULL) {
+        sched_unblock(sender);
+    }
+
+    spinlock_irq_release(&q->spin, irq_save);
+    return true;
+}
+
+#ifdef PICOOS_LOCK_DEBUG
+void mqueue_send_dbg(mqueue_t *q, const void *msg, const char *file, int line)
+{
+    while (1) {
+        uint32_t irq_save = spinlock_irq_acquire(&q->spin);
+
+        if (q->count < MQ_MAX_MSG) {
+            memcpy(q->buf[q->tail], msg, q->msg_size);
+            q->tail = (q->tail + 1u) % MQ_MAX_MSG;
+            q->count++;
+
+            tcb_t *receiver = waiter_dequeue(&q->recv_waiters);
+            if (receiver != NULL) {
+                sched_unblock(receiver);
+            }
+
+            spinlock_irq_release(&q->spin, irq_save);
+            return;
+        }
+
+        ((tcb_t *)current_tcb)->blk_time_us     = time_us_64();
+        ((tcb_t *)current_tcb)->blk_file        = file;
+        ((tcb_t *)current_tcb)->blk_line        = line;
+        ((tcb_t *)current_tcb)->blk_what        = "mqueue_send";
+        ((tcb_t *)current_tcb)->blk_holder_tid  = -1;
+        ((tcb_t *)current_tcb)->blk_holder_file = NULL;
+        ((tcb_t *)current_tcb)->blk_holder_line = 0;
+
+        waiter_enqueue(&q->send_waiters, (tcb_t *)current_tcb);
+        sched_block((tcb_t *)current_tcb);
+        spinlock_irq_release(&q->spin, irq_save);
+        sched_yield();
+
+        ((tcb_t *)current_tcb)->blk_time_us = 0u;
+    }
+}
+
+void mqueue_recv_dbg(mqueue_t *q, void *msg_out, const char *file, int line)
+{
+    while (1) {
+        uint32_t irq_save = spinlock_irq_acquire(&q->spin);
+
+        if (q->count > 0u) {
+            memcpy(msg_out, q->buf[q->head], q->msg_size);
+            q->head = (q->head + 1u) % MQ_MAX_MSG;
+            q->count--;
+
+            tcb_t *sender = waiter_dequeue(&q->send_waiters);
+            if (sender != NULL) {
+                sched_unblock(sender);
+            }
+
+            spinlock_irq_release(&q->spin, irq_save);
+            return;
+        }
+
+        ((tcb_t *)current_tcb)->blk_time_us     = time_us_64();
+        ((tcb_t *)current_tcb)->blk_file        = file;
+        ((tcb_t *)current_tcb)->blk_line        = line;
+        ((tcb_t *)current_tcb)->blk_what        = "mqueue_recv";
+        ((tcb_t *)current_tcb)->blk_holder_tid  = -1;
+        ((tcb_t *)current_tcb)->blk_holder_file = NULL;
+        ((tcb_t *)current_tcb)->blk_holder_line = 0;
+
+        waiter_enqueue(&q->recv_waiters, (tcb_t *)current_tcb);
+        sched_block((tcb_t *)current_tcb);
+        spinlock_irq_release(&q->spin, irq_save);
+        sched_yield();
+
+        ((tcb_t *)current_tcb)->blk_time_us = 0u;
+    }
+}
+#endif /* PICOOS_LOCK_DEBUG */

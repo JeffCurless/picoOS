@@ -3,9 +3,27 @@
 # ---------------------------------------------------------------------------
 set(PICOOS_VERSION_MAJOR 0)
 set(PICOOS_VERSION_MINOR 2)
-set(PICOOS_VERSION_EDIT  2)
+set(PICOOS_VERSION_EDIT  3)
 
 message(STATUS "picoOS version        : ${PICOOS_VERSION_MAJOR}.${PICOOS_VERSION_MINOR}.${PICOOS_VERSION_EDIT}")
+
+# ---------------------------------------------------------------------------
+# Lock deadlock detection (debug builds only)
+#
+# Enable with:
+#   cmake -B build -DPICOOS_LOCK_DEBUG=ON
+# Override the timeout (ms) with:
+#   cmake -B build -DPICOOS_LOCK_DEBUG=ON -DPICOOS_LOCK_TIMEOUT_MS=5000
+#
+# When ON, every blocking lock primitive times out after PICOOS_LOCK_TIMEOUT_MS
+# and prints diagnostics (waiting TID/file/line + holder TID/file/line) before
+# halting.  Has zero overhead when OFF.
+# ---------------------------------------------------------------------------
+option(PICOOS_LOCK_DEBUG "Enable lock deadlock detection (adds ~1 KB, for debug only)" OFF)
+if (PICOOS_LOCK_DEBUG)
+    set(PICOOS_LOCK_TIMEOUT_MS "5000" CACHE STRING "Deadlock timeout in ms")
+    message(STATUS "picoOS lock debug     : ON  (timeout ${PICOOS_LOCK_TIMEOUT_MS} ms)")
+endif()
 
 # ---------------------------------------------------------------------------
 # Display Pack feature flags  (all four share the same physical hardware)
@@ -264,6 +282,12 @@ endif()
 
 if(PICOOS_HAS_BT)
     target_compile_definitions(picoos PRIVATE PICOOS_BT_ENABLE=1)
+endif()
+
+if(PICOOS_LOCK_DEBUG)
+    target_compile_definitions(picoos PRIVATE
+        PICOOS_LOCK_DEBUG=1
+        PICOOS_LOCK_TIMEOUT_MS=${PICOOS_LOCK_TIMEOUT_MS})
 endif()
 
 # ---------------------------------------------------------------------------

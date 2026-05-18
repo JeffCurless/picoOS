@@ -119,8 +119,16 @@ static inline void     NVIC_SetPriority(IRQn_Type irq, uint32_t p) { (void)irq; 
 static inline uint32_t SysTick_Config(uint32_t ticks)              { (void)ticks; return 0; }
 
 /* Pico SDK timer ---------------------------------------------------------- */
-static inline uint64_t time_us_64(void)  { return 0; }
-static inline uint32_t time_us_32(void)  { return 0; }
+#ifndef _POSIX_C_SOURCE
+#define _POSIX_C_SOURCE 200809L   /* expose clock_gettime on POSIX hosts */
+#endif
+#include <time.h>
+static inline uint64_t time_us_64(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)(ts.tv_nsec / 1000);
+}
+static inline uint32_t time_us_32(void) { return (uint32_t)time_us_64(); }
 
 /* Pico SDK stdio / boot --------------------------------------------------- */
 static inline void stdio_usb_init(void)  {}

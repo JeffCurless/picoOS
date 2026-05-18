@@ -50,6 +50,13 @@ add_executable(test_sync
 )
 target_include_directories(test_sync PRIVATE ${KERNEL_SRC} ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(test_sync PRIVATE ${TEST_FLAGS})
+# Enable the deadlock detection instrumentation so the debug tests run.
+# PICOOS_LOCK_TIMEOUT_MS is set to 100 ms: short enough for a fast CI spin
+# (the spinlock timeout test busy-waits for this long), long enough to be
+# reliable on slow machines.
+target_compile_definitions(test_sync PRIVATE
+    PICOOS_LOCK_DEBUG=1
+    PICOOS_LOCK_TIMEOUT_MS=100)
 add_test(NAME sync COMMAND test_sync)
 
 # ---------------------------------------------------------------------------

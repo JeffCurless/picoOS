@@ -8,8 +8,7 @@
  * This software is licensed under the MIT License, subject to the Commons Clause
  * License Condition v1.0. You may use, copy, modify, and distribute this software,
  * but you may not sell the software itself, offer it as a paid service, or use it
- * in a product or service whose value derives substantially from the software
- * without prior written permission from the copyright holder.
+ * in a product or service without prior written permission from the copyright holder.
  */
 
 #ifndef KERNEL_SYNC_H
@@ -18,6 +17,23 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "task.h"
+
+/* -------------------------------------------------------------------------
+ * Deadlock detection (debug builds only)
+ *
+ * Enable by building with -DPICOOS_LOCK_DEBUG=1  (see CMakeLists option).
+ * Override the timeout with -DPICOOS_LOCK_TIMEOUT_MS=N  (default 5000 ms).
+ *
+ * When any blocking lock call waits longer than PICOOS_LOCK_TIMEOUT_MS, or
+ * when a spinlock spin-loop exceeds the same limit, lock_deadlock_panic()
+ * prints the lock type, waiting thread TID/file/line, and known holder info,
+ * then halts the system.
+ * ------------------------------------------------------------------------- */
+#ifdef PICOOS_LOCK_DEBUG
+#  ifndef PICOOS_LOCK_TIMEOUT_MS
+#    define PICOOS_LOCK_TIMEOUT_MS  5000u   /* ms — tune for your workload */
+#  endif
+#endif
 
 /* -------------------------------------------------------------------------
  * Spinlock
@@ -43,6 +59,11 @@
  * ------------------------------------------------------------------------- */
 typedef struct {
     volatile uint32_t lock;   /* 0 = free, 1 = held */
+#ifdef PICOOS_LOCK_DEBUG
+    const char       *acq_file;   /* source file where the lock was last taken */
+    int               acq_line;   /* source line where the lock was last taken */
+    volatile int32_t  acq_tid;    /* TID of current holder (-1 = free)         */
+#endif
 } spinlock_t;
 
 /* IRQ-aware pair — saves and restores interrupt enable state. */
@@ -64,6 +85,11 @@ typedef struct {
     volatile int32_t owner_tid;   /* TID of the holding thread, -1 = free  */
     volatile uint32_t count;      /* lock depth (always 0 or 1 here)       */
     tcb_t           *waiters;     /* head of blocked-thread list            */
+#ifdef PICOOS_LOCK_DEBUG
+    const char      *acq_file;    /* file where the mutex was last locked   */
+    int              acq_line;    /* line where the mutex was last locked   */
+    uint64_t         acq_time_us; /* time_us_64() when lock was acquired    */
+#endif
 } kmutex_t;
 
 void kmutex_init(kmutex_t *m);
@@ -133,5 +159,35 @@ typedef struct {
 void mqueue_init(mqueue_t *q, uint32_t msg_size);
 void mqueue_send(mqueue_t *q, const void *msg);
 void mqueue_recv(mqueue_t *q, void *msg_out);
+bool mqueue_try_send(mqueue_t *q, const void *msg);   /* non-blocking; false = queue full */
+bool mqueue_try_recv(mqueue_t *q, void *msg_out);     /* non-blocking; false = queue empty */
+
+/* =========================================================================
+ * Deadlock detection — debug variants and macro wrappers
+ *
+ * When PICOOS_LOCK_DEBUG is defined, every blocking lock call is replaced by
+ * a macro that injects __FILE__ / __LINE__ at the call site and delegates to
+ * a _dbg variant.  The _dbg variants record the location on the calling
+ * thread's TCB before sched_block() and clear it on wake-up.  The SysTick
+ * handler in sched.c scans all BLOCKED threads and triggers a panic if any
+ * have been waiting beyond PICOOS_LOCK_TIMEOUT_MS.
+ * ========================================================================= */
+#ifdef PICOOS_LOCK_DEBUG
+
+void kmutex_lock_dbg(kmutex_t *m, const char *file, int line);
+void ksemaphore_wait_dbg(ksemaphore_t *s, const char *file, int line);
+uint32_t event_flags_wait_dbg(event_flags_t *e, uint32_t mask, bool wait_for_all,
+                               const char *file, int line);
+void mqueue_send_dbg(mqueue_t *q, const void *msg, const char *file, int line);
+void mqueue_recv_dbg(mqueue_t *q, void *msg_out, const char *file, int line);
+
+/* Replace public API with macros that capture the call site. */
+#define kmutex_lock(m)                   kmutex_lock_dbg(m, __FILE__, __LINE__)
+#define ksemaphore_wait(s)               ksemaphore_wait_dbg(s, __FILE__, __LINE__)
+#define event_flags_wait(e, mask, all)   event_flags_wait_dbg(e, mask, all, __FILE__, __LINE__)
+#define mqueue_send(q, msg)              mqueue_send_dbg(q, msg, __FILE__, __LINE__)
+#define mqueue_recv(q, msg)              mqueue_recv_dbg(q, msg, __FILE__, __LINE__)
+
+#endif /* PICOOS_LOCK_DEBUG */
 
 #endif /* KERNEL_SYNC_H */

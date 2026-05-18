@@ -38,6 +38,20 @@
 #include "task.h"    /* tcb_t, current_tcb */
 #include "../framework.h"
 
+/* External symbols provided by mock_sched.c -------------------------------- */
+extern void (*mock_yield_hook)(void);
+
+#ifdef PICOOS_LOCK_DEBUG
+#include <setjmp.h>
+extern jmp_buf     mock_lock_panic_jmp;
+extern bool        mock_lock_panic_fired;
+extern char        mock_lock_panic_type[32];
+extern int32_t     mock_lock_panic_wait_tid;
+extern int32_t     mock_lock_panic_hold_tid;
+extern const char *mock_lock_panic_wait_file;
+extern const char *mock_lock_panic_hold_file;
+#endif
+
 /* -------------------------------------------------------------------------
  * Spinlock tests
  * ------------------------------------------------------------------------- */
@@ -482,6 +496,226 @@ static void test_mqueue_interleaved_send_recv(void)
     END_TEST();
 }
 
+/* =========================================================================
+ * Deadlock detection tests  (PICOOS_LOCK_DEBUG only)
+ *
+ * These tests verify the PICOOS_LOCK_DEBUG instrumentation added to sync.c:
+ *
+ *   debug init fields    — _init() functions zero all debug fields.
+ *   debug acquire fields — _dbg variants set acq_* on the lock and clear
+ *                          on release.
+ *   macro routing        — the kmutex_lock() macro calls the _dbg variant.
+ *   blocked-path fields  — _dbg sets blk_* on the TCB before sched_block().
+ *   spinlock timeout     — spinlock_irq_acquire() calls lock_deadlock_panic()
+ *                          after PICOOS_LOCK_TIMEOUT_MS of spinning.
+ * ========================================================================= */
+#ifdef PICOOS_LOCK_DEBUG
+
+/* State used by the yield hook to release a mutex during the blocked path. */
+static kmutex_t *_hook_mutex_ptr;
+static uint64_t  _hook_blk_time_us;
+static const char *_hook_blk_file;
+static int       _hook_blk_line;
+static const char *_hook_blk_what;
+static int32_t   _hook_blk_holder_tid;
+
+static void mutex_capture_and_release_hook(void)
+{
+    /* Capture TCB debug fields while they're live (before the clear). */
+    _hook_blk_time_us    = current_tcb->blk_time_us;
+    _hook_blk_file       = current_tcb->blk_file;
+    _hook_blk_line       = current_tcb->blk_line;
+    _hook_blk_what       = current_tcb->blk_what;
+    _hook_blk_holder_tid = current_tcb->blk_holder_tid;
+    /* Release the mutex so the next iteration of kmutex_lock_dbg succeeds. */
+    if (_hook_mutex_ptr) {
+        _hook_mutex_ptr->owner_tid = -1;
+    }
+}
+
+/* --- debug init fields --------------------------------------------------- */
+static void test_lock_debug_mutex_init_fields(void)
+{
+    BEGIN_TEST(lock_debug_mutex_init_zeros_all_debug_fields);
+    kmutex_t m;
+    kmutex_init(&m);
+    CHECK(m.spin.acq_file == NULL,  "spinlock acq_file must be NULL after init");
+    CHECK(m.spin.acq_line == 0,     "spinlock acq_line must be 0 after init");
+    CHECK(m.spin.acq_tid  == -1,    "spinlock acq_tid must be -1 after init");
+    CHECK(m.acq_file      == NULL,  "mutex acq_file must be NULL after init");
+    CHECK(m.acq_line      == 0,     "mutex acq_line must be 0 after init");
+    CHECK(m.acq_time_us   == 0u,    "mutex acq_time_us must be 0 after init");
+    END_TEST();
+}
+
+static void test_lock_debug_semaphore_init_fields(void)
+{
+    BEGIN_TEST(lock_debug_semaphore_init_zeros_spinlock_debug_fields);
+    ksemaphore_t s;
+    ksemaphore_init(&s, 3);
+    CHECK(s.spin.acq_file == NULL,  "spinlock acq_file must be NULL after init");
+    CHECK(s.spin.acq_line == 0,     "spinlock acq_line must be 0 after init");
+    CHECK(s.spin.acq_tid  == -1,    "spinlock acq_tid must be -1 after init");
+    END_TEST();
+}
+
+/* --- spinlock debug tracking --------------------------------------------- */
+static void test_lock_debug_spinlock_acq_tid(void)
+{
+    BEGIN_TEST(lock_debug_spinlock_records_and_clears_holder_tid);
+    spinlock_t s;
+    s.lock     = 0u;
+    s.acq_tid  = -1;
+    s.acq_file = NULL;
+    s.acq_line = 0;
+
+    uint32_t saved = spinlock_irq_acquire(&s);
+    CHECK(s.acq_tid == (int32_t)current_tcb->tid,
+          "acq_tid must equal current TID after acquire");
+    spinlock_irq_release(&s, saved);
+    CHECK(s.acq_tid  == -1,   "acq_tid must be -1 after release");
+    CHECK(s.acq_file == NULL, "acq_file must be NULL after release");
+    END_TEST();
+}
+
+/* --- mutex acquire / release debug fields -------------------------------- */
+static void test_lock_debug_mutex_acq_fields_on_lock(void)
+{
+    BEGIN_TEST(lock_debug_mutex_sets_acq_fields_on_lock_and_clears_on_unlock);
+    kmutex_t m;
+    kmutex_init(&m);
+
+    /* Use the _dbg variant directly so we control the file/line. */
+    kmutex_lock_dbg(&m, "sentinel_file.c", 999);
+
+    CHECK(m.acq_file != NULL,                       "acq_file must not be NULL after lock");
+    CHECK(strcmp(m.acq_file, "sentinel_file.c") == 0, "acq_file must match argument");
+    CHECK(m.acq_line == 999,                        "acq_line must match argument");
+    CHECK(m.acq_time_us != 0u,                      "acq_time_us must be non-zero after lock");
+    CHECK(m.owner_tid == (int32_t)current_tcb->tid, "owner_tid must be current TID");
+
+    kmutex_unlock(&m);
+
+    CHECK(m.acq_file  == NULL, "acq_file must be NULL after unlock");
+    CHECK(m.acq_line  == 0,    "acq_line must be 0 after unlock");
+    CHECK(m.owner_tid == -1,   "owner_tid must be -1 after unlock");
+    END_TEST();
+}
+
+/* --- macro wrapper routes to _dbg ---------------------------------------- */
+static void test_lock_debug_macro_wrapper_routes_to_dbg(void)
+{
+    BEGIN_TEST(lock_debug_kmutex_lock_macro_calls_dbg_variant);
+    kmutex_t m;
+    kmutex_init(&m);
+
+    /* kmutex_lock() expands to kmutex_lock_dbg(m, __FILE__, __LINE__) */
+    kmutex_lock(&m);
+
+    CHECK(m.acq_file != NULL,  "macro wrapper must call _dbg and set acq_file");
+    CHECK(m.acq_line >  0,     "macro wrapper must call _dbg and set acq_line > 0");
+
+    kmutex_unlock(&m);
+    END_TEST();
+}
+
+/* --- blocked-path TCB fields --------------------------------------------- */
+static void test_lock_debug_mutex_blk_fields_on_block(void)
+{
+    BEGIN_TEST(lock_debug_mutex_dbg_sets_tcb_blk_fields_before_sched_block);
+
+    kmutex_t m;
+    kmutex_init(&m);
+
+    /* Simulate the mutex being held by a different thread (TID 42). */
+    m.owner_tid = 42;
+    m.acq_file  = "other_thread.c";
+    m.acq_line  = 77;
+
+    /* Install hook: runs once during sched_yield() after sched_block().
+     * It captures the TCB blk_* fields (still live at that moment) and
+     * then releases the mutex so the next iteration acquires it. */
+    _hook_mutex_ptr = &m;
+    _hook_blk_time_us = 0u;
+    mock_yield_hook = mutex_capture_and_release_hook;
+
+    /* kmutex_lock_dbg will:
+     *  1. Find mutex held → set TCB blk_* fields
+     *  2. sched_block() → state = BLOCKED
+     *  3. sched_yield() → hook fires: capture fields, release mutex
+     *  4. Clear blk_time_us
+     *  5. Loop back → mutex free → acquire → return */
+    kmutex_lock_dbg(&m, "caller_file.c", 55);
+
+    /* After successful acquire, verify what the hook captured. */
+    CHECK(_hook_blk_time_us != 0u,
+          "blk_time_us must be non-zero when thread is blocked");
+    CHECK(_hook_blk_file != NULL && strcmp(_hook_blk_file, "caller_file.c") == 0,
+          "blk_file must equal the call-site file passed to _dbg");
+    CHECK(_hook_blk_line == 55,
+          "blk_line must equal the call-site line passed to _dbg");
+    CHECK(_hook_blk_what != NULL && strcmp(_hook_blk_what, "mutex") == 0,
+          "blk_what must be \"mutex\" for a mutex block");
+    CHECK(_hook_blk_holder_tid == 42,
+          "blk_holder_tid must snapshot the holder TID at block time");
+
+    /* After acquiring, blk_time_us must be cleared. */
+    CHECK(current_tcb->blk_time_us == 0u,
+          "blk_time_us must be 0 after the lock is acquired");
+
+    /* The acq_* fields on the mutex must now reflect our acquisition. */
+    CHECK(m.owner_tid == (int32_t)current_tcb->tid,
+          "owner_tid must equal current TID after retry-acquire");
+    CHECK(m.acq_file != NULL && strcmp(m.acq_file, "caller_file.c") == 0,
+          "acq_file must be set on successful acquire");
+
+    kmutex_unlock(&m);
+    END_TEST();
+}
+
+/* --- spinlock timeout → deadlock panic ----------------------------------- */
+static void test_lock_debug_spinlock_timeout_fires(void)
+{
+    BEGIN_TEST(lock_debug_spinlock_timeout_calls_deadlock_panic);
+
+    spinlock_t s;
+    s.lock     = 1u;    /* pre-locked — simulate another holder */
+    s.acq_tid  = 99;    /* holder TID */
+    s.acq_file = "holder.c";
+    s.acq_line = 123;
+
+    mock_lock_panic_fired    = false;
+    mock_lock_panic_wait_tid = 0;
+    mock_lock_panic_hold_tid = 0;
+    memset(mock_lock_panic_type, 0, sizeof(mock_lock_panic_type));
+
+    if (setjmp(mock_lock_panic_jmp) == 0) {
+        /* This spins until PICOOS_LOCK_TIMEOUT_MS elapses, then panics. */
+        uint32_t saved = spinlock_irq_acquire(&s);
+        /* Should never reach here. */
+        spinlock_irq_release(&s, saved);
+        CHECK(false, "spinlock_irq_acquire must have panicked before returning");
+    } else {
+        /* longjmp arrived — verify panic fired with the right information. */
+        CHECK(mock_lock_panic_fired,
+              "lock_deadlock_panic must have been called");
+        CHECK(strcmp(mock_lock_panic_type, "spinlock") == 0,
+              "panic lock_type must be \"spinlock\"");
+        CHECK(mock_lock_panic_hold_tid == 99,
+              "panic must report holder TID from s.acq_tid");
+        CHECK(mock_lock_panic_wait_tid == (int32_t)current_tcb->tid,
+              "panic must report current thread as the waiter");
+    }
+
+    /* Restore the spinlock so it doesn't interfere with subsequent tests. */
+    s.lock    = 0u;
+    s.acq_tid = -1;
+
+    END_TEST();
+}
+
+#endif /* PICOOS_LOCK_DEBUG */
+
 /* -------------------------------------------------------------------------
  * main
  * ------------------------------------------------------------------------- */
@@ -529,6 +763,28 @@ int main(void)
     test_mqueue_drain_to_empty();
     test_mqueue_msg_content_integrity();
     test_mqueue_interleaved_send_recv();
+
+#ifdef PICOOS_LOCK_DEBUG
+    printf("\nDeadlock detection (PICOOS_LOCK_DEBUG)\n");
+    printf("----------------------------------------\n\n");
+
+    /* Debug field initialisation */
+    test_lock_debug_mutex_init_fields();
+    test_lock_debug_semaphore_init_fields();
+
+    /* Per-lock holder tracking */
+    test_lock_debug_spinlock_acq_tid();
+    test_lock_debug_mutex_acq_fields_on_lock();
+
+    /* Macro wrapper verification */
+    test_lock_debug_macro_wrapper_routes_to_dbg();
+
+    /* Blocked-path TCB field recording */
+    test_lock_debug_mutex_blk_fields_on_block();
+
+    /* Spinlock timeout → panic (the primary deadlock detection test) */
+    test_lock_debug_spinlock_timeout_fires();
+#endif
 
     SUMMARY();
 }

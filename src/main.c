@@ -198,6 +198,21 @@ int main(void)
     bt_init();   /* must run after wifi_init() — hooks into CYW43 async context */
 #endif
 
+#if defined(PICOOS_WIFI_ENABLE) || defined(PICOOS_BT_ENABLE)
+    /* Brief settle after CYW43 / BTstack init.
+     *
+     * bt_init() calls hci_power_control(HCI_POWER_ON), which enqueues BT
+     * firmware commands that the wifi-poll thread will flush via
+     * cyw43_arch_poll() on its first run.  Those PIO SPI transactions can
+     * leave SPI0 in a disturbed state.  Without this delay the first
+     * display flush (in shell_btn_init()) may race with the very first
+     * cyw43_arch_poll() call and hang in spi_write_blocking().
+     *
+     * 100 ms is enough for the USB stdio alarm and the CYW43 startup
+     * traffic to complete before the scheduler and display flush begin. */
+    sleep_ms(100u);
+#endif
+
     /* ------------------------------------------------------------------
      * 6. Idle thread — priority 7 (lowest), tiny stack
      *
