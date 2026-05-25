@@ -2,8 +2,8 @@
 # Version
 # ---------------------------------------------------------------------------
 set(PICOOS_VERSION_MAJOR 0)
-set(PICOOS_VERSION_MINOR 2)
-set(PICOOS_VERSION_EDIT  4)
+set(PICOOS_VERSION_MINOR 3)
+set(PICOOS_VERSION_EDIT  0)
 
 message(STATUS "picoOS version        : ${PICOOS_VERSION_MAJOR}.${PICOOS_VERSION_MINOR}.${PICOOS_VERSION_EDIT}")
 
@@ -176,6 +176,7 @@ set(PICOOS_SOURCES
 
 if(PICOOS_INCLUDE_DEMO_APPS)
     list(APPEND PICOOS_SOURCES apps/demo.c)
+    list(APPEND PICOOS_SOURCES apps/pi.c)
 endif()
 
 if(PICOOS_DISPLAY_ENABLE)

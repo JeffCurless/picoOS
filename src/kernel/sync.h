@@ -58,13 +58,18 @@
  * sufficient for the RP2040 teaching workload.
  * ------------------------------------------------------------------------- */
 typedef struct {
-    volatile uint32_t lock;   /* 0 = free, 1 = held */
+    spin_lock_t      *hw;         /* RP2040 HW spinlock — SMP-safe; NULL until spinlock_init() */
+    volatile uint32_t lock;       /* software sentinel (fallback / lock-debug) */
 #ifdef PICOOS_LOCK_DEBUG
     const char       *acq_file;   /* source file where the lock was last taken */
     int               acq_line;   /* source line where the lock was last taken */
     volatile int32_t  acq_tid;    /* TID of current holder (-1 = free)         */
 #endif
 } spinlock_t;
+
+/* Claim a free RP2040 hardware spinlock for SMP-safe use.  Must be called
+ * once before the spinlock is first acquired on more than one core. */
+void spinlock_init(spinlock_t *s);
 
 /* IRQ-aware pair — saves and restores interrupt enable state. */
 uint32_t spinlock_irq_acquire(spinlock_t *s);

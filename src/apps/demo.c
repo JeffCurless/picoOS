@@ -13,8 +13,11 @@
  */
 
 #include "demo.h"
+#include "pi.h"
 #include "../kernel/sync.h"
 #include "../kernel/syscall.h"
+#include "../kernel/task.h"   /* CURRENT_TCB, THREAD_AFFINITY_* */
+#include "../kernel/arch.h"   /* get_core_num() */
 
 #include <stdio.h>
 #include <stdint.h>
@@ -43,16 +46,18 @@ static ksemaphore_t producer_sem;
 /* Message queue: producer sends here, consumer reads here. */
 static mqueue_t producer_queue;
 
-/* Flag to track whether the shared IPC objects have been initialised.
- * demo_producer initialises on first run; demo_consumer waits on the
- * semaphore, which will block until the producer has run at least once. */
-static bool demo_ipc_ready = false;
+/* Flag polled by demo_consumer before it calls ksemaphore_wait().  With SMP,
+ * the producer and consumer can start on different cores simultaneously; the
+ * consumer must not touch the semaphore or queue until the producer has
+ * finished initialising them. */
+static volatile bool demo_ipc_ready = false;
 
 /* =========================================================================
  * demo_ipc_init — initialises the shared IPC objects.
  *
- * Called by demo_producer on its first invocation.  Protected by the
- * demo_ipc_ready flag; only the first caller does the work.
+ * Called once by demo_producer before it enters its loop.  Sets
+ * demo_ipc_ready so the consumer (potentially running on Core 1) knows
+ * it is safe to call ksemaphore_wait().
  * ========================================================================= */
 static void demo_ipc_init(void)
 {
@@ -72,10 +77,10 @@ void demo_producer(void *arg)
 {
     (void)arg;
 
-    /* Initialise IPC objects on first run. */
-    if (!demo_ipc_ready) {
-        demo_ipc_init();
-    }
+    CURRENT_TCB->affinity = THREAD_AFFINITY_C0;
+    shell_print("[producer] core %u: starting\r\n", (unsigned)get_core_num());
+
+    demo_ipc_init();
 
     uint32_t counter = 0u;
 
@@ -88,6 +93,9 @@ void demo_producer(void *arg)
 
         mqueue_send(&producer_queue, &msg);
         ksemaphore_signal(&producer_sem);
+
+        shell_print("[producer] core %u: sent %u\r\n",
+                    (unsigned)get_core_num(), (unsigned)(counter - 1u));
     }
 }
 
@@ -101,13 +109,24 @@ void demo_consumer(void *arg)
 {
     (void)arg;
 
+    CURRENT_TCB->affinity = THREAD_AFFINITY_C1;
+    shell_print("[consumer] core %u: starting\r\n", (unsigned)get_core_num());
+
+    /* Wait for the producer to initialise the shared IPC objects.  With SMP
+     * both threads can start simultaneously; accessing an uninitialised
+     * semaphore or queue would corrupt the kernel state. */
+    while (!demo_ipc_ready) {
+        sys_sleep(1);
+    }
+
     for (;;) {
         ksemaphore_wait(&producer_sem);   /* block until item available */
 
         demo_message_t msg;
         mqueue_recv(&producer_queue, &msg);
 
-        shell_print("[consumer] received value: %u\r\n", msg.value);
+        shell_print("[consumer] core %u: received %u\r\n",
+                    (unsigned)get_core_num(), (unsigned)msg.value);
     }
 }
 
@@ -145,6 +164,7 @@ const app_entry_t app_table[] = {
     { "producer",  demo_producer, 4u },
     { "consumer",  demo_consumer, 4u },
     { "sensor",    demo_sensor,   5u },
+    { "pi",        pi_estimate,   3u },
 #if defined(PICOOS_WIFI_ENABLE) && defined(PICOOS_DISPLAY_ENABLE)
     { "cray-one",  cray_one,      3u },
 #endif

@@ -1,6 +1,6 @@
-A good way to think about this is as a **small teaching kernel for RP2040/Pico**, not a scaled-down desktop OS.
+A good way to think about this is as a **small teaching kernel for the Raspberry Pi Pico family (RP2040 / RP2350)**, not a scaled-down desktop OS.
 
-That matters because the Pico’s hardware is very capable for a microcontroller, but it is still a microcontroller: RP2040 gives you **two Cortex-M0+ cores up to 133 MHz, 264 KB of SRAM in six banks, USB 1.1 device/host support, and execute-in-place from external QSPI flash**. On a standard Pico/Pico W board, that typically means **2 MB of on-board flash**. The boot ROM already supports **UF2 USB boot**, and the Pico SDK includes libraries for **USB, timers, synchronization, and multicore programming**. ([pip.raspberrypi.com][1])
+That matters because the Pico’s hardware is very capable for a microcontroller, but it is still a microcontroller: RP2040 gives you **two Cortex-M0+ cores up to 133 MHz, 264 KB SRAM, USB 1.1 device/host support, and execute-in-place from external QSPI flash** (2 MB on Pico, 4 MB on Pico 2). RP2350 raises this to two Cortex-M33 cores up to 150 MHz, 520 KB SRAM, and 4 MB flash. Both chips share the same dual-core SMP programming model via the Pico SDK. The boot ROM supports **UF2 USB boot**, and the SDK includes libraries for **USB, timers, synchronization, and multicore programming**. ([pip.raspberrypi.com][1])
 
 ## 1. Overall design direction
 
@@ -74,31 +74,46 @@ Keep the first version very explicit and readable:
 
 That makes it teachable.
 
-## 4. Core split across the two RP2040 cores
+## 4. Dual-core SMP scheduling
 
-RP2040 supports a symmetric dual-core design, but for a teaching OS we would to avoid “full SMP everywhere” at first and use an **asymmetric policy** on top of the hardware. ([Raspberry Pi][2])
+Both cores run the **same preemptive priority round-robin scheduler** concurrently.
+Each core has its own SysTick, PendSV, time-slice counter, and `current_tcb` slot
+(`current_tcb[0]` for Core 0, `current_tcb[1]` for Core 1).  Both cores pull
+threads from the same shared ready queues.
 
-Recommended split:
+SMP correctness is provided by RP2040/RP2350 **hardware SIO spinlocks**, which give
+cross-core atomicity without disabling interrupts globally:
 
-* **Core 0**
+* one hardware spinlock guards the scheduler ready queues
+* one hardware spinlock guards the kernel heap allocator
+* a kernel mutex serialises VFS/filesystem operations
 
-  * USB console
-  * timer tick
-  * scheduler coordination
-  * filesystem writes
-  * shell / init services
+**Practical split:**
 
-* **Core 1**
+* **Core 0** — USB console, SysTick sleep/wake scan, deadlock scanner, filesystem writes
+  (flash erase/program via `multicore_lockout_start_blocking`), shell.
+* **Core 1** — registers as a multicore lockout victim so flash writes on Core 0 can
+  safely pause it; runs its own SysTick and PendSV; executes any thread eligible for Core 1.
 
-  * user worker threads
-  * compute-heavy or blocking tasks
-  * background services
+**Thread affinity** controls placement:
 
-This is easier to explain than fully shared SMP, and students can later improve it into a more balanced design.
+| Constant | Value | Effect |
+|----------|-------|--------|
+| `THREAD_AFFINITY_ANY` | -1 | Scheduled on whichever core picks it up (default) |
+| `THREAD_AFFINITY_C0` | 0 | Core 0 only |
+| `THREAD_AFFINITY_C1` | 1 | Core 1 only |
+
+An app sets affinity immediately at thread start via `CURRENT_TCB->affinity`.
+The scheduler's `sched_next_thread()` skips threads whose affinity does not match
+the calling core.
+
+This design is a teaching step up from the initial single-core version: students can
+observe SMP races, reason about spinlock granularity, and measure dual-core speedup
+(e.g., the `pi` Monte Carlo app shows ~2× improvement when workers split across cores).
 
 ## 5. Scheduler model
 
-Start with a **preemptive priority round-robin scheduler**.
+picoOS uses a **preemptive priority round-robin scheduler** running on both cores.
 
 Thread states:
 
@@ -109,33 +124,31 @@ Thread states:
 * SLEEPING
 * ZOMBIE
 
-Per-thread control block:
+Per-thread control block (TCB):
 
-* TID
-* owning PID
-* stack base / size
-* saved registers / SP
-* priority
-* affinity hint
-* state
-* wake time
-* CPU time used
+* TID, owning PID
+* stack base / size / canary
+* saved SP and EXC_RETURN (for Cortex-M33 FPU frame detection on RP2350)
+* priority (0 = highest, 7 = lowest)
+* affinity (THREAD_AFFINITY_ANY / C0 / C1 — enforced by the scheduler)
+* state, wake timestamp, accumulated CPU time
+* thread name (16 chars)
 
-Suggested behavior:
+Behavior:
 
-* system tick every 1 ms
-* fixed-size time slice, maybe 5–20 ms
-* priority-based ready queues
-* sleep implemented with wake timestamps
-* blocking on queues/semaphores/mutexes
+* SysTick fires every 1 ms on each core independently
+* time slices of 5–20 ms; each core maintains its own slice counter
+* priority-based linked-list ready queues (one per priority level, shared across cores)
+* sleep implemented with absolute wake timestamps; Core 0 SysTick scans sleeping threads
+* blocking on mutexes/semaphores/event flags/queues
 
-For teaching, this is ideal because students can see:
+For teaching, students can observe:
 
-* context switching
-* starvation
-* priority inversion
-* fairness tradeoffs
-* tick overhead
+* context switching (PendSV assembly in `sched_asm.S`)
+* priority inversion and starvation
+* SMP scheduling races when affinity is `ANY`
+* the cost of cross-core synchronization vs. keeping work on one core
+* tick overhead and time-slice tuning
 
 ## 6. Synchronization and IPC
 
@@ -174,21 +187,32 @@ The Pico SDK already provides USB support and higher-level libraries for USB and
 
 ### Shell commands
 
-Start with:
+Built-in commands:
 
-* `help`
-* `ps`
-* `kill`
-* `run`
-* `threads`
-* `mem`
-* `ls`
-* `cat`
-* `write`
-* `rm`
-* `reboot`
-* `update`
-* `trace on/off`
+* `info` — version and build info
+* `help` — list registered commands
+* `ps` — show processes
+* `threads` — show all threads with state, core affinity, CPU time, stack canary
+* `kill <tid>` — terminate a thread
+* `killproc <pid>` — terminate all threads in a process
+* `mem` — heap usage and stats
+* `ls` — list filesystem files
+* `cat <file>` — print a file
+* `fs write <file> [text]` — create or overwrite a file
+* `fs append <file> <text>` — append to a file
+* `fs format` — erase and reinitialise the filesystem
+* `rm <file>` — delete a file
+* `run <name> [arg]` — launch a registered built-in app; optional arg is passed to the entry function
+* `trace on|off` — enable/disable scheduler trace output
+* `reboot` — hard reboot
+* `update` — reboot into USB BOOTSEL mode for reflashing
+
+Optional commands registered at init (pico_w / pico2_w only):
+
+* `wifi [status|scan|connect|disconnect]`
+* `bt [status|scan]`
+* `display <subcmd>` — ST7789 display control (when `PICOOS_DISPLAY_ENABLE`)
+* `led <r> <g> <b>` — RGB LED control (when `PICOOS_LED_ENABLE`)
 
 ### Host-side companion tool
 
@@ -286,11 +310,12 @@ A practical approach:
   * one global heap first
   * per-process heaps later
 
-* **fixed thread stack sizes**
+* **dynamic thread stacks** — allocated from the kernel heap via `kmalloc` at thread
+  creation and freed on exit (no static pool):
 
-  * 2 KB default
-  * 4 KB for shell/service tasks
-  * optional compile-time overrides
+  * 2 KB (`DEFAULT_STACK_SIZE`) — general-purpose threads
+  * 3 KB (`DEEP_STACK_SIZE`) — deep call chains, heavy printf
+  * 512 B (`IDLE_STACK_SIZE`) — idle threads only
 
 For debugging, add:
 
@@ -322,30 +347,23 @@ This gives enough surface area to feel like an OS without exploding complexity.
 
 ## 12. User program model
 
-Supported in two phases.
+Applications are **compiled into the firmware image** and registered in `app_table[]`
+(defined in `src/apps/demo.c` for standalone builds, or supplied by the parent project
+when picoOS is used as a git submodule).
 
-### Phase 1: built-in applications
+The shell `run <name> [arg]` command looks up the name in `app_table[]`, creates a new
+process and thread, and passes the optional argument to the entry function as `void *arg`.
+The argument is heap-allocated by the shell and owned by the app, which must `kfree(arg)`
+when done.
 
-Applications are linked into the firmware image and registered in an app table:
+Built-in apps included with picoOS:
 
-* shell
-* test task
-* logger
-* editor
-* demo producer/consumer
-* sensor service
+* **producer / consumer / sensor** — cross-core IPC demo using semaphores and message queues
+* **pi** — Monte Carlo π estimation; `run pi` uses all four workers split across both cores,
+  `run pi single` pins all workers to Core 0 for a single-core baseline comparison
 
-This avoids binary loading complexity early.
-
-### Phase 2: pseudo-executables
-
-Add a tiny bytecode or interpreted format:
-
-* command language
-* stack VM
-* tiny ELF-like metadata if you want a challenge
-
-That would be an excellent teaching extension: students could compare native tasks vs interpreted tasks.
+This is the only application model — there is no bytecode interpreter or VM.
+The teaching value comes from reading and modifying the C source directly.
 
 ## 13. Device model
 
@@ -370,12 +388,7 @@ This gives students a recognizable OS abstraction without requiring a full drive
 
 The main concept of this system is to make everything functional, but suboptimal.  This allows for students to experiment, and expand areas to make the system better.
 
-The following is intentionally left as imperfect in version 1:
-
-* **global kernel lock**
-
-  * easy to understand
-  * later optimization: finer-grained locking
+The following is intentionally left as imperfect:
 
 * **O(n) ready queue scanning**
 
@@ -408,46 +421,47 @@ That gives students real, visible optimization opportunities.
 
 ## 15. Project phases
 
-### Phase 1 — bring-up
+### Phase 1 — bring-up ✅ Complete
 
-* boot to banner over USB
-* basic shell
-* timer tick
-* single-core scheduler
-* two demo threads
+* Boot banner over USB
+* Basic shell with `help`, `ps`, `threads`, `mem`, `reboot`, `update`
+* 1 ms SysTick, preemptive priority round-robin scheduler
+* Demo producer/consumer/sensor threads
 
-### Phase 2 — kernel basics
+### Phase 2 — kernel basics ✅ Complete
 
-* mutexes, semaphores, queues
-* process/thread structs
-* `ps`, `kill`, `sleep`
-* memory stats
+* Mutex, semaphore, event flags, message queues
+* Process/thread lifecycle: `kill`, `killproc`, `sleep`, `yield`
+* Memory stats, stack canaries
+* Host-native unit test suites (mem, sync, fs, vfs)
 
-### Phase 3 — second core
+### Phase 3 — second core ✅ Complete
 
-* launch core 1
-* pin some work there
-* add cross-core ready queue or dispatch
+* Full SMP: both cores run independent SysTick/PendSV schedulers
+* Thread affinity (`THREAD_AFFINITY_ANY/C0/C1`) enforced by `sched_next_thread()`
+* RP2040 hardware SIO spinlocks protecting ready queues, heap, and VFS
+* `idle1` thread pinned to Core 1; `CURRENT_TCB` macro for per-core TCB access
+* Cross-core producer/consumer demo; Monte Carlo π SMP benchmark (`run pi [single]`)
+* Deadlock detection instrumentation (`PICOOS_LOCK_DEBUG`)
 
-### Phase 4 — filesystem
+### Phase 4 — filesystem ✅ Complete
 
-* reserve flash area
-* file create/read/write/delete
-* shell commands for files
+* Flash-backed persistent filesystem (1 MB offset, XIP reads, sector erase/program on write)
+* `fs_open/read/write/close/delete/list/format` with O_CREAT, O_TRUNC, O_APPEND flags
+* Shell commands: `ls`, `cat`, `rm`, `fs write`, `fs append`, `fs format`
+* FS_MAX_FILES: 64 (RP2040) / 127 (RP2350); 4 KB per file
 
-### Phase 5 — user services
+### Phase 5 — user services 🔲 Planned
 
-* logger service
-* shell service
-* app launcher
-* background worker
+* Logger service
+* App launcher enhancements
+* Background worker threads
 
-### Phase 6 — teaching polish
+### Phase 6 — teaching polish 🔲 Planned
 
-* tracing
-* panic dumps
-* scheduler visualizer
-* host-side loader/console tool
+* Scheduler visualiser
+* Enhanced panic dumps
+* Host-side loader / console tool improvements
 
 ## 16. Recommended implementation language
 
@@ -467,7 +481,7 @@ That split will keep the target code small and the tooling pleasant.
 ## 17. Design approach
 
 
-> **picoOS**: a dual-core educational operating system for RP2040 with a USB console shell, preemptive threads, software-defined processes, a tiny flash-native filesystem, and a deliberately imperfect first implementation meant to be profiled, debugged, and improved by students.
+> **picoOS**: a dual-core SMP educational operating system for the RP2040 / RP2350 with a USB console shell, preemptive threads on both cores, thread affinity, SMP-safe synchronization primitives, software-defined processes, a flash-native filesystem, and deliberately imperfect internals meant to be profiled, debugged, and improved by students.
 
 This is realistic, teachable, and rich enough for a full course or multi-semester project.
 

@@ -67,6 +67,15 @@ static void idle_thread(void *arg)
     }
 }
 
+/* Core 1 idle thread — same __wfi() loop but no tud_task() (USB is Core 0). */
+static void idle1_thread(void *arg)
+{
+    (void)arg;
+    for (;;) {
+        __wfi();
+    }
+}
+
 /* -------------------------------------------------------------------------
  * Shell thread entry
  *
@@ -83,13 +92,10 @@ static void shell_thread_entry(void *arg)
 /* -------------------------------------------------------------------------
  * Core 1 entry
  *
- * Phase 3: Core 1 runs a simple scheduler loop.  In this first version it
- * checks for READY threads with affinity == 2 (core-1 pinned) or affinity
- * == 0 (any core) and runs them.  A full SMP implementation would share the
- * ready queues with proper locking; for the teaching OS we keep it simple:
- * Core 1 just runs its own idle loop unless specific work is pinned there.
- *
- * Students can extend this to a symmetric ready-queue design in Phase 3+.
+ * Core 1 registers as a multicore lockout victim, then waits until Core 0's
+ * scheduler is running before starting its own scheduler loop.  Threads with
+ * affinity == THREAD_AFFINITY_C1 (1) or THREAD_AFFINITY_ANY (-1) are eligible
+ * to run on Core 1.
  * ------------------------------------------------------------------------- */
 static void core1_entry(void)
 {
@@ -100,11 +106,15 @@ static void core1_entry(void)
     multicore_lockout_victim_init();
     core1_lockout_ready = true;   /* signal Core 0 that lockout is armed */
 
-    /* Core 1 sits in a low-power wait loop.  The multicore FIFO can be used
-     * in a future phase to dispatch work items from Core 0. */
-    for (;;) {
-        __wfi();
+    /* Wait until Core 0's scheduler is running and has selected its first
+     * thread.  At that point all initial threads exist in ready_queues and
+     * sched_start_core1() can find an eligible Core-1 thread. */
+    while (current_tcb[0] == NULL) {
+        tight_loop_contents();
     }
+
+    sched_init_core1();
+    sched_start_core1();   /* never returns */
 }
 
 /* -------------------------------------------------------------------------
@@ -214,13 +224,20 @@ int main(void)
 #endif
 
     /* ------------------------------------------------------------------
-     * 6. Idle thread — priority 7 (lowest), tiny stack
+     * 6. Idle threads — priority 7 (lowest), tiny stacks
      *
-     * Must exist so the scheduler always has at least one READY thread.
+     * One pinned idle thread per core ensures the scheduler always finds
+     * an eligible READY thread regardless of what other threads are doing.
      * ------------------------------------------------------------------ */
-    task_create_thread(kernel_proc, "idle",
-                       idle_thread, NULL,
-                       7u, IDLE_STACK_SIZE);
+    tcb_t *idle_tcb = task_create_thread(kernel_proc, "idle",
+                                         idle_thread, NULL,
+                                         7u, IDLE_STACK_SIZE);
+    if (idle_tcb != NULL) { idle_tcb->affinity = THREAD_AFFINITY_C0; }
+
+    tcb_t *idle1_tcb = task_create_thread(kernel_proc, "idle1",
+                                          idle1_thread, NULL,
+                                          7u, IDLE_STACK_SIZE);
+    if (idle1_tcb != NULL) { idle1_tcb->affinity = THREAD_AFFINITY_C1; }
 
     /* ------------------------------------------------------------------
      * 7. Shell thread — priority 2, service stack

@@ -32,8 +32,14 @@ set(TEST_FLAGS -Wall -Wextra -Wno-unused-parameter -Wno-unused-variable -Werror)
 add_executable(test_mem
     mem/test_mem.c
     ${KERNEL_SRC}/mem.c
+    ${KERNEL_SRC}/sync.c
+    sync/mock_sched.c
 )
-target_include_directories(test_mem PRIVATE ${KERNEL_SRC} ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(test_mem PRIVATE
+    ${KERNEL_SRC}
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/sync
+)
 target_compile_options(test_mem PRIVATE ${TEST_FLAGS})
 add_test(NAME mem COMMAND test_mem)
 
@@ -101,11 +107,14 @@ add_executable(test_vfs
     vfs/mock_dev.c
     vfs/mock_fs.c
     ${KERNEL_SRC}/vfs.c
+    ${KERNEL_SRC}/sync.c
+    sync/mock_sched.c
 )
 target_include_directories(test_vfs PRIVATE
     ${KERNEL_SRC}
     ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/vfs
+    ${CMAKE_CURRENT_SOURCE_DIR}/sync
 )
 target_compile_options(test_vfs PRIVATE ${TEST_FLAGS})
 add_test(NAME vfs COMMAND test_vfs)

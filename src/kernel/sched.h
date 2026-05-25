@@ -25,19 +25,32 @@
 /* Millisecond tick counter.  Incremented by isr_systick every 1 ms. */
 extern volatile uint32_t tick_count;
 
-/* The TCB currently executing on this core (same variable as in task.h;
- * both headers guard-include each other safely via the include guards). */
-extern tcb_t * volatile current_tcb;
+/* Per-core running TCB (same array as declared in task.h). */
+extern tcb_t * volatile current_tcb[2];
 
 /* -------------------------------------------------------------------------
  * Scheduler API
  * ------------------------------------------------------------------------- */
 
 /*
- * sched_init  — configure SysTick and PendSV interrupt priorities.
+ * sched_init  — configure SysTick and PendSV interrupt priorities on Core 0.
  *               Call once after all initial threads have been created.
  */
 void sched_init(void);
+
+/*
+ * sched_init_core1  — configure Core 1's own interrupt priorities and
+ *                     time-slice counter.  Call from Core 1 before
+ *                     sched_start_core1().
+ */
+void sched_init_core1(void);
+
+/*
+ * sched_start_core1 — select the first Core-1-eligible thread, set up the
+ *                     PSP, start Core 1's SysTick, and call the entry
+ *                     function directly.  This function never returns.
+ */
+void sched_start_core1(void);
 
 /*
  * sched_start — pick the first ready thread, set it as current_tcb,

@@ -95,6 +95,12 @@ static inline void     __dsb(void)                   {}
 static inline void     __isb(void)                   {}
 static inline void     __nop(void)                   {}
 static inline void     __wfi(void)                   {}
+static inline void     __wfe(void)                   {}
+static inline void     __sev(void)                   {}
+static inline uint32_t __LDREXW(volatile uint32_t *p){ return *p; }
+static inline uint32_t __STREXW(uint32_t v, volatile uint32_t *p){ *p = v; return 0; }
+static inline void     __clrex(void)                 {}
+static inline uint32_t get_core_num(void)            { return 0u; }
 static inline uint32_t __get_CONTROL(void)           { return 0; }
 static inline void     __set_CONTROL(uint32_t v)     { (void)v; }
 static inline void     __set_PSP(uint32_t v)         { (void)v; }
@@ -148,6 +154,19 @@ static inline void multicore_launch_core1(void (*entry)(void)) { (void)entry; }
 static inline void multicore_lockout_start_blocking(void)      {}
 static inline void multicore_lockout_end_blocking(void)        {}
 static inline void multicore_lockout_victim_init(void)         {}
+
+/* RP2040 hardware spinlocks (hardware/sync.h on ARM) ---------------------- */
+typedef uint32_t spin_lock_t;
+static inline spin_lock_t *spin_lock_init(unsigned int lock_num)
+                                         { (void)lock_num; return NULL; }
+static inline uint32_t spin_lock_blocking(spin_lock_t *lock)
+                                         { (void)lock; return 0; }
+static inline void spin_unlock(spin_lock_t *lock, uint32_t saved_irq)
+                                         { (void)lock; (void)saved_irq; }
+static inline void spin_unlock_unsafe(spin_lock_t *lock)
+                                         { (void)lock; }
+static inline unsigned int spin_lock_claim_unused(int required)
+                                         { (void)required; return 0; }
 
 /* Pico SDK flash ---------------------------------------------------------- */
 #ifdef HOST_TEST

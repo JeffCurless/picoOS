@@ -15,9 +15,7 @@
 #include "sched.h"
 #include "task.h"
 #include "arch.h"
-#ifdef PICOOS_LOCK_DEBUG
-#include "sync.h"   /* for PICOOS_LOCK_TIMEOUT_MS */
-#endif
+#include "sync.h"   /* spinlock_t, PICOOS_LOCK_TIMEOUT_MS */
 
 #include <stdint.h>
 #include <stddef.h>
@@ -87,8 +85,16 @@ void __attribute__((noreturn)) lock_deadlock_panic(
 }
 #endif
 
-/* Countdown to the next forced context switch. */
-static uint32_t current_slice_remaining = TIME_SLICE_MS;
+/* Per-core time-slice countdown (index = core_num). */
+static uint32_t current_slice_remaining[2];
+
+/* Spinlock protecting ready_queues[] across both cores.
+ * Acquired by sched_add/remove_thread, sched_block/unblock/sleep, and
+ * sched_next_thread.  Lock order: sched_lock → heap_lock (in task_free_thread).
+ * Never acquire sched_lock while holding a sync-primitive spinlock would
+ * violate the ordering — callers of sched_block/unblock do acquire them in
+ * the correct order: sync-spinlock first, sched_lock inside. */
+static spinlock_t sched_lock = {0};
 
 /* -------------------------------------------------------------------------
  * trace_enabled — defined in main.c; toggled by the shell 'trace' command.
@@ -100,12 +106,12 @@ static uint32_t current_slice_remaining = TIME_SLICE_MS;
 extern volatile bool trace_enabled;
 
 /* -------------------------------------------------------------------------
- * sched_add_thread
+ * sched_add_thread_raw / sched_remove_thread_raw
  *
- * Append t to the tail of the ready queue for its priority.  Using the tail
- * gives natural round-robin ordering within a priority level.
+ * Bare linked-list operations on ready_queues[].  Caller MUST hold
+ * sched_lock before calling either of these.
  * ------------------------------------------------------------------------- */
-void sched_add_thread(tcb_t *t)
+static void sched_add_thread_raw(tcb_t *t)
 {
     if (t == NULL) {
         return;
@@ -123,7 +129,6 @@ void sched_add_thread(tcb_t *t)
         return;
     }
 
-    /* Walk to the tail. */
     tcb_t *cur = ready_queues[prio];
     while (cur->next != NULL) {
         cur = cur->next;
@@ -131,13 +136,7 @@ void sched_add_thread(tcb_t *t)
     cur->next = t;
 }
 
-/* -------------------------------------------------------------------------
- * sched_remove_thread
- *
- * Remove t from whatever priority queue it is currently in.
- * Does not change t->state.  Safe to call from PendSV context.
- * ------------------------------------------------------------------------- */
-void sched_remove_thread(tcb_t *t)
+static void sched_remove_thread_raw(tcb_t *t)
 {
     if (t == NULL) {
         return;
@@ -167,6 +166,23 @@ void sched_remove_thread(tcb_t *t)
 }
 
 /* -------------------------------------------------------------------------
+ * sched_add_thread / sched_remove_thread — public, lock-acquiring wrappers
+ * ------------------------------------------------------------------------- */
+void sched_add_thread(tcb_t *t)
+{
+    uint32_t save = spinlock_irq_acquire(&sched_lock);
+    sched_add_thread_raw(t);
+    spinlock_irq_release(&sched_lock, save);
+}
+
+void sched_remove_thread(tcb_t *t)
+{
+    uint32_t save = spinlock_irq_acquire(&sched_lock);
+    sched_remove_thread_raw(t);
+    spinlock_irq_release(&sched_lock, save);
+}
+
+/* -------------------------------------------------------------------------
  * sched_block
  * ------------------------------------------------------------------------- */
 void sched_block(tcb_t *t)
@@ -174,8 +190,10 @@ void sched_block(tcb_t *t)
     if (t == NULL) {
         return;
     }
+    uint32_t save = spinlock_irq_acquire(&sched_lock);
     t->state = THREAD_BLOCKED;
-    sched_remove_thread(t);
+    sched_remove_thread_raw(t);
+    spinlock_irq_release(&sched_lock, save);
 }
 
 /* -------------------------------------------------------------------------
@@ -186,8 +204,21 @@ void sched_unblock(tcb_t *t)
     if (t == NULL) {
         return;
     }
+    uint32_t save = spinlock_irq_acquire(&sched_lock);
+
+    if (t->state == THREAD_ZOMBIE) {
+        /* Thread was killed while blocked on a sync primitive.  The primitive
+         * has now dequeued its waiter-list reference, so it is safe to free
+         * the TCB.  Release the scheduler lock first to avoid holding two
+         * spinlocks across task_free_thread's heap operations. */
+        spinlock_irq_release(&sched_lock, save);
+        task_free_thread(t);
+        return;
+    }
+
     t->state = THREAD_READY;
-    sched_add_thread(t);
+    sched_add_thread_raw(t);
+    spinlock_irq_release(&sched_lock, save);
 }
 
 /* -------------------------------------------------------------------------
@@ -195,26 +226,20 @@ void sched_unblock(tcb_t *t)
  * ------------------------------------------------------------------------- */
 void sched_sleep(uint32_t ms)
 {
-    if (current_tcb == NULL) {
+    if (CURRENT_TCB == NULL) {
         return;
     }
 
-    current_tcb->wake_time_us = time_us_64() + (uint64_t)ms * 1000u;
+    CURRENT_TCB->wake_time_us = time_us_64() + (uint64_t)ms * 1000u;
 
-    /* Atomically mark SLEEPING and remove from the ready queue.
-     *
-     * Without this critical section, PendSV can fire between the two lines:
-     * sched_next_thread() would find the thread still in the ready queue,
-     * overwrite its state back to RUNNING, and return it as the "next" thread.
-     * The subsequent sched_remove_thread() + sched_yield() would then leave the
-     * thread in THREAD_READY state with no entry in any ready queue — causing it
-     * to be permanently unschedulable (the visible symptom: shell never wakes). */
-    uint32_t save = save_and_disable_interrupts();
-    current_tcb->state = THREAD_SLEEPING;
-    sched_remove_thread((tcb_t *)current_tcb);
-    restore_interrupts(save);
+    /* Atomically mark SLEEPING and remove from the ready queue under the
+     * scheduler lock so that sched_next_thread() on either core cannot
+     * observe a SLEEPING thread still in the queue mid-transition. */
+    uint32_t save = spinlock_irq_acquire(&sched_lock);
+    CURRENT_TCB->state = THREAD_SLEEPING;
+    sched_remove_thread_raw((tcb_t *)CURRENT_TCB);
+    spinlock_irq_release(&sched_lock, save);
 
-    /* Yield so the scheduler picks the next runnable thread. */
     sched_yield();
 }
 
@@ -285,10 +310,15 @@ static void __attribute__((noreturn)) stack_overflow_panic(const tcb_t *t)
  * ------------------------------------------------------------------------- */
 tcb_t *sched_next_thread(void)
 {
+    uint32_t core = get_core_num();
+    tcb_t   *cur  = current_tcb[core];
+
+    /* Acquire the scheduler spinlock.  IRQs are already disabled by the
+     * PendSV entry sequence (cpsid i in sched_asm.S), so the inner
+     * save_and_disable_interrupts() in spinlock_irq_acquire is a no-op. */
+    uint32_t lock_save = spinlock_irq_acquire(&sched_lock);
+
 #ifdef PICOOS_LOCK_DEBUG
-    /* Called from PendSV with PRIMASK set — same environment as
-     * stack_overflow_panic().  lock_deadlock_panic() calls __enable_irq()
-     * before printing so USB output still reaches the host. */
     if (g_deadlock_victim != NULL) {
         const tcb_t *v = (const tcb_t *)g_deadlock_victim;
         lock_deadlock_panic(
@@ -299,56 +329,46 @@ tcb_t *sched_next_thread(void)
     }
 #endif
 
-    /* ---- Stack canary check for the outgoing thread ---- */
-    if (current_tcb != NULL && current_tcb->stack_base != NULL) {
-        if (*(const uint32_t *)current_tcb->stack_base != STACK_CANARY) {
-            stack_overflow_panic(current_tcb);   /* no return */
+    /* Stack canary check for the outgoing thread. */
+    if (cur != NULL && cur->stack_base != NULL) {
+        if (*(const uint32_t *)cur->stack_base != STACK_CANARY) {
+            stack_overflow_panic(cur);
         }
     }
 
+    /* Mark outgoing thread READY so the rotation below can move it to tail. */
+    if (cur != NULL && cur->state == THREAD_RUNNING) {
+        cur->state = THREAD_READY;
+    }
+
+    /* Reap zombie: the thread set itself ZOMBIE and yielded; assembly has
+     * already saved its context, so freeing the stack here is safe. */
+    bool zombie_reaped = false;
+    if (cur != NULL && cur->state == THREAD_ZOMBIE) {
+        sched_remove_thread_raw(cur);
+        task_free_thread(cur);   /* frees stack + TCB slot; may acquire heap_lock */
+        zombie_reaped = true;
+        cur = NULL;   /* TCB is zeroed — do not dereference */
+    }
+
+    /* Select the next thread: highest-priority eligible READY thread.
+     * Affinity: THREAD_AFFINITY_ANY (-1) = any core, 0 = core 0, 1 = core 1. */
     tcb_t *selected = NULL;
 
-    /* A preempted thread arrives here with state THREAD_RUNNING (the assembly
-     * does not change it).  Mark it THREAD_READY so the rotation logic below
-     * can move it to the tail of its priority queue and let peers run. */
-    if (current_tcb != NULL && current_tcb->state == THREAD_RUNNING) {
-        current_tcb->state = THREAD_READY;
-    }
-
-    /* Reap zombie: handles the natural-exit (thread_exit) path.
-     * The outgoing thread set itself ZOMBIE and yielded; the assembly has
-     * already saved its context, so freeing the stack here is safe.
-     * Interrupts are disabled by the PendSV entry in sched_asm.S. */
-    bool zombie_reaped = false;
-    if (current_tcb != NULL && current_tcb->state == THREAD_ZOMBIE) {
-        sched_remove_thread((tcb_t *)current_tcb);
-        task_free_thread((tcb_t *)current_tcb);   /* frees stack + TCB slot */
-        zombie_reaped = true;
-        /* Do not dereference current_tcb after this point — TCB is zeroed. */
-    }
-
-    for (uint8_t prio = 0; prio < NUM_PRIORITIES; prio++) {
+    for (uint8_t prio = 0; prio < NUM_PRIORITIES && selected == NULL; prio++) {
         if (ready_queues[prio] == NULL) {
             continue;
         }
 
-        /* There is at least one READY thread at this priority.
-         *
-         * Round-robin: if the current thread is at the head of this queue,
-         * rotate it to the tail so the next thread in line gets to run.
-         * This only makes sense if the current thread is still READY (it
-         * might have been moved to SLEEPING or BLOCKED before sched_yield
-         * was called).
-         */
+        /* Round-robin: if the outgoing thread is at the head of this queue
+         * and is still READY, rotate it to the tail to give peers a turn. */
         if (!zombie_reaped &&
-            ready_queues[prio] == (tcb_t *)current_tcb &&
-            current_tcb != NULL &&
-            current_tcb->state == THREAD_READY)
+            ready_queues[prio] == cur &&
+            cur != NULL &&
+            cur->state == THREAD_READY)
         {
-            /* Rotate: pop the head and push it to the tail. */
             tcb_t *head = ready_queues[prio];
             if (head->next != NULL) {
-                /* Move head to tail. */
                 ready_queues[prio] = head->next;
                 tcb_t *tail = ready_queues[prio];
                 while (tail->next != NULL) {
@@ -357,29 +377,31 @@ tcb_t *sched_next_thread(void)
                 tail->next = head;
                 head->next = NULL;
             }
-            /* (If head->next is NULL it is the only thread; keep it.) */
         }
 
-        selected = ready_queues[prio];
-        break;
+        /* Pick the first READY thread whose affinity matches this core. */
+        for (tcb_t *t = ready_queues[prio]; t != NULL; t = t->next) {
+            if (t->state == THREAD_READY &&
+                (t->affinity == THREAD_AFFINITY_ANY ||
+                 t->affinity == (int8_t)core)) {
+                selected = t;
+                break;
+            }
+        }
     }
 
     if (selected == NULL) {
-        /* No ready thread.  If the outgoing thread was just reaped
-         * (zombie_reaped == true), current_tcb has been freed and returning
-         * it would dereference a zeroed TCB — a crash.  This path should
-         * never be reached because the idle thread is always READY at
-         * priority 7.  If it does occur, the system is in an unrecoverable
-         * state regardless. */
-        return (tcb_t *)current_tcb;
+        /* No eligible thread — should never happen (per-core idle exists).
+         * Return NULL here; the assembly will write NULL to current_tcb[core]
+         * and spin in a WFI loop until the next SysTick wakes a thread. */
+        spinlock_irq_release(&sched_lock, lock_save);
+        return (tcb_t *)current_tcb[core];
     }
 
-    /* Transition the selected thread to RUNNING. */
     selected->state = THREAD_RUNNING;
+    current_slice_remaining[core] = TIME_SLICE_MS;
 
-    /* Reset the time slice for the incoming thread. */
-    current_slice_remaining = TIME_SLICE_MS;
-
+    spinlock_irq_release(&sched_lock, lock_save);
     return selected;
 }
 
@@ -391,12 +413,30 @@ tcb_t *sched_next_thread(void)
  * ------------------------------------------------------------------------- */
 void isr_systick(void)
 {
-    tick_count++;
+    uint32_t core = get_core_num();
 
-    /* Accumulate CPU time for the currently running thread. */
-    if (current_tcb != NULL) {
-        current_tcb->cpu_time_us += 1000u;   /* 1 ms = 1000 us */
+    /* Accumulate CPU time for the currently running thread on this core. */
+    if (current_tcb[core] != NULL) {
+        current_tcb[core]->cpu_time_us += 1000u;   /* 1 ms = 1000 us */
     }
+
+    /* Time-slice preemption (per-core counter). */
+    if (current_slice_remaining[core] > 0u) {
+        current_slice_remaining[core]--;
+    }
+    if (current_slice_remaining[core] == 0u) {
+        current_slice_remaining[core] = TIME_SLICE_MS;
+        SCB->ICSR |= SCB_ICSR_PENDSVSET_Msk;
+    }
+
+    /* Core 0 only: global tick counter, sleep wakeups, deadlock scanner.
+     * Running these once per tick (not once per core per tick) avoids
+     * double-waking sleepers and double-incrementing tick_count. */
+    if (core != 0u) {
+        return;
+    }
+
+    tick_count++;
 
     /* Wake any sleeping threads whose alarm has expired. */
     uint64_t now = time_us_64();
@@ -408,22 +448,7 @@ void isr_systick(void)
         if (t->state == THREAD_SLEEPING && t->wake_time_us <= now) {
             t->state = THREAD_READY;
             sched_add_thread(t);
-
-            if (trace_enabled) {
-                /* A fully async print here would need a ring-buffer;
-                 * for teaching we skip it in the ISR to avoid re-entrancy. */
-            }
         }
-    }
-
-    /* Time-slice preemption. */
-    if (current_slice_remaining > 0) {
-        current_slice_remaining--;
-    }
-    if (current_slice_remaining == 0) {
-        current_slice_remaining = TIME_SLICE_MS;
-        /* Pend a context switch. */
-        SCB->ICSR |= SCB_ICSR_PENDSVSET_Msk;
     }
 
 #ifdef PICOOS_LOCK_DEBUG
@@ -467,13 +492,17 @@ void sched_tick(void)
  * ------------------------------------------------------------------------- */
 void sched_init(void)
 {
+    /* Claim the RP2040 hardware spinlock for SMP-safe ready-queue access.
+     * Must be done before Core 1 starts scheduling (i.e. before sched_start). */
+    spinlock_init(&sched_lock);
+
     /* Note: ready_queues[] is populated by sched_add_thread() as threads
      * are created.  We do NOT reset the queues here — by the time sched_init
      * is called all initial threads have already been added.
      *
      * We DO reset the time-slice counter in case sched_init is called more
      * than once (e.g. during testing). */
-    current_slice_remaining = TIME_SLICE_MS;
+    current_slice_remaining[0] = TIME_SLICE_MS;
 
     /* Set PendSV to the lowest possible priority so that context switches
      * never preempt real device ISRs. */
@@ -502,22 +531,24 @@ void sched_init(void)
  * ------------------------------------------------------------------------- */
 void sched_start(void)
 {
-    /* Pick the first ready thread. */
+    /* Pick the first Core-0-eligible READY thread. */
     tcb_t *first = NULL;
-    for (uint8_t p = 0; p < NUM_PRIORITIES; p++) {
-        if (ready_queues[p] != NULL) {
-            first = ready_queues[p];
-            break;
+    for (uint8_t p = 0; p < NUM_PRIORITIES && first == NULL; p++) {
+        for (tcb_t *t = ready_queues[p]; t != NULL; t = t->next) {
+            if (t->affinity == THREAD_AFFINITY_ANY || t->affinity == THREAD_AFFINITY_C0) {
+                first = t;
+                break;
+            }
         }
     }
 
     if (first == NULL) {
-        printf("\r\nPANIC: sched_start — no ready thread\r\n");
+        printf("\r\nPANIC: sched_start — no ready thread for Core 0\r\n");
         for (;;) { __wfi(); }
     }
 
-    first->state = THREAD_RUNNING;
-    current_tcb  = first;
+    first->state   = THREAD_RUNNING;
+    current_tcb[0] = first;
 
     /* Compute the initial PSP value and read entry/arg from the exception frame
      * that task_create_thread() laid down.  These MUST be read before switching
@@ -575,5 +606,72 @@ void sched_start(void)
 
     /* Unreachable in normal operation. */
     /* If entry returns, loop forever (the idle thread never returns). */
+    for (;;) { __wfi(); }
+}
+
+/* -------------------------------------------------------------------------
+ * sched_init_core1
+ *
+ * Configure Core 1's own NVIC interrupt priorities (each Cortex-M0+ core has
+ * an independent NVIC).  Call from Core 1 before sched_start_core1().
+ * ------------------------------------------------------------------------- */
+void sched_init_core1(void)
+{
+    NVIC_SetPriority(PendSV_IRQn,  0xFFu);
+    NVIC_SetPriority(SysTick_IRQn, 0x40u);
+    current_slice_remaining[1] = TIME_SLICE_MS;
+}
+
+/* -------------------------------------------------------------------------
+ * sched_start_core1
+ *
+ * Mirrors sched_start() but selects the first Core-1-eligible thread
+ * (affinity == THREAD_AFFINITY_ANY or affinity == THREAD_AFFINITY_C1).
+ * Sets current_tcb[1], switches Core 1 to PSP, starts Core 1's SysTick,
+ * enables IRQs, and calls the thread's entry function directly.
+ * This function never returns.
+ * ------------------------------------------------------------------------- */
+void sched_start_core1(void)
+{
+    /* Find the first Core-1-eligible READY thread. */
+    tcb_t *first = NULL;
+    for (uint8_t p = 0; p < NUM_PRIORITIES && first == NULL; p++) {
+        for (tcb_t *t = ready_queues[p]; t != NULL; t = t->next) {
+            if (t->state == THREAD_READY &&
+                (t->affinity == THREAD_AFFINITY_ANY ||
+                 t->affinity == THREAD_AFFINITY_C1)) {
+                first = t;
+                break;
+            }
+        }
+    }
+
+    if (first == NULL) {
+        printf("\r\nPANIC: sched_start_core1 — no ready thread for Core 1\r\n");
+        for (;;) { __wfi(); }
+    }
+
+    first->state   = THREAD_RUNNING;
+    current_tcb[1] = first;
+
+    /* Read entry/arg from the initial exception frame before PSP switch
+     * (same reasoning as sched_start — see comment there). */
+    uint32_t *hw_frame_bottom = first->saved_sp + 8;
+    uint32_t  psp_init        = (uint32_t)(uintptr_t)(hw_frame_bottom + 8);
+
+    register void (*entry)(void *) = (void (*)(void *))((uintptr_t)first->saved_sp[14]);
+    register void  *arg            = (void *)(uintptr_t)first->saved_sp[8];
+
+    __set_PSP(psp_init);
+    __set_CONTROL(__get_CONTROL() | 0x02u);
+    __isb();
+
+    /* Start Core 1's own SysTick (1 ms period). */
+    SysTick_Config(clock_get_hz(clk_sys) / 1000u);
+
+    __enable_irq();
+
+    entry(arg);
+
     for (;;) { __wfi(); }
 }

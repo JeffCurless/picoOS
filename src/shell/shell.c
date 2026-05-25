@@ -161,8 +161,8 @@ static int cmd_threads(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    shell_println("TID  PID  PRI  STATE     Time    STACK   NAME            CANARY");
-    shell_println("---  ---  ---  --------  ------  ------  ---------------  --------");
+    shell_println("TID  PID  PRI  CORE  STATE     Time    STACK   NAME            CANARY");
+    shell_println("---  ---  ---  ----  --------  ------  ------  ---------------  --------");
     for (int i = 0; i < MAX_THREADS; i++) {
         tcb_t *t = task_get_thread_slot(i);
         if (t == NULL) { continue; }
@@ -170,8 +170,12 @@ static int cmd_threads(int argc, char **argv)
         const char *stack_str = (*canary_ptr == STACK_CANARY) ? "OK" : "OVERFLOW";
         char time_buf[12];
         format_cpu_time(t->cpu_time_us, time_buf, sizeof(time_buf));
-        shell_print("%-4u %-4u %-4u %-9s %-7s %-7u %-16s %s\r\n",
+        const char *core_str = (t->affinity == THREAD_AFFINITY_ANY) ? "*"
+                             : (t->affinity == THREAD_AFFINITY_C0)  ? "0"
+                             :                                         "1";
+        shell_print("%-4u %-4u %-4u %-5s %-9s %-7s %-7u %-16s %s\r\n",
                     t->tid, t->pid, (unsigned)t->priority,
+                    core_str,
                     state_name(t->state),
                     time_buf,
                     t->stack_size,
@@ -195,7 +199,7 @@ static int cmd_kill(int argc, char **argv)
         return -1;
     }
     t->state = THREAD_ZOMBIE;
-    if (t != (tcb_t *)current_tcb) {
+    if (t != (tcb_t *)CURRENT_TCB) {
         sched_remove_thread(t);
         task_free_thread(t);
     }
@@ -475,7 +479,7 @@ static int cmd_trace(int argc, char **argv)
 static int cmd_run(int argc, char **argv)
 {
     if (argc < 2) {
-        shell_println("Usage: run <appname>");
+        shell_println("Usage: run <appname> [arg]");
         shell_println("Available apps:");
         for (int i = 0; i < app_table_size; i++) {
             shell_print("  %s\r\n", app_table[i].name);
@@ -490,18 +494,34 @@ static int cmd_run(int argc, char **argv)
             static uint32_t user_pid = 100u;
             uint32_t pid = user_pid++;
 
+            /* If an extra argument was supplied, copy it to the kernel heap
+             * and pass the pointer as the thread's arg.  The launched app
+             * owns the allocation and must call kfree(arg) when done.
+             * argv[2] points into the shell's line buffer which is reused
+             * after cmd_run returns, so we must copy rather than alias. */
+            char *app_arg = NULL;
+            if (argc >= 3 && argv[2] != NULL) {
+                size_t len = strlen(argv[2]);
+                app_arg = (char *)kmalloc(len + 1u);
+                if (app_arg != NULL) {
+                    memcpy(app_arg, argv[2], len + 1u);
+                }
+            }
+
             pcb_t *proc = task_create_process(appname, pid);
             if (proc == NULL) {
                 shell_println("run: cannot create process (pool full)");
+                if (app_arg != NULL) { kfree(app_arg); }
                 return -1;
             }
             tcb_t *t = task_create_thread(proc, appname,
-                                          app_table[i].entry, NULL,
+                                          app_table[i].entry, app_arg,
                                           app_table[i].priority,
                                           DEFAULT_STACK_SIZE);
             if (t == NULL) {
                 shell_println("run: cannot create thread (pool full)");
                 task_free_process(proc);
+                if (app_arg != NULL) { kfree(app_arg); }
                 return -1;
             }
             shell_print("run: started '%s' as PID %u TID %u\r\n",

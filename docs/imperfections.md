@@ -44,48 +44,7 @@ O(1) pick.
 
 ---
 
-## 2. Global kernel lock (interrupt disable)
-
-**Current behavior**: All kernel operations — scheduling, heap allocation,
-filesystem, IPC — are serialized by disabling interrupts
-(`__disable_irq` / `__enable_irq`). This prevents any real concurrency
-between Core 0 and Core 1 while the kernel is active.
-
-**File:line**: `src/kernel/sync.c:21–30` (spinlock used as the global lock),
-`src/main.c:63` (kernel init)
-
-**Better implementation**: Fine-grained per-subsystem spinlocks: one for the
-scheduler ready queues, one for the heap allocator, one for the filesystem, one
-for the VFS handle table. Core 1 can then run user threads without stalling on
-filesystem activity happening on Core 0.
-
-**SRAM impact**: None (correctness and throughput improvement)
-
-**Difficulty**: High
-
----
-
-## 3. Interrupt-disable spinlock (no LDREX/STREX)
-
-**Current behavior**: `spinlock_acquire()` disables interrupts globally to
-prevent races, then busy-waits on a plain `volatile uint32_t` lock word. This
-is sufficient for the current simple workload but masks ISR latency and would
-break under real SMP load.
-
-**File:line**: `src/kernel/sync.c:11–21`
-
-**Better implementation**: Use Cortex-M0+ `LDREX`/`STREX` exclusive-access
-instructions for the lock word. Disable IRQs only during the critical section
-that modifies shared data — not for the entire spin loop. This keeps ISR
-latency bounded regardless of lock contention.
-
-**SRAM impact**: None
-
-**Difficulty**: Medium
-
----
-
-## 4. First-fit heap allocator
+## 2. First-fit heap allocator
 
 **Current behavior**: `kmalloc` walks the boundary-tag free list from the
 beginning and returns the first block large enough to satisfy the request.
@@ -106,7 +65,7 @@ without any per-object header overhead.
 
 ---
 
-## 5. Linear file lookup
+## 3. Linear file lookup
 
 **Current behavior**: `fs_open()` iterates all `FS_MAX_FILES` directory
 entries sequentially, comparing names with `strncmp`. `FS_MAX_FILES` is 64
@@ -126,7 +85,7 @@ with binary search gives O(log n) with no extra RAM.
 
 ---
 
-## 6. Single-root filesystem (no directories)
+## 4. Single-root filesystem (no directories)
 
 **Current behavior**: All files share a single flat namespace. `fs_open("foo")`
 and `fs_open("bar/foo")` are treated identically — there is no path component
@@ -144,7 +103,7 @@ hierarchy (root + one directory layer), which covers most embedded use cases.
 
 ---
 
-## 7. Single concurrent writer
+## 5. Single concurrent writer
 
 **Current behavior**: Only one file can be open for writing at a time. A
 global `scratch_buf[FS_BLOCK_SIZE]` (4 KB) accumulates write data, and
@@ -164,7 +123,7 @@ dynamic allocation)
 
 ---
 
-## 8. No MPU / pointer validation in syscalls
+## 6. No MPU / pointer validation in syscalls
 
 **Current behavior**: `syscall_dispatch()` casts `uint32_t` arguments directly
 to pointers and dereferences them without any validation. There is no MPU
@@ -184,7 +143,7 @@ offending thread rather than crashing the kernel.
 
 ---
 
-## 9. Synchronous console I/O
+## 7. Synchronous console I/O
 
 **Current behavior**: The shell calls `stdio_getchar()` and `printf` directly,
 blocking the shell thread for the entire duration of each USB CDC transaction.
@@ -204,7 +163,7 @@ asynchronously, freeing the shell to process the next command immediately.
 
 ---
 
-## 10. Linear waiter scan in event flags
+## 8. Linear waiter scan in event flags
 
 **Current behavior**: When `event_post()` is called it scans a flat
 `event_waiter_pool[MAX_EVENT_WAITERS]` array (sized `MAX_THREADS`) to find
@@ -224,7 +183,7 @@ O(MAX_THREADS).
 
 ---
 
-## 11. Unimplemented device read/write (flash and GPIO via VFS)
+## 9. Unimplemented device read/write (flash and GPIO via VFS)
 
 **Current behavior**: `dev_flash_read`, `dev_flash_write`, `dev_gpio_read`, and
 `dev_gpio_write` are stubs that return `DEV_ERR_UNSUPPORTED`. TODO comments
@@ -250,12 +209,9 @@ calling `read`/`write` does nothing useful.
 
 ## SRAM Impact Summary
 
-The two changes below are prerequisites for adding CYW43 WiFi+BT (BLE only)
-without removing the display driver (~63 KB framebuffer + stack).
-Dynamic thread stack sizing (#1 of the original list) has already been
-implemented — stacks are now `kmalloc`'d at creation and `kfree`'d on exit,
-replacing the former 64 KB static `stack_pool` with a shared 64 KB heap.
-Net realized saving: ~32 KB.
+Thread stacks are `kmalloc`'d at creation and `kfree`'d on exit, replacing the
+former static `stack_pool` with the shared 64 KB heap (net saving: ~32 KB).
+One additional recovery remains:
 
 | Fix | SRAM Saved |
 |-----|-----------|

@@ -14,9 +14,12 @@ optional Bluetooth scanning support.
 **Key constraints:**
 - No MPU — there is no hardware memory isolation between processes.
 - No SVC instruction — syscalls are direct C function calls (`syscall_dispatch`).
-- Dual-core split: Core 0 runs the shell, USB console, and scheduler; Core 1 registers
-  as a multicore lockout victim (required for safe flash writes) and is otherwise
-  available for user worker threads.
+- Full SMP scheduling — both RP2040/RP2350 cores run the preemptive scheduler
+  concurrently. Each core has its own SysTick, PendSV, and `current_tcb` slot.
+  Core 1 also registers as a multicore lockout victim so Core 0's flash writes
+  (`multicore_lockout_start_blocking`) can safely pause it during flash erase/program.
+  Ready queues are shared and protected by an RP2040 hardware spinlock; heap
+  allocation uses a second hardware spinlock; VFS operations are serialised by a mutex.
 - On RP2350 (Cortex-M33) the hardware FPU is present. picoOS saves/restores
   `EXC_RETURN` per-thread in `tcb_t.exc_return` so the correct exception frame size
   (basic 8-word or extended 26-word FP frame) is used on every context switch.
@@ -29,8 +32,10 @@ Built-in apps are registered in `app_table[]`.  The type definition and extern d
 live in `src/apps/app_table.h` (the stable ABI header).  In a standalone picoOS build,
 `src/apps/demo.c` defines the table with the built-in demo apps.  When picoOS is used as a
 submodule, the parent project provides its own `app_table[]` definition.
-The shell `run <name>` command searches this table and spawns the matching entry as a new
-process.
+The shell `run <name> [arg]` command searches this table and spawns the matching entry as a
+new process.  If a second word is supplied it is copied to a heap buffer and passed to the
+entry function as `void *arg`; the app owns that allocation and must call `kfree(arg)` when
+done with it.
 
 ### `app_entry_t`
 
@@ -146,7 +151,7 @@ Returns `NULL` if not found.  `task_get_kernel_proc()` is safe to call after
 `task_create_process("kernel", 1u)` runs in `main.c`; kernel modules (e.g. the WiFi
 poll thread) use it to create threads without needing a PCB pointer passed in.
 
-### 3.4 Priority and Stack Sizes
+### 3.4 Priority, Stack Sizes, and Thread Affinity
 
 | Constant | Value | Use |
 |----------|-------|-----|
@@ -155,6 +160,29 @@ poll thread) use it to create threads without needing a PCB pointer passed in.
 | `IDLE_STACK_SIZE` | 512 bytes | Idle thread only |
 
 Priority `0` is highest; `7` is lowest. Default for apps is `4`.
+
+**Thread affinity** controls which core may schedule a thread.  Set it on the
+TCB before or immediately after the thread starts:
+
+```c
+// Pin to Core 0 (USB, shell, filesystem-heavy work)
+CURRENT_TCB->affinity = THREAD_AFFINITY_C0;
+
+// Pin to Core 1 (compute workers, background tasks)
+CURRENT_TCB->affinity = THREAD_AFFINITY_C1;
+
+// Eligible on either core (default)
+CURRENT_TCB->affinity = THREAD_AFFINITY_ANY;
+```
+
+`CURRENT_TCB` is a macro that expands to `current_tcb[get_core_num()]` — the
+TCB pointer for whichever core evaluates it.
+
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `THREAD_AFFINITY_ANY` | -1 | Scheduled on either core (default) |
+| `THREAD_AFFINITY_C0` | 0 | Core 0 only |
+| `THREAD_AFFINITY_C1` | 1 | Core 1 only |
 
 ### 3.5 Thread States
 
@@ -174,11 +202,71 @@ syscall_dispatch(SYS_KILL, tid, 0, 0, 0);
 task_kill_process(pcb_t *proc);
 ```
 
+### 3.7 Additional Task API
+
+```c
+// Count of live threads / processes (across all slots)
+int task_thread_count(void);
+int task_process_count(void);
+
+// Raw slot access — used by 'ps' and 'threads' shell commands
+// Returns the TCB/PCB at index idx, or NULL if the slot is empty
+tcb_t *task_get_thread_slot(int idx);
+pcb_t *task_get_process_slot(int idx);
+
+// Release a TCB or PCB back to the static pool
+void task_free_thread(tcb_t *t);
+void task_free_process(pcb_t *p);
+```
+
+### 3.8 Boot Threads
+
+At boot, three threads are created before `sched_start()`:
+
+| TID | Priority | Core | Name | Purpose |
+|-----|----------|------|------|---------|
+| 1 | 7 | 0 | `idle` | Core 0 idle — runs when no other thread is eligible |
+| 2 | 7 | 1 | `idle1` | Core 1 idle — pinned to Core 1 (`THREAD_AFFINITY_C1`) |
+| 3 | 2 | any | `shell` | USB CDC interactive shell |
+
+`MAX_THREADS = 16`, so **13 thread slots** are free at startup.
+
 ---
 
 ## 4. Synchronization Primitives
 
 Include: `src/kernel/sync.h`
+
+All blocking primitives (mutex, semaphore, event flags, message queue) are
+SMP-safe: each contains an embedded `spinlock_t` backed by an RP2040 hardware
+SIO spinlock, which provides cross-core atomicity without disabling interrupts
+globally.
+
+### 4.0 Spinlock
+
+Low-level building block used internally by all higher-level primitives.  Most
+application code should use a mutex or semaphore instead.
+
+```c
+spinlock_t s;
+spinlock_init(&s);        // claim an RP2040 hardware spinlock for SMP safety
+                          // (must be called before the spinlock is used on
+                          //  more than one core; omit for single-core use)
+
+// IRQ-aware pair (preferred — saves and restores interrupt state)
+uint32_t saved = spinlock_irq_acquire(&s);
+// ... critical section ...
+spinlock_irq_release(&s, saved);
+
+// Plain pair (use only when the caller already has IRQs disabled)
+spinlock_acquire(&s);
+spinlock_release(&s);
+```
+
+`spinlock_irq_acquire` disables IRQs and acquires the lock; the saved IRQ state
+is returned and must be passed back to `spinlock_irq_release`.  The
+`PICOOS_LOCK_DEBUG` build adds a timeout: if the lock is held for more than
+`PICOOS_LOCK_TIMEOUT_MS` (default 5 000 ms), `lock_deadlock_panic()` is called.
 
 ### 4.1 Mutex (non-recursive, FIFO)
 
@@ -227,6 +315,10 @@ mqueue_init(&q, sizeof(my_msg_t));  // msg_size ≤ 64
 
 mqueue_send(&q, &msg);   // blocks if queue is full
 mqueue_recv(&q, &buf);   // blocks if queue is empty
+
+// Non-blocking variants — return false immediately rather than blocking
+bool sent = mqueue_try_send(&q, &msg);   // false = queue was full
+bool got  = mqueue_try_recv(&q, &buf);   // false = queue was empty
 ```
 
 ---
@@ -712,14 +804,26 @@ heap, leaving ~32 KB for other allocations.
 | 15 | `SYS_PS` | — | Process/thread list |
 | 16 | `SYS_KILL` | — | Kill thread by TID |
 
+### Thread Affinity
+
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `THREAD_AFFINITY_ANY` | -1 | Eligible on either core (default) |
+| `THREAD_AFFINITY_C0` | 0 | Core 0 only |
+| `THREAD_AFFINITY_C1` | 1 | Core 1 only |
+
+Set via `CURRENT_TCB->affinity = THREAD_AFFINITY_C1;` (etc.) at thread start.  
+`CURRENT_TCB` expands to `current_tcb[get_core_num()]`.
+
 ### Synchronization Primitives
 
-| Type | Init | Operations |
-|------|------|-----------|
-| `kmutex_t` | `kmutex_init(&m)` | `kmutex_lock(&m)`, `kmutex_unlock(&m)` |
-| `ksemaphore_t` | `ksemaphore_init(&s, n)` | `ksemaphore_wait(&s)`, `ksemaphore_signal(&s)` |
-| `event_flags_t` | `event_flags_init(&e)` | `event_flags_set/clear/wait` |
-| `mqueue_t` | `mqueue_init(&q, size)` | `mqueue_send(&q, &msg)`, `mqueue_recv(&q, &buf)` |
+| Type | Init | Blocking operations | Non-blocking |
+|------|------|---------------------|--------------|
+| `spinlock_t` | `spinlock_init(&s)` | `spinlock_irq_acquire/release`, `spinlock_acquire/release` | — |
+| `kmutex_t` | `kmutex_init(&m)` | `kmutex_lock(&m)`, `kmutex_unlock(&m)` | — |
+| `ksemaphore_t` | `ksemaphore_init(&s, n)` | `ksemaphore_wait(&s)`, `ksemaphore_signal(&s)` | — |
+| `event_flags_t` | `event_flags_init(&e)` | `event_flags_set/clear/wait` | — |
+| `mqueue_t` | `mqueue_init(&q, size)` | `mqueue_send(&q, &msg)`, `mqueue_recv(&q, &buf)` | `mqueue_try_send`, `mqueue_try_recv` |
 
 ### VFS Mode Flags
 
@@ -765,7 +869,7 @@ heap, leaving ~32 KB for other allocations.
 
 | Constant | Value | Meaning |
 |----------|-------|---------|
-| `MAX_THREADS` | 16 | Maximum live threads |
+| `MAX_THREADS` | 16 | Maximum live threads (3 used at boot: idle, idle1, shell → **13 free**) |
 | `MAX_PROCESSES` | 8 | Maximum processes |
 | `MQ_MAX_MSG` | 16 | Messages per queue |
 | `MQ_MSG_SIZE` | 64 | Max bytes per message |
