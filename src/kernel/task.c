@@ -54,9 +54,8 @@ static bool pcb_used[MAX_PROCESSES];
 /* monotonically increasing ID counters */
 static uint32_t next_tid = 1;
 
-/* current_tcb is declared volatile in sched.h and defined here so that the
- * linker has exactly one definition. */
-tcb_t * volatile current_tcb = NULL;
+/* Per-core current TCB: index 0 = Core 0, index 1 = Core 1. */
+tcb_t * volatile current_tcb[2] = {NULL, NULL};
 
 /* Pointer to the kernel process (PID 1), set in task_create_process when
  * pid == 1.  Exposed via task_get_kernel_proc() for use by kernel modules
@@ -81,7 +80,7 @@ void task_init(void)
     memset(pcb_used, 0, sizeof(pcb_used));
 
     next_tid = 1;
-    current_tcb = NULL;
+    current_tcb[0] = current_tcb[1] = NULL;
 }
 
 /* -------------------------------------------------------------------------
@@ -153,7 +152,7 @@ tcb_t *task_create_thread(pcb_t      *proc,
     t->pid        = proc ? proc->pid : 0;
     t->stack_size = stack_size;
     t->priority   = priority;
-    t->affinity   = 0;                  /* run on any core */
+    t->affinity   = THREAD_AFFINITY_ANY; /* run on any core */
     t->state      = THREAD_READY;
     t->wake_time_us = 0;
     t->cpu_time_us  = 0;
@@ -236,8 +235,8 @@ static void thread_exit(void)
     /* Mark the current thread as a zombie.  sched_next_thread() detects the
      * ZOMBIE state on the next PendSV, calls task_free_thread() to reclaim
      * the stack and TCB slot, and auto-frees the PCB if no threads remain. */
-    if (current_tcb != NULL) {
-        current_tcb->state = THREAD_ZOMBIE;
+    if (CURRENT_TCB != NULL) {
+        CURRENT_TCB->state = THREAD_ZOMBIE;
     }
     /* Yield once; the scheduler reaps this thread on the first PendSV.
      * The loop is a safety net — in normal operation we never return here. */
@@ -439,10 +438,24 @@ void task_kill_process(pcb_t *proc)
         if (t == NULL) {
             continue;
         }
+
+        thread_state_t old_state = t->state;
         t->state = THREAD_ZOMBIE;
-        if (t != (tcb_t *)current_tcb) {
+
+        if (t != (tcb_t *)CURRENT_TCB) {
+            /* sched_remove_thread is a no-op for BLOCKED/SLEEPING threads —
+             * they were already removed from ready_queues when they blocked. */
             sched_remove_thread(t);
-            task_free_thread(t);   /* also frees PCB when last thread gone */
+
+            if (old_state == THREAD_BLOCKED) {
+                /* Thread is sitting in a sync primitive's waiter list (semaphore,
+                 * mutex, mqueue).  Freeing the TCB here would leave a dangling
+                 * pointer in that list.  Leave it alive as ZOMBIE; the primitive's
+                 * signal/unlock path calls sched_unblock(), which detects ZOMBIE
+                 * and does the deferred task_free_thread() there. */
+            } else {
+                task_free_thread(t);   /* also frees PCB when last thread gone */
+            }
         }
         /* Self-kill: scheduler reaps on next yield via sched_next_thread;
          * task_free_thread called there will free the PCB automatically. */

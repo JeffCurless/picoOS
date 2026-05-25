@@ -4,7 +4,7 @@ An educational operating system for the **Raspberry Pi Pico family (RP2040 / RP2
 
 ```
 =======================================================
-picoOS  v0.2.1
+picoOS  v0.3.0
 
   Platform : RP2040, dual ARM Cortex-M0+ (133 MHz max)
   Options  : none
@@ -12,21 +12,23 @@ picoOS  v0.2.1
 
 Threads created:
   TID 1  PID 1  pri 7  idle
-  TID 2  PID 2  pri 2  shell
+  TID 2  PID 1  pri 7  idle1
+  TID 3  PID 2  pri 2  shell
 
 Starting scheduler...
 
 pico> ps
 PID  NAME             THREADS  ALIVE
 ---  ---------------  -------  -----
-1    kernel           1        yes
+1    kernel           2        yes
 2    shell            1        yes
 
 pico> threads
-TID  PID  PRI  STATE     CPU-ms  STACK   NAME             CANARY
----  ---  ---  --------  ------  ------  ---------------  --------
-1    1    7    READY     142     2048    idle             OK
-2    2    2    RUNNING   1023    2048    shell            OK
+TID  PID  PRI  CORE  STATE     Time    STACK   NAME             CANARY
+---  ---  ---  ----  --------  ------  ------  ---------------  --------
+1    1    7    0     READY     142     512     idle             OK
+2    1    7    1     READY     138     512     idle1            OK
+3    2    2    *     RUNNING   1023    2048    shell            OK
 ```
 
 ---
@@ -38,12 +40,15 @@ TID  PID  PRI  STATE     CPU-ms  STACK   NAME             CANARY
 | Preemptive scheduling | `src/kernel/sched.c`, `src/kernel/sched_asm.S` |
 | Context switching (Cortex-M0+ and M33) | `src/kernel/sched_asm.S` |
 | Thread and process abstractions | `src/kernel/task.h`, `src/kernel/task.c` |
+| **SMP dual-core scheduling** — both cores run threads concurrently | `src/kernel/sched.c`, `src/main.c` |
+| **Thread affinity** — pin threads to Core 0, Core 1, or either | `src/kernel/task.h` (`THREAD_AFFINITY_*`) |
 | Mutex, semaphore, event flags, message queues | `src/kernel/sync.c` |
+| SMP-safe synchronization — RP2040 hardware spinlocks | `src/kernel/sync.c`, `src/kernel/mem.c` |
 | First-fit heap allocator | `src/kernel/mem.c` |
 | Flash-backed filesystem | `src/kernel/fs.c` |
 | Device abstraction (VFS) | `src/kernel/vfs.c`, `src/kernel/dev.c` |
-| Dual-core asymmetric split (RP2040 / RP2350) | `src/main.c` |
-| Producer/consumer IPC demo | `src/apps/demo.c` |
+| Cross-core producer/consumer IPC demo | `src/apps/demo.c` |
+| **Monte Carlo π estimation** — SMP worker threads with argument passing | `src/apps/pi.c` |
 | Interactive USB shell | `src/shell/shell.c` |
 | WiFi (pico_w / pico2_w only) | `src/kernel/wifi.c` |
 | Bluetooth scanning + device-type detection (pico_w / pico2_w only) | `src/kernel/bluetooth.c` |
@@ -88,7 +93,7 @@ cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico
 make -j$(nproc) -C build
 
 # 4. Flash (hold BOOTSEL on Pico, then plug in USB)
-cp build/src/picoos_D-v0.2.1.uf2 /media/$USER/RPI-RP2/
+cp build/src/picoos_D-v0.3.0.uf2 /media/$USER/RPI-RP2/
 
 # 5. Open the console
 pip install pyserial
@@ -104,10 +109,10 @@ Pass `-DPICO_BOARD=<name>` to CMake.  picoOS accepts the underscore-free aliases
 
 | `-DPICO_BOARD=` | Board | Chip | WiFi + BT | Output files (Display Pack example) |
 |----------------|-------|------|-----------|--------------------------------------|
-| `pico` | Raspberry Pi Pico | RP2040 | No | `picoos_D-v0.2.1.*` |
-| `pico2` | Raspberry Pi Pico 2 | RP2350 | No | `pico2os_D-v0.2.1.*` |
-| `picow` | Raspberry Pi Pico W | RP2040 | Yes | `picowos_D-v0.2.1.*` |
-| `pico2w` | Raspberry Pi Pico 2 W | RP2350 | Yes | `pico2wos_D-v0.2.1.*` |
+| `pico` | Raspberry Pi Pico | RP2040 | No | `picoos_D-v0.3.0.*` |
+| `pico2` | Raspberry Pi Pico 2 | RP2350 | No | `pico2os_D-v0.3.0.*` |
+| `picow` | Raspberry Pi Pico W | RP2040 | Yes | `picowos_D-v0.3.0.*` |
+| `pico2w` | Raspberry Pi Pico 2 W | RP2350 | Yes | `pico2wos_D-v0.3.0.*` |
 
 The output files (`.uf2`, `.bin`, `.elf`, `.elf.map`, `.dis`) are named after the board and include the version number, so builds for different boards can share the same output directory without conflict.
 
@@ -158,7 +163,7 @@ Once running, the USB shell accepts:
 | `info` | Show system version and build info |
 | `help` | List all commands |
 | `ps` | Show processes |
-| `threads` | Show all threads with state, priority, CPU time, and stack canary status |
+| `threads` | Show all threads with state, priority, **core affinity**, CPU time, and stack canary status |
 | `kill <tid>` | Terminate a thread; frees its stack and TCB slot; auto-frees the process when its last thread exits |
 | `killproc <pid>` | Terminate all threads in a process and free the PCB |
 | `mem` | Memory usage and heap stats |
@@ -168,7 +173,7 @@ Once running, the USB shell accepts:
 | `fs append <file> <text>` | Append a line to an existing file |
 | `fs format` | Erase all files and reinitialise the filesystem |
 | `rm <file>` | Delete a file |
-| `run <app>` | Launch a built-in application |
+| `run <app> [arg]` | Launch a built-in application; optional argument is passed to the app's entry function as `void *arg` |
 | `trace on\|off` | Enable/disable scheduler trace output |
 | `update` | Reboot into USB BOOTSEL mode for reflashing |
 | `reboot` | Hard reboot |
@@ -215,7 +220,8 @@ picoOS/
 │   │   └── shell.[ch]      USB CDC interactive shell
 │   ├── apps/
 │   │   ├── app_table.[ch]  Stable app registration ABI (app_entry_t, app_table extern)
-│   │   └── demo.[ch]       Built-in producer/consumer/sensor demo threads + app_table[]
+│   │   ├── demo.[ch]       Built-in producer/consumer/sensor demo threads + app_table[]
+│   │   └── pi.[ch]         Monte Carlo π estimation — SMP worker threads, run-time arg
 │   └── drivers/
 │       ├── display.[ch]    ST7789 240×135 driver — /dev/display (optional)
 │       └── led.[ch]        Pimoroni RGB LED driver — /dev/led (optional)
@@ -246,12 +252,24 @@ picoOS/
 
 See **[docs/design.md](docs/design.md)** for the full design rationale.  The key points:
 
-### Dual-core split
+### Dual-core SMP scheduling
 
-Both RP2040 and RP2350 have two cores.  picoOS uses them asymmetrically to keep the design easy to follow:
+Both RP2040 and RP2350 have two cores.  picoOS runs a **full SMP scheduler** — both cores independently select and execute threads from the same shared priority-ready queues:
 
-- **Core 0** — USB console, SysTick, scheduler, filesystem writes, shell
-- **Core 1** — registers as a multicore lockout victim (required for safe flash writes), then idles in `__wfi()`.  User worker threads, compute tasks, and background services can be pinned here.
+- **Core 0** — USB console, filesystem writes, shell, SysTick sleep/wake scan.  Runs the `idle` thread when nothing else is eligible.
+- **Core 1** — registers as a multicore lockout victim so Core 0's flash writes (`multicore_lockout_start_blocking`) can safely pause it.  Runs its own SysTick, PendSV, and `idle1` thread.  Executes any thread with `affinity == THREAD_AFFINITY_C1` or `THREAD_AFFINITY_ANY`.
+
+Thread affinity is set per-TCB with one of three constants:
+
+| Constant | Value | Meaning |
+|----------|-------|---------|
+| `THREAD_AFFINITY_ANY` | -1 | Eligible on either core (default) |
+| `THREAD_AFFINITY_C0` | 0 | Core 0 only |
+| `THREAD_AFFINITY_C1` | 1 | Core 1 only |
+
+SMP correctness is provided by RP2040 hardware spinlocks (SIO block): one spinlock guards the scheduler ready queues, one guards the kernel heap, and a mutex serialises VFS operations.  These are SIO register-level atomics that work across both cores without disabling interrupts globally.
+
+The `threads` command shows which core each thread is bound to (`0`, `1`, or `*` for any-core).
 
 ### Cortex-M33 FPU support (RP2350)
 
@@ -292,7 +310,6 @@ Several parts of v1 are intentionally suboptimal — these are teaching opportun
 
 | What | Why it's imperfect | How to improve it |
 |------|--------------------|-------------------|
-| Global kernel lock | Simple to reason about | Per-subsystem fine-grained locks |
 | O(n) ready-queue scan | Readable | Priority bitmap, skip list |
 | Fixed-size thread stacks | No fragmentation complexity | Stack-usage analysis, adaptive sizing |
 | First-fit heap | Fragmentation is visible | Buddy allocator, slab allocator |
@@ -306,13 +323,13 @@ The `tools/mem_report.py` script derives live numbers from the linker map after 
 
 ```bash
 # Pass the board-named map file as a positional argument
-python3 tools/mem_report.py build/src/picoos_D-v0.2.0.elf.map
+python3 tools/mem_report.py build/src/picoos_D-v0.3.0.elf.map
 
 # Or use the --map option
-python3 tools/mem_report.py --map build/src/pico2wos_D-v0.2.1.elf.map
+python3 tools/mem_report.py --map build/src/pico2wos_D-v0.3.0.elf.map
 
 # One-line summary
-python3 tools/mem_report.py build/src/picoos_D-v0.2.0.elf.map --brief
+python3 tools/mem_report.py build/src/picoos_D-v0.3.0.elf.map --brief
 ```
 
 RP2040 typical breakdown with display and LED enabled:
@@ -352,8 +369,8 @@ python3 tools/console.py --help
 Parses the linker map produced by every build and prints an SRAM usage breakdown by subsystem.  The map file is named after the board, display variant, and version (e.g. `build/src/picoos_D-v0.2.0.elf.map`).
 
 ```bash
-python3 tools/mem_report.py build/src/picoos_D-v0.2.0.elf.map        # positional path
-python3 tools/mem_report.py --map build/src/picoos_D-v0.2.0.elf.map  # named option
+python3 tools/mem_report.py build/src/picoos_D-v0.3.0.elf.map        # positional path
+python3 tools/mem_report.py --map build/src/picoos_D-v0.3.0.elf.map  # named option
 python3 tools/mem_report.py --brief                             # one-line summary (uses default path)
 ```
 
@@ -367,7 +384,7 @@ The codebase is structured around the six phases in [docs/design.md](docs/design
 |-------|--------|-------------|
 | 1 — Bring-up | ✅ Complete | Boot banner, USB console, single-core scheduler, demo threads |
 | 2 — Kernel basics | ✅ Complete | Mutex, semaphore, queues, process/thread management, mem stats |
-| 3 — Second core | ✅ Complete (stub) | Core 1 launched with lockout-victim init; work distribution left as student exercise |
+| 3 — Second core | ✅ Complete | Full SMP: both cores schedule threads; per-core SysTick/PendSV; thread affinity; RP2040 HW spinlock protection; cross-core producer/consumer demo; Monte Carlo π SMP benchmark |
 | 4 — Filesystem | ✅ Complete | Flash-backed persistent FS: XIP reads, sector erase/program on write, survives reboot |
 | 5 — User services | 🔲 Planned | Logger service, app launcher, background worker |
 | 6 — Polish | 🔲 Planned | Scheduler visualiser, panic dumps, host-side loader |
@@ -381,8 +398,7 @@ The project is designed to be modified.  Suggested starting points for students:
 1. **Improve the scheduler** — add priority inheritance to fix priority inversion in `mutex_lock`
 2. **Multi-file write support** — the FS currently allows only one file open for writing at a time; add a per-file buffer pool
 3. **Extend the shell** — add new commands by calling `shell_register_cmd()` from any module
-4. **Launch Core 1 workers** — replace the Core 1 idle loop in `src/main.c` with real thread dispatch
-5. **Drive the display** — write a status dashboard using `/dev/display` ioctls
+4. **Drive the display** — write a status dashboard using `/dev/display` ioctls
 
 ---
 

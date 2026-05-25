@@ -52,7 +52,7 @@ static tcb_t mock_tcb = {
     .next     = NULL,
 };
 
-tcb_t * volatile current_tcb = &mock_tcb;
+tcb_t * volatile current_tcb[2] = { &mock_tcb, NULL };
 
 /* =========================================================================
  * Yield hook

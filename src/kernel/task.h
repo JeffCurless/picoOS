@@ -17,6 +17,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "arch.h"
 
 /* -------------------------------------------------------------------------
  * Compile-time constants
@@ -48,6 +49,11 @@
 #define DEEP_STACK_SIZE    3072    /* threads with deep call chains */
 #define IDLE_STACK_SIZE     512    /* idle thread                   */
 #define STACK_CANARY       0xDEADBEEFu
+
+/* Thread affinity values: which core(s) may run this thread. */
+#define THREAD_AFFINITY_ANY  ((int8_t)-1)  /* eligible on either core */
+#define THREAD_AFFINITY_C0   ((int8_t) 0)  /* core 0 only             */
+#define THREAD_AFFINITY_C1   ((int8_t) 1)  /* core 1 only             */
 
 /* -------------------------------------------------------------------------
  * Thread states
@@ -92,7 +98,7 @@ typedef struct tcb {
     uint32_t        exc_return;     /* EXC_RETURN used by PendSV on restore  */
 
     uint8_t         priority;       /* Scheduling priority: 0 = highest      */
-    uint8_t         affinity;       /* 0 = any, 1 = core 0, 2 = core 1      */
+    int8_t          affinity;       /* 0 = core 0, 1 = core 1, -1 = any     */
     thread_state_t  state;          /* Current lifecycle state               */
     uint64_t        wake_time_us;   /* Absolute wake time (us) when sleeping */
     uint64_t        cpu_time_us;    /* Accumulated CPU time in microseconds  */
@@ -138,13 +144,14 @@ typedef struct pcb {
 } pcb_t;
 
 /* -------------------------------------------------------------------------
- * Global: the TCB currently executing on Core 0.
- * There is a single definition (in task.c).  Core 1 idles in __wfi() and
- * does not maintain a separate current_tcb — a full SMP implementation
- * would need per-core current pointers.
+ * Per-core "currently running" TCB pointer.
+ * current_tcb[0] = Core 0's running thread; current_tcb[1] = Core 1's.
+ * CURRENT_TCB expands to the slot for whichever core evaluates it.
+ * There is exactly one definition (in task.c).
  * ------------------------------------------------------------------------- */
 
-extern tcb_t * volatile current_tcb;
+extern tcb_t * volatile current_tcb[2];
+#define CURRENT_TCB  current_tcb[get_core_num()]
 
 /* -------------------------------------------------------------------------
  * Task manager API

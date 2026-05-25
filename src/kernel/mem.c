@@ -13,7 +13,7 @@
  */
 
 #include "mem.h"
-#include "arch.h"   /* save_and_disable_interrupts / restore_interrupts */
+#include "sync.h"   /* spinlock_t, spinlock_irq_acquire/release */
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -56,6 +56,9 @@ static uint8_t heap_memory[HEAP_SIZE] __attribute__((aligned(8)));
 /* Head of the free-block list. */
 static struct heap_block *heap_head = NULL;
 
+/* SMP-safe spinlock protecting the heap free list. */
+static spinlock_t heap_lock = {0};
+
 /* -------------------------------------------------------------------------
  * kmem_init
  * ------------------------------------------------------------------------- */
@@ -67,6 +70,8 @@ void kmem_init(void)
     heap_head->size = HEAP_SIZE - (uint32_t)HEADER_SIZE;
     heap_head->free = true;
     heap_head->next = NULL;
+
+    spinlock_init(&heap_lock);   /* claim RP2040 HW spinlock for SMP-safe heap */
 }
 
 /* -------------------------------------------------------------------------
@@ -81,12 +86,7 @@ void *kmalloc(size_t size)
     /* Round the requested size up to an 8-byte boundary. */
     uint32_t aligned_size = (uint32_t)ALIGN8(size);
 
-    /* Disable interrupts for the duration of the heap walk and mutation.
-     * kfree() is called from PendSV context (interrupts already off), so
-     * without this guard PendSV can preempt kmalloc mid-mutation and see
-     * a partially-modified free list. */
-    uint32_t irq_save = save_and_disable_interrupts();
-
+    uint32_t irq_save = spinlock_irq_acquire(&heap_lock);
     void *result = NULL;
 
     /* First-fit search. */
@@ -116,7 +116,7 @@ void *kmalloc(size_t size)
         blk = blk->next;
     }
 
-    restore_interrupts(irq_save);
+    spinlock_irq_release(&heap_lock, irq_save);
     return result;   /* NULL if no suitable block was found */
 }
 
@@ -133,10 +133,7 @@ void kfree(void *ptr)
     struct heap_block *blk =
         (struct heap_block *)((uint8_t *)ptr - HEADER_SIZE);
 
-    /* Disable interrupts for the same reason as kmalloc: the free list
-     * walk and coalescing must be atomic with respect to PendSV.  When
-     * called from PendSV itself (interrupts already off) this is a no-op. */
-    uint32_t irq_save = save_and_disable_interrupts();
+    uint32_t irq_save = spinlock_irq_acquire(&heap_lock);
 
     blk->free = true;
 
@@ -161,7 +158,7 @@ void kfree(void *ptr)
         prev->next  = blk->next;
     }
 
-    restore_interrupts(irq_save);
+    spinlock_irq_release(&heap_lock, irq_save);
 }
 
 /* -------------------------------------------------------------------------
@@ -173,8 +170,7 @@ void kmem_stats(uint32_t *used, uint32_t *free_bytes, uint32_t *largest)
     uint32_t total_free    = 0;
     uint32_t largest_free  = 0;
 
-    uint32_t irq_save = save_and_disable_interrupts();
-
+    uint32_t irq_save = spinlock_irq_acquire(&heap_lock);
     struct heap_block *blk = heap_head;
     while (blk != NULL) {
         uint32_t block_total = (uint32_t)HEADER_SIZE + blk->size;
@@ -189,7 +185,7 @@ void kmem_stats(uint32_t *used, uint32_t *free_bytes, uint32_t *largest)
         blk = blk->next;
     }
 
-    restore_interrupts(irq_save);
+    spinlock_irq_release(&heap_lock, irq_save);
 
     if (used        != NULL) { *used        = total_used;   }
     if (free_bytes  != NULL) { *free_bytes  = total_free;   }

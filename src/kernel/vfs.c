@@ -15,6 +15,7 @@
 #include "vfs.h"
 #include "dev.h"
 #include "fs.h"
+#include "sync.h"
 
 #include <string.h>
 #include <stddef.h>
@@ -40,11 +41,16 @@ static dev_mount_t dev_mounts[VFS_MAX_DEV_MOUNTS];
  * ------------------------------------------------------------------------- */
 static vfs_fd_t fd_table[VFS_MAX_OPEN];
 
+/* Mutex protecting fd_table and fs scratch_owner across both cores. */
+static kmutex_t vfs_lock;
+
 /* -------------------------------------------------------------------------
  * vfs_init
  * ------------------------------------------------------------------------- */
 void vfs_init(void)
 {
+    kmutex_init(&vfs_lock);
+
     memset(fd_table, 0, sizeof(fd_table));
     for (uint32_t i = 0u; i < VFS_MAX_OPEN; i++) {
         fd_table[i].used = false;
@@ -134,8 +140,11 @@ int vfs_open(const char *path, int mode)
         return -1;
     }
 
+    kmutex_lock(&vfs_lock);
+
     int fd = fd_alloc();
     if (fd < 0) {
+        kmutex_unlock(&vfs_lock);
         return -1;
     }
 
@@ -147,6 +156,7 @@ int vfs_open(const char *path, int mode)
         dev_id_t did = dev_mounts[mount_idx].id;
 
         if (dev_open(did) < 0) {
+            kmutex_unlock(&vfs_lock);
             return -1;
         }
 
@@ -159,12 +169,14 @@ int vfs_open(const char *path, int mode)
         strncpy(f->path, path, VFS_PATH_MAX - 1u);
         f->path[VFS_PATH_MAX - 1u] = '\0';
 
+        kmutex_unlock(&vfs_lock);
         return fd;
     }
 
     /* Otherwise delegate to the filesystem layer. */
     int fs_fd = fs_open(path, mode);
     if (fs_fd < 0) {
+        kmutex_unlock(&vfs_lock);
         return -1;
     }
 
@@ -177,6 +189,7 @@ int vfs_open(const char *path, int mode)
     strncpy(f->path, path, VFS_PATH_MAX - 1u);
     f->path[VFS_PATH_MAX - 1u] = '\0';
 
+    kmutex_unlock(&vfs_lock);
     return fd;
 }
 
@@ -185,14 +198,19 @@ int vfs_open(const char *path, int mode)
  * ------------------------------------------------------------------------- */
 int vfs_read(int fd, uint8_t *buf, uint32_t n)
 {
+    kmutex_lock(&vfs_lock);
+
     if (fd < 0 || fd >= (int)VFS_MAX_OPEN || !fd_table[fd].used) {
+        kmutex_unlock(&vfs_lock);
         return -1;
     }
 
     vfs_fd_t *f = &fd_table[fd];
 
     if (f->type == VFS_TYPE_DEV) {
-        return dev_read(f->dev_id, buf, n);
+        int r = dev_read(f->dev_id, buf, n);
+        kmutex_unlock(&vfs_lock);
+        return r;
     }
 
     /* Filesystem file: delegate with position tracking. */
@@ -200,6 +218,7 @@ int vfs_read(int fd, uint8_t *buf, uint32_t n)
     if (result > 0) {
         f->pos += (uint32_t)result;
     }
+    kmutex_unlock(&vfs_lock);
     return result;
 }
 
@@ -208,20 +227,26 @@ int vfs_read(int fd, uint8_t *buf, uint32_t n)
  * ------------------------------------------------------------------------- */
 int vfs_write(int fd, const uint8_t *buf, uint32_t n)
 {
+    kmutex_lock(&vfs_lock);
+
     if (fd < 0 || fd >= (int)VFS_MAX_OPEN || !fd_table[fd].used) {
+        kmutex_unlock(&vfs_lock);
         return -1;
     }
 
     vfs_fd_t *f = &fd_table[fd];
 
     if (f->type == VFS_TYPE_DEV) {
-        return dev_write(f->dev_id, buf, n);
+        int r = dev_write(f->dev_id, buf, n);
+        kmutex_unlock(&vfs_lock);
+        return r;
     }
 
     int result = fs_write((int)f->fs_file_id, buf, n);
     if (result > 0) {
         f->pos += (uint32_t)result;
     }
+    kmutex_unlock(&vfs_lock);
     return result;
 }
 
@@ -230,7 +255,10 @@ int vfs_write(int fd, const uint8_t *buf, uint32_t n)
  * ------------------------------------------------------------------------- */
 int vfs_close(int fd)
 {
+    kmutex_lock(&vfs_lock);
+
     if (fd < 0 || fd >= (int)VFS_MAX_OPEN || !fd_table[fd].used) {
+        kmutex_unlock(&vfs_lock);
         return -1;
     }
 
@@ -243,5 +271,6 @@ int vfs_close(int fd)
     }
 
     f->used = false;
+    kmutex_unlock(&vfs_lock);
     return 0;
 }

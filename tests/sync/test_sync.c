@@ -129,7 +129,7 @@ static void test_mutex_lock_when_free(void)
     kmutex_t m;
     kmutex_init(&m);
     kmutex_lock(&m);
-    CHECK(m.owner_tid == (int32_t)current_tcb->tid,
+    CHECK(m.owner_tid == (int32_t)CURRENT_TCB->tid,
           "owner_tid must equal current thread's tid after lock");
     CHECK(m.count == 1u, "count must be 1 after lock");
     kmutex_unlock(&m);
@@ -156,7 +156,7 @@ static void test_mutex_relock_after_unlock(void)
     kmutex_lock(&m);
     kmutex_unlock(&m);
     kmutex_lock(&m);
-    CHECK(m.owner_tid == (int32_t)current_tcb->tid,
+    CHECK(m.owner_tid == (int32_t)CURRENT_TCB->tid,
           "owner_tid must be set again after second lock");
     kmutex_unlock(&m);
     END_TEST();
@@ -522,11 +522,11 @@ static int32_t   _hook_blk_holder_tid;
 static void mutex_capture_and_release_hook(void)
 {
     /* Capture TCB debug fields while they're live (before the clear). */
-    _hook_blk_time_us    = current_tcb->blk_time_us;
-    _hook_blk_file       = current_tcb->blk_file;
-    _hook_blk_line       = current_tcb->blk_line;
-    _hook_blk_what       = current_tcb->blk_what;
-    _hook_blk_holder_tid = current_tcb->blk_holder_tid;
+    _hook_blk_time_us    = CURRENT_TCB->blk_time_us;
+    _hook_blk_file       = CURRENT_TCB->blk_file;
+    _hook_blk_line       = CURRENT_TCB->blk_line;
+    _hook_blk_what       = CURRENT_TCB->blk_what;
+    _hook_blk_holder_tid = CURRENT_TCB->blk_holder_tid;
     /* Release the mutex so the next iteration of kmutex_lock_dbg succeeds. */
     if (_hook_mutex_ptr) {
         _hook_mutex_ptr->owner_tid = -1;
@@ -563,14 +563,14 @@ static void test_lock_debug_semaphore_init_fields(void)
 static void test_lock_debug_spinlock_acq_tid(void)
 {
     BEGIN_TEST(lock_debug_spinlock_records_and_clears_holder_tid);
-    spinlock_t s;
+    spinlock_t s = {0};
     s.lock     = 0u;
     s.acq_tid  = -1;
     s.acq_file = NULL;
     s.acq_line = 0;
 
     uint32_t saved = spinlock_irq_acquire(&s);
-    CHECK(s.acq_tid == (int32_t)current_tcb->tid,
+    CHECK(s.acq_tid == (int32_t)CURRENT_TCB->tid,
           "acq_tid must equal current TID after acquire");
     spinlock_irq_release(&s, saved);
     CHECK(s.acq_tid  == -1,   "acq_tid must be -1 after release");
@@ -592,7 +592,7 @@ static void test_lock_debug_mutex_acq_fields_on_lock(void)
     CHECK(strcmp(m.acq_file, "sentinel_file.c") == 0, "acq_file must match argument");
     CHECK(m.acq_line == 999,                        "acq_line must match argument");
     CHECK(m.acq_time_us != 0u,                      "acq_time_us must be non-zero after lock");
-    CHECK(m.owner_tid == (int32_t)current_tcb->tid, "owner_tid must be current TID");
+    CHECK(m.owner_tid == (int32_t)CURRENT_TCB->tid, "owner_tid must be current TID");
 
     kmutex_unlock(&m);
 
@@ -660,11 +660,11 @@ static void test_lock_debug_mutex_blk_fields_on_block(void)
           "blk_holder_tid must snapshot the holder TID at block time");
 
     /* After acquiring, blk_time_us must be cleared. */
-    CHECK(current_tcb->blk_time_us == 0u,
+    CHECK(CURRENT_TCB->blk_time_us == 0u,
           "blk_time_us must be 0 after the lock is acquired");
 
     /* The acq_* fields on the mutex must now reflect our acquisition. */
-    CHECK(m.owner_tid == (int32_t)current_tcb->tid,
+    CHECK(m.owner_tid == (int32_t)CURRENT_TCB->tid,
           "owner_tid must equal current TID after retry-acquire");
     CHECK(m.acq_file != NULL && strcmp(m.acq_file, "caller_file.c") == 0,
           "acq_file must be set on successful acquire");
@@ -678,7 +678,7 @@ static void test_lock_debug_spinlock_timeout_fires(void)
 {
     BEGIN_TEST(lock_debug_spinlock_timeout_calls_deadlock_panic);
 
-    spinlock_t s;
+    spinlock_t s = {0};
     s.lock     = 1u;    /* pre-locked — simulate another holder */
     s.acq_tid  = 99;    /* holder TID */
     s.acq_file = "holder.c";
@@ -703,7 +703,7 @@ static void test_lock_debug_spinlock_timeout_fires(void)
               "panic lock_type must be \"spinlock\"");
         CHECK(mock_lock_panic_hold_tid == 99,
               "panic must report holder TID from s.acq_tid");
-        CHECK(mock_lock_panic_wait_tid == (int32_t)current_tcb->tid,
+        CHECK(mock_lock_panic_wait_tid == (int32_t)CURRENT_TCB->tid,
               "panic must report current thread as the waiter");
     }
 

@@ -13,7 +13,7 @@
  */
 
 #include "sync.h"
-#include "sched.h"   /* sched_block, sched_unblock, sched_yield, current_tcb */
+#include "sched.h"   /* sched_block, sched_unblock, sched_yield, CURRENT_TCB */
 #include "arch.h"
 
 #include <string.h>
@@ -48,39 +48,74 @@
  * on interrupt disable (or caller-guaranteed exclusion) for atomicity.
  * ========================================================================= */
 
+/* spinlock_init — claim a free RP2040 hardware spinlock for SMP-safe use.
+ * Must be called once before the spinlock is first acquired on more than one
+ * core.  The {0} default leaves hw = NULL, which causes the IRQ-disable-only
+ * fallback to be used (safe during single-core init before sched_start). */
+void spinlock_init(spinlock_t *s)
+{
+    s->hw   = spin_lock_init(spin_lock_claim_unused(true));
+    s->lock = 0u;
+#ifdef PICOOS_LOCK_DEBUG
+    s->acq_file = NULL;
+    s->acq_line = 0;
+    s->acq_tid  = -1;
+#endif
+}
+
 uint32_t spinlock_irq_acquire(spinlock_t *s)
 {
+    if (s->hw != NULL) {
+        /* SMP-safe: RP2040 hardware spinlock disables IRQs and spins until
+         * the lock register is available on both cores atomically. */
+#ifdef PICOOS_LOCK_DEBUG
+        uint32_t save = spin_lock_blocking(s->hw);
+        s->acq_tid = CURRENT_TCB ? (int32_t)CURRENT_TCB->tid : -1;
+        return save;
+#else
+        return spin_lock_blocking(s->hw);
+#endif
+    }
+
+    /* Fallback (single-core init phase, hw not yet claimed): IRQ-disable only.
+     * Safe because Core 1 is not yet scheduling when this path is taken. */
 #ifdef PICOOS_LOCK_DEBUG
     uint64_t deadline = time_us_64() + (uint64_t)PICOOS_LOCK_TIMEOUT_MS * 1000u;
 #endif
-    while (1) {
-        uint32_t save = save_and_disable_interrupts();
-        if (s->lock == 0u) {
-            s->lock = 1u;
-            __dmb();
-#ifdef PICOOS_LOCK_DEBUG
-            s->acq_tid  = (current_tcb != NULL) ? (int32_t)current_tcb->tid : -1;
-            /* acq_file/acq_line are set by higher-level _dbg variants */
-#endif
-            return save;
-        }
+    uint32_t save = save_and_disable_interrupts();
+    while (s->lock != 0u) {
         restore_interrupts(save);
-        __nop();
+        save = save_and_disable_interrupts();
 #ifdef PICOOS_LOCK_DEBUG
         if (time_us_64() > deadline) {
             lock_deadlock_panic("spinlock",
                 "(spin-wait)", 0,
-                current_tcb ? (uint32_t)current_tcb->tid : 0u,
-                current_tcb ? current_tcb->name : "?",
+                CURRENT_TCB ? (uint32_t)CURRENT_TCB->tid : 0u,
+                CURRENT_TCB ? CURRENT_TCB->name : "?",
                 s->acq_file, s->acq_line, s->acq_tid);
         }
 #endif
     }
+    s->lock = 1u;
+#ifdef PICOOS_LOCK_DEBUG
+    s->acq_tid = CURRENT_TCB ? (int32_t)CURRENT_TCB->tid : -1;
+#endif
+    return save;
 }
 
 void spinlock_irq_release(spinlock_t *s, uint32_t saved_irq)
 {
-    __dmb();
+    if (s->hw != NULL) {
+#ifdef PICOOS_LOCK_DEBUG
+        s->acq_tid  = -1;
+        s->acq_file = NULL;
+        s->acq_line = 0;
+#endif
+        spin_unlock(s->hw, saved_irq);
+        return;
+    }
+
+    /* Fallback (single-core init phase). */
     s->lock = 0u;
 #ifdef PICOOS_LOCK_DEBUG
     s->acq_tid  = -1;
@@ -92,37 +127,37 @@ void spinlock_irq_release(spinlock_t *s, uint32_t saved_irq)
 
 void spinlock_acquire(spinlock_t *s)
 {
+    if (s->hw != NULL) {
+        /* Spin-read the HW spinlock register without touching IRQ state.
+         * The register returns non-zero when successfully claimed. */
+        while (!*s->hw) { /* busy-wait */ }
+        __dmb();
 #ifdef PICOOS_LOCK_DEBUG
-    uint64_t deadline = time_us_64() + (uint64_t)PICOOS_LOCK_TIMEOUT_MS * 1000u;
+        s->acq_tid = CURRENT_TCB ? (int32_t)CURRENT_TCB->tid : -1;
 #endif
-    while (1) {
-        __disable_irq();
-        if (s->lock == 0u) {
-            s->lock = 1u;
-            __dmb();
-            __enable_irq();
-#ifdef PICOOS_LOCK_DEBUG
-            s->acq_tid  = (current_tcb != NULL) ? (int32_t)current_tcb->tid : -1;
-#endif
-            return;
-        }
-        __enable_irq();
-        __nop();
-#ifdef PICOOS_LOCK_DEBUG
-        if (time_us_64() > deadline) {
-            lock_deadlock_panic("spinlock",
-                "(spin-wait)", 0,
-                current_tcb ? (uint32_t)current_tcb->tid : 0u,
-                current_tcb ? current_tcb->name : "?",
-                s->acq_file, s->acq_line, s->acq_tid);
-        }
-#endif
+        return;
     }
+
+    /* Fallback: software spin (single-core only). */
+    while (s->lock != 0u) { /* spin */ }
+    s->lock = 1u;
+#ifdef PICOOS_LOCK_DEBUG
+    s->acq_tid = CURRENT_TCB ? (int32_t)CURRENT_TCB->tid : -1;
+#endif
 }
 
 void spinlock_release(spinlock_t *s)
 {
-    __dmb();
+    if (s->hw != NULL) {
+#ifdef PICOOS_LOCK_DEBUG
+        s->acq_tid  = -1;
+        s->acq_file = NULL;
+        s->acq_line = 0;
+#endif
+        spin_unlock_unsafe(s->hw);
+        return;
+    }
+
     s->lock = 0u;
 #ifdef PICOOS_LOCK_DEBUG
     s->acq_tid  = -1;
@@ -180,14 +215,11 @@ static tcb_t *waiter_dequeue(tcb_t **head)
 
 void kmutex_init(kmutex_t *m)
 {
-    m->spin.lock  = 0u;
+    spinlock_init(&m->spin);  /* claim an RP2040 HW spinlock for SMP safety */
     m->owner_tid  = -1;
     m->count      = 0u;
     m->waiters    = NULL;
 #ifdef PICOOS_LOCK_DEBUG
-    m->spin.acq_file = NULL;
-    m->spin.acq_line = 0;
-    m->spin.acq_tid  = -1;
     m->acq_file      = NULL;
     m->acq_line      = 0;
     m->acq_time_us   = 0u;
@@ -201,15 +233,15 @@ void kmutex_lock(kmutex_t *m)
 
         if (m->owner_tid == -1) {
             /* Mutex is free — claim it. */
-            m->owner_tid = (int32_t)current_tcb->tid;
+            m->owner_tid = (int32_t)CURRENT_TCB->tid;
             m->count     = 1u;
             spinlock_irq_release(&m->spin, irq_save);
             return;
         }
 
         /* Mutex is held by another thread — block and yield. */
-        waiter_enqueue(&m->waiters, (tcb_t *)current_tcb);
-        sched_block((tcb_t *)current_tcb);
+        waiter_enqueue(&m->waiters, (tcb_t *)CURRENT_TCB);
+        sched_block((tcb_t *)CURRENT_TCB);
         spinlock_irq_release(&m->spin, irq_save);
 
         /* When we are unblocked the mutex may still be held; loop. */
@@ -245,7 +277,7 @@ void kmutex_lock_dbg(kmutex_t *m, const char *file, int line)
         uint32_t irq_save = spinlock_irq_acquire(&m->spin);
 
         if (m->owner_tid == -1) {
-            m->owner_tid   = (int32_t)current_tcb->tid;
+            m->owner_tid   = (int32_t)CURRENT_TCB->tid;
             m->count       = 1u;
             m->acq_file    = file;
             m->acq_line    = line;
@@ -258,21 +290,21 @@ void kmutex_lock_dbg(kmutex_t *m, const char *file, int line)
         }
 
         /* Record blocking info on the TCB before yielding. */
-        ((tcb_t *)current_tcb)->blk_time_us     = time_us_64();
-        ((tcb_t *)current_tcb)->blk_file        = file;
-        ((tcb_t *)current_tcb)->blk_line        = line;
-        ((tcb_t *)current_tcb)->blk_what        = "mutex";
-        ((tcb_t *)current_tcb)->blk_holder_tid  = m->owner_tid;
-        ((tcb_t *)current_tcb)->blk_holder_file = m->acq_file;
-        ((tcb_t *)current_tcb)->blk_holder_line = m->acq_line;
+        ((tcb_t *)CURRENT_TCB)->blk_time_us     = time_us_64();
+        ((tcb_t *)CURRENT_TCB)->blk_file        = file;
+        ((tcb_t *)CURRENT_TCB)->blk_line        = line;
+        ((tcb_t *)CURRENT_TCB)->blk_what        = "mutex";
+        ((tcb_t *)CURRENT_TCB)->blk_holder_tid  = m->owner_tid;
+        ((tcb_t *)CURRENT_TCB)->blk_holder_file = m->acq_file;
+        ((tcb_t *)CURRENT_TCB)->blk_holder_line = m->acq_line;
 
-        waiter_enqueue(&m->waiters, (tcb_t *)current_tcb);
-        sched_block((tcb_t *)current_tcb);
+        waiter_enqueue(&m->waiters, (tcb_t *)CURRENT_TCB);
+        sched_block((tcb_t *)CURRENT_TCB);
         spinlock_irq_release(&m->spin, irq_save);
         sched_yield();
 
         /* Unblocked — clear block marker and loop to re-check. */
-        ((tcb_t *)current_tcb)->blk_time_us = 0u;
+        ((tcb_t *)CURRENT_TCB)->blk_time_us = 0u;
     }
 }
 #endif
@@ -305,8 +337,8 @@ void ksemaphore_wait(ksemaphore_t *s)
         }
 
         /* Count is 0 — block without touching count. */
-        waiter_enqueue(&s->waiters, (tcb_t *)current_tcb);
-        sched_block((tcb_t *)current_tcb);
+        waiter_enqueue(&s->waiters, (tcb_t *)CURRENT_TCB);
+        sched_block((tcb_t *)CURRENT_TCB);
         spinlock_irq_release(&s->spin, irq_save);
 
         sched_yield();
@@ -340,20 +372,20 @@ void ksemaphore_wait_dbg(ksemaphore_t *s, const char *file, int line)
             return;
         }
 
-        ((tcb_t *)current_tcb)->blk_time_us     = time_us_64();
-        ((tcb_t *)current_tcb)->blk_file        = file;
-        ((tcb_t *)current_tcb)->blk_line        = line;
-        ((tcb_t *)current_tcb)->blk_what        = "semaphore";
-        ((tcb_t *)current_tcb)->blk_holder_tid  = -1;
-        ((tcb_t *)current_tcb)->blk_holder_file = NULL;
-        ((tcb_t *)current_tcb)->blk_holder_line = 0;
+        ((tcb_t *)CURRENT_TCB)->blk_time_us     = time_us_64();
+        ((tcb_t *)CURRENT_TCB)->blk_file        = file;
+        ((tcb_t *)CURRENT_TCB)->blk_line        = line;
+        ((tcb_t *)CURRENT_TCB)->blk_what        = "semaphore";
+        ((tcb_t *)CURRENT_TCB)->blk_holder_tid  = -1;
+        ((tcb_t *)CURRENT_TCB)->blk_holder_file = NULL;
+        ((tcb_t *)CURRENT_TCB)->blk_holder_line = 0;
 
-        waiter_enqueue(&s->waiters, (tcb_t *)current_tcb);
-        sched_block((tcb_t *)current_tcb);
+        waiter_enqueue(&s->waiters, (tcb_t *)CURRENT_TCB);
+        sched_block((tcb_t *)CURRENT_TCB);
         spinlock_irq_release(&s->spin, irq_save);
         sched_yield();
 
-        ((tcb_t *)current_tcb)->blk_time_us = 0u;
+        ((tcb_t *)CURRENT_TCB)->blk_time_us = 0u;
     }
 }
 #endif
@@ -500,9 +532,9 @@ uint32_t event_flags_wait(event_flags_t *e, uint32_t mask, bool wait_for_all)
         }
 
         /* Not yet satisfied — block this thread. */
-        event_waiter_alloc((tcb_t *)current_tcb, mask, wait_for_all);
-        waiter_enqueue(&e->waiters, (tcb_t *)current_tcb);
-        sched_block((tcb_t *)current_tcb);
+        event_waiter_alloc((tcb_t *)CURRENT_TCB, mask, wait_for_all);
+        waiter_enqueue(&e->waiters, (tcb_t *)CURRENT_TCB);
+        sched_block((tcb_t *)CURRENT_TCB);
         spinlock_irq_release(&e->spin, irq_save);
 
         sched_yield();
@@ -530,21 +562,21 @@ uint32_t event_flags_wait_dbg(event_flags_t *e, uint32_t mask, bool wait_for_all
             return result;
         }
 
-        ((tcb_t *)current_tcb)->blk_time_us     = time_us_64();
-        ((tcb_t *)current_tcb)->blk_file        = file;
-        ((tcb_t *)current_tcb)->blk_line        = line;
-        ((tcb_t *)current_tcb)->blk_what        = "event_flags";
-        ((tcb_t *)current_tcb)->blk_holder_tid  = -1;
-        ((tcb_t *)current_tcb)->blk_holder_file = NULL;
-        ((tcb_t *)current_tcb)->blk_holder_line = 0;
+        ((tcb_t *)CURRENT_TCB)->blk_time_us     = time_us_64();
+        ((tcb_t *)CURRENT_TCB)->blk_file        = file;
+        ((tcb_t *)CURRENT_TCB)->blk_line        = line;
+        ((tcb_t *)CURRENT_TCB)->blk_what        = "event_flags";
+        ((tcb_t *)CURRENT_TCB)->blk_holder_tid  = -1;
+        ((tcb_t *)CURRENT_TCB)->blk_holder_file = NULL;
+        ((tcb_t *)CURRENT_TCB)->blk_holder_line = 0;
 
-        event_waiter_alloc((tcb_t *)current_tcb, mask, wait_for_all);
-        waiter_enqueue(&e->waiters, (tcb_t *)current_tcb);
-        sched_block((tcb_t *)current_tcb);
+        event_waiter_alloc((tcb_t *)CURRENT_TCB, mask, wait_for_all);
+        waiter_enqueue(&e->waiters, (tcb_t *)CURRENT_TCB);
+        sched_block((tcb_t *)CURRENT_TCB);
         spinlock_irq_release(&e->spin, irq_save);
         sched_yield();
 
-        ((tcb_t *)current_tcb)->blk_time_us = 0u;
+        ((tcb_t *)CURRENT_TCB)->blk_time_us = 0u;
     }
 }
 #endif
@@ -592,8 +624,8 @@ void mqueue_send(mqueue_t *q, const void *msg)
         }
 
         /* Queue full — block sender. */
-        waiter_enqueue(&q->send_waiters, (tcb_t *)current_tcb);
-        sched_block((tcb_t *)current_tcb);
+        waiter_enqueue(&q->send_waiters, (tcb_t *)CURRENT_TCB);
+        sched_block((tcb_t *)CURRENT_TCB);
         spinlock_irq_release(&q->spin, irq_save);
 
         sched_yield();
@@ -622,8 +654,8 @@ void mqueue_recv(mqueue_t *q, void *msg_out)
         }
 
         /* Queue empty — block receiver. */
-        waiter_enqueue(&q->recv_waiters, (tcb_t *)current_tcb);
-        sched_block((tcb_t *)current_tcb);
+        waiter_enqueue(&q->recv_waiters, (tcb_t *)CURRENT_TCB);
+        sched_block((tcb_t *)CURRENT_TCB);
         spinlock_irq_release(&q->spin, irq_save);
 
         sched_yield();
@@ -694,20 +726,20 @@ void mqueue_send_dbg(mqueue_t *q, const void *msg, const char *file, int line)
             return;
         }
 
-        ((tcb_t *)current_tcb)->blk_time_us     = time_us_64();
-        ((tcb_t *)current_tcb)->blk_file        = file;
-        ((tcb_t *)current_tcb)->blk_line        = line;
-        ((tcb_t *)current_tcb)->blk_what        = "mqueue_send";
-        ((tcb_t *)current_tcb)->blk_holder_tid  = -1;
-        ((tcb_t *)current_tcb)->blk_holder_file = NULL;
-        ((tcb_t *)current_tcb)->blk_holder_line = 0;
+        ((tcb_t *)CURRENT_TCB)->blk_time_us     = time_us_64();
+        ((tcb_t *)CURRENT_TCB)->blk_file        = file;
+        ((tcb_t *)CURRENT_TCB)->blk_line        = line;
+        ((tcb_t *)CURRENT_TCB)->blk_what        = "mqueue_send";
+        ((tcb_t *)CURRENT_TCB)->blk_holder_tid  = -1;
+        ((tcb_t *)CURRENT_TCB)->blk_holder_file = NULL;
+        ((tcb_t *)CURRENT_TCB)->blk_holder_line = 0;
 
-        waiter_enqueue(&q->send_waiters, (tcb_t *)current_tcb);
-        sched_block((tcb_t *)current_tcb);
+        waiter_enqueue(&q->send_waiters, (tcb_t *)CURRENT_TCB);
+        sched_block((tcb_t *)CURRENT_TCB);
         spinlock_irq_release(&q->spin, irq_save);
         sched_yield();
 
-        ((tcb_t *)current_tcb)->blk_time_us = 0u;
+        ((tcb_t *)CURRENT_TCB)->blk_time_us = 0u;
     }
 }
 
@@ -730,20 +762,20 @@ void mqueue_recv_dbg(mqueue_t *q, void *msg_out, const char *file, int line)
             return;
         }
 
-        ((tcb_t *)current_tcb)->blk_time_us     = time_us_64();
-        ((tcb_t *)current_tcb)->blk_file        = file;
-        ((tcb_t *)current_tcb)->blk_line        = line;
-        ((tcb_t *)current_tcb)->blk_what        = "mqueue_recv";
-        ((tcb_t *)current_tcb)->blk_holder_tid  = -1;
-        ((tcb_t *)current_tcb)->blk_holder_file = NULL;
-        ((tcb_t *)current_tcb)->blk_holder_line = 0;
+        ((tcb_t *)CURRENT_TCB)->blk_time_us     = time_us_64();
+        ((tcb_t *)CURRENT_TCB)->blk_file        = file;
+        ((tcb_t *)CURRENT_TCB)->blk_line        = line;
+        ((tcb_t *)CURRENT_TCB)->blk_what        = "mqueue_recv";
+        ((tcb_t *)CURRENT_TCB)->blk_holder_tid  = -1;
+        ((tcb_t *)CURRENT_TCB)->blk_holder_file = NULL;
+        ((tcb_t *)CURRENT_TCB)->blk_holder_line = 0;
 
-        waiter_enqueue(&q->recv_waiters, (tcb_t *)current_tcb);
-        sched_block((tcb_t *)current_tcb);
+        waiter_enqueue(&q->recv_waiters, (tcb_t *)CURRENT_TCB);
+        sched_block((tcb_t *)CURRENT_TCB);
         spinlock_irq_release(&q->spin, irq_save);
         sched_yield();
 
-        ((tcb_t *)current_tcb)->blk_time_us = 0u;
+        ((tcb_t *)CURRENT_TCB)->blk_time_us = 0u;
     }
 }
 #endif /* PICOOS_LOCK_DEBUG */

@@ -144,13 +144,18 @@ isr_pendsv:
     /* saves an extended 26-word frame and sets LR = 0xFFFFFFED.  Saving */
     /* LR here lets PendSV restore the correct frame size per thread.    */
     /* ------------------------------------------------------------------ */
-    ldr     r1, =current_tcb        /* r1 = &current_tcb (the global ptr) */
-    ldr     r1, [r1]                /* r1 = current_tcb (the TCB pointer)  */
-    str     r0, [r1, #16]           /* current_tcb->saved_sp   = r0        */
+    /* Index current_tcb[core_num]: read SIO CPUID at 0xD0000000 offset 0. */
+    ldr     r2, =0xD0000000         /* r2 = SIO_BASE                       */
+    ldr     r2, [r2]                /* r2 = core_num (0 or 1)              */
+    lsls    r2, r2, #2              /* r2 = core_num * 4 (byte offset)     */
+    ldr     r1, =current_tcb        /* r1 = &current_tcb[0]                */
+    adds    r1, r1, r2              /* r1 = &current_tcb[core_num]         */
+    ldr     r1, [r1]                /* r1 = current_tcb[core_num] (TCB)   */
+    str     r0, [r1, #16]           /* TCB->saved_sp   = r0                */
     /* STR cannot encode lr (r14) in the Thumb narrow form used by M0+.   */
     /* Copy LR to r0 (low register) then store; r0 is free after the str. */
     mov     r0, lr
-    str     r0, [r1, #20]           /* current_tcb->exc_return = LR        */
+    str     r0, [r1, #20]           /* TCB->exc_return = LR                */
 
     /* ------------------------------------------------------------------ */
     /* Step 5 — Call sched_next_thread() to get the next TCB.            */
@@ -166,8 +171,13 @@ isr_pendsv:
     /* ------------------------------------------------------------------ */
     /* Step 6 — Update current_tcb to point to the new thread.           */
     /* ------------------------------------------------------------------ */
-    ldr     r1, =current_tcb
-    str     r0, [r1]                /* current_tcb = next TCB             */
+    /* Index current_tcb[core_num] to update the running-thread pointer. */
+    ldr     r2, =0xD0000000         /* r2 = SIO_BASE                       */
+    ldr     r2, [r2]                /* r2 = core_num (0 or 1)              */
+    lsls    r2, r2, #2              /* r2 = core_num * 4                   */
+    ldr     r1, =current_tcb        /* r1 = &current_tcb[0]                */
+    adds    r1, r1, r2              /* r1 = &current_tcb[core_num]         */
+    str     r0, [r1]                /* current_tcb[core_num] = next TCB    */
 
     /* ------------------------------------------------------------------ */
     /* Step 7 — Load the new thread's EXC_RETURN and saved SP.           */

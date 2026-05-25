@@ -43,7 +43,7 @@ The kernel modules under test (`mem.c`, `sync.c`, `fs.c`, `vfs.c`) are compiled 
 | `time_us_64()` | Returns real wall-clock time via `clock_gettime(CLOCK_MONOTONIC)` — this is required so the `PICOOS_LOCK_DEBUG` spinlock timeout test can actually expire |
 | Flash hardware (`XIP_BASE`, `flash_range_erase`, `flash_range_program`) | `HOST_TEST` guard in `arch.h` redirects these to `tests/fs/mock_flash.c`, which operates on a `malloc`-backed RAM buffer |
 | Multicore lockout | No-op stubs already in `arch.h` |
-| Scheduler (`sched_block`, `sched_unblock`, `sched_yield`, `current_tcb`) | Minimal stubs in `tests/sync/mock_sched.c`; the yield stub also fires a one-shot `mock_yield_hook` callback used by deadlock tests |
+| Scheduler (`sched_block`, `sched_unblock`, `sched_yield`, `current_tcb[2]`) | Minimal stubs in `tests/sync/mock_sched.c`; `current_tcb` is a 2-element array matching the SMP layout (`current_tcb[0]` is a static dummy `tcb_t` with `tid = 1`; `current_tcb[1]` is `NULL`); the yield stub also fires a one-shot `mock_yield_hook` callback used by deadlock tests |
 | `lock_deadlock_panic()` | Test stub in `mock_sched.c` captures panic arguments and `longjmp`s back to the test instead of halting |
 | Device layer (`dev_*`) | Call-counting stubs in `tests/vfs/mock_dev.c` |
 | Filesystem layer (`fs_*`) for VFS tests | Call-counting stubs in `tests/vfs/mock_fs.c` |
@@ -56,9 +56,9 @@ The kernel modules under test (`mem.c`, `sync.c`, `fs.c`, `vfs.c`) are compiled 
 
 **Source**: `tests/mem/test_mem.c`  
 **Module under test**: `src/kernel/mem.c`  
-**Dependencies**: none beyond standard C
+**Dependencies**: `src/kernel/sync.c` (heap spinlock), `tests/sync/mock_sched.c` (scheduler stubs)
 
-The boundary-tag, first-fit heap allocator is tested entirely without any mocking — `mem.c` has no hardware or scheduler dependencies.  Each test calls `kmem_init()` to reset the heap, and most capture the initial `kmem_stats()` values to verify the heap is completely restored after all allocations are freed.
+`mem.c` uses the SMP-safe heap spinlock from `sync.c`, which in turn needs scheduler stubs.  No hardware mocking is required beyond those stubs.  Each test calls `kmem_init()` to reset the heap, and most capture the initial `kmem_stats()` values to verify the heap is completely restored after all allocations are freed.
 
 | Test | What it verifies |
 |---|---|
@@ -86,7 +86,7 @@ The boundary-tag, first-fit heap allocator is tested entirely without any mockin
 **Mock**: `tests/sync/mock_sched.c`  
 **Compile definitions**: `PICOOS_LOCK_DEBUG=1`, `PICOOS_LOCK_TIMEOUT_MS=100`
 
-The mock provides `current_tcb` (a static dummy `tcb_t` with `tid = 1`), and stub implementations of `sched_block` (sets `THREAD_BLOCKED`), `sched_unblock` (sets `THREAD_READY`), and `sched_yield` (fires the `mock_yield_hook` callback once if set, then clears it).
+The mock provides `current_tcb[2]` — a 2-element array matching the SMP kernel layout, where `current_tcb[0]` points to a static dummy `tcb_t` with `tid = 1` and `current_tcb[1]` is `NULL` — and stub implementations of `sched_block` (sets `THREAD_BLOCKED`), `sched_unblock` (sets `THREAD_READY`), and `sched_yield` (fires the `mock_yield_hook` callback once if set, then clears it).
 
 The mock also provides `lock_deadlock_panic()`, which instead of halting captures the panic arguments into public globals (`mock_lock_panic_type`, `mock_lock_panic_wait_tid`, `mock_lock_panic_hold_tid`, …) and `longjmp`s back to the test's `setjmp` recovery point.
 
@@ -106,7 +106,7 @@ The mock also provides `lock_deadlock_panic()`, which instead of halting capture
 
 | Test | What it verifies |
 |---|---|
-| `mutex_init_state` | `owner_tid == -1`, `count == 0`, `waiters == NULL` after init |
+| `mutex_init_state` | `owner_tid == -1`, `count == 0`, `waiters == NULL`, `spin.lock == 0` after init |
 | `mutex_lock_when_free` | Lock a free mutex; `owner_tid` becomes `current_tcb->tid`; `count == 1` |
 | `mutex_unlock_clears_owner` | Unlock after lock; `owner_tid == -1`, `count == 0` |
 | `mutex_relock_after_unlock` | Lock → unlock → lock again sets `owner_tid` again |
@@ -138,7 +138,7 @@ The mock also provides `lock_deadlock_panic()`, which instead of halting capture
 
 | Test | What it verifies |
 |---|---|
-| `mqueue_init_state` | `count`, `head`, `tail` all 0; `msg_size` matches request; waiters NULL |
+| `mqueue_init_state` | `count`, `head`, `tail` all 0; `msg_size` matches request; `send_waiters` and `recv_waiters` NULL |
 | `mqueue_size_clamped_to_MQ_MSG_SIZE` | Requesting a size larger than `MQ_MSG_SIZE` clamps to `MQ_MSG_SIZE` |
 | `mqueue_send_recv_single_message` | One message round-trip; count goes 0→1→0; bytes match |
 | `mqueue_fifo_order_preserved` | Four messages received in the same order sent |

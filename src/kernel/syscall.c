@@ -104,12 +104,12 @@ int32_t syscall_dispatch(uint32_t num,
      * a0 = int exit_code
      * ------------------------------------------------------------------ */
     case SYS_EXIT: {
-        if (current_tcb != NULL) {
-            current_tcb->state = THREAD_ZOMBIE;
+        if (CURRENT_TCB != NULL) {
+            CURRENT_TCB->state = THREAD_ZOMBIE;
         }
         /* Update process exit code if it owns no more live threads. */
-        if (current_tcb != NULL) {
-            pcb_t *proc = task_find_process(current_tcb->pid);
+        if (CURRENT_TCB != NULL) {
+            pcb_t *proc = task_find_process(CURRENT_TCB->pid);
             if (proc != NULL) {
                 proc->exit_code = (int)a0;
                 /* Check whether all threads in the process are zombies. */
@@ -246,20 +246,20 @@ int32_t syscall_dispatch(uint32_t num,
      * SYS_GETPID — return the PID of the calling thread's process.
      * ------------------------------------------------------------------ */
     case SYS_GETPID: {
-        if (current_tcb == NULL) {
+        if (CURRENT_TCB == NULL) {
             return 0;
         }
-        return (int32_t)current_tcb->pid;
+        return (int32_t)CURRENT_TCB->pid;
     }
 
     /* ------------------------------------------------------------------
      * SYS_GETTID — return the TID of the calling thread.
      * ------------------------------------------------------------------ */
     case SYS_GETTID: {
-        if (current_tcb == NULL) {
+        if (CURRENT_TCB == NULL) {
             return 0;
         }
-        return (int32_t)current_tcb->tid;
+        return (int32_t)CURRENT_TCB->tid;
     }
 
     /* ------------------------------------------------------------------
@@ -298,7 +298,7 @@ int32_t syscall_dispatch(uint32_t num,
             return -1;
         }
         t->state = THREAD_ZOMBIE;
-        if (t != (tcb_t *)current_tcb) {
+        if (t != (tcb_t *)CURRENT_TCB) {
             sched_remove_thread(t);
             task_free_thread(t);
         }
