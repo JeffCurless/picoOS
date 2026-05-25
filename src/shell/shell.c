@@ -124,21 +124,56 @@ static const char *state_name(thread_state_t s)
     }
 }
 
+/* format_cpu_time — convert microseconds to a human-readable time string.
+ * Picks the largest unit where the value is >= 1, with one decimal place
+ * for all units above milliseconds. */
+static void format_cpu_time(uint64_t us, char *buf, size_t buf_size)
+{
+    uint64_t ms = us / 1000u;
+    if (ms < 1000u) {
+        snprintf(buf, buf_size, "%llums", (unsigned long long)ms);
+        return;
+    }
+    uint64_t t = us / 100000u;          /* tenths of a second */
+    if (t < 600u) {                     /* < 60 s */
+        snprintf(buf, buf_size, "%llu.%llus",
+                 (unsigned long long)(t / 10u), (unsigned long long)(t % 10u));
+        return;
+    }
+    t = us / 6000000u;                  /* tenths of a minute */
+    if (t < 600u) {                     /* < 60 min */
+        snprintf(buf, buf_size, "%llu.%llum",
+                 (unsigned long long)(t / 10u), (unsigned long long)(t % 10u));
+        return;
+    }
+    t = us / 360000000u;                /* tenths of an hour */
+    if (t < 240u) {                     /* < 24 h */
+        snprintf(buf, buf_size, "%llu.%lluh",
+                 (unsigned long long)(t / 10u), (unsigned long long)(t % 10u));
+        return;
+    }
+    t = us / 8640000000u;               /* tenths of a day */
+    snprintf(buf, buf_size, "%llu.%llud",
+             (unsigned long long)(t / 10u), (unsigned long long)(t % 10u));
+}
+
 static int cmd_threads(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    shell_println("TID  PID  PRI  STATE     CPU-ms  STACK   NAME            CANARY");
+    shell_println("TID  PID  PRI  STATE     Time    STACK   NAME            CANARY");
     shell_println("---  ---  ---  --------  ------  ------  ---------------  --------");
     for (int i = 0; i < MAX_THREADS; i++) {
         tcb_t *t = task_get_thread_slot(i);
         if (t == NULL) { continue; }
         uint32_t *canary_ptr = (uint32_t *)t->stack_base;
         const char *stack_str = (*canary_ptr == STACK_CANARY) ? "OK" : "OVERFLOW";
-        shell_print("%-4u %-4u %-4u %-9s %-7llu %-7u %-16s %s\r\n",
+        char time_buf[12];
+        format_cpu_time(t->cpu_time_us, time_buf, sizeof(time_buf));
+        shell_print("%-4u %-4u %-4u %-9s %-7s %-7u %-16s %s\r\n",
                     t->tid, t->pid, (unsigned)t->priority,
                     state_name(t->state),
-                    (unsigned long long)(t->cpu_time_us / 1000u),
+                    time_buf,
                     t->stack_size,
                     t->name,
                     stack_str);

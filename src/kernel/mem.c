@@ -13,6 +13,7 @@
  */
 
 #include "mem.h"
+#include "arch.h"   /* save_and_disable_interrupts / restore_interrupts */
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -80,6 +81,14 @@ void *kmalloc(size_t size)
     /* Round the requested size up to an 8-byte boundary. */
     uint32_t aligned_size = (uint32_t)ALIGN8(size);
 
+    /* Disable interrupts for the duration of the heap walk and mutation.
+     * kfree() is called from PendSV context (interrupts already off), so
+     * without this guard PendSV can preempt kmalloc mid-mutation and see
+     * a partially-modified free list. */
+    uint32_t irq_save = save_and_disable_interrupts();
+
+    void *result = NULL;
+
     /* First-fit search. */
     struct heap_block *blk = heap_head;
     while (blk != NULL) {
@@ -101,13 +110,14 @@ void *kmalloc(size_t size)
             }
 
             blk->free = false;
-            return (uint8_t *)blk + HEADER_SIZE;
+            result = (uint8_t *)blk + HEADER_SIZE;
+            break;
         }
         blk = blk->next;
     }
 
-    /* No suitable block found. */
-    return NULL;
+    restore_interrupts(irq_save);
+    return result;   /* NULL if no suitable block was found */
 }
 
 /* -------------------------------------------------------------------------
@@ -122,6 +132,11 @@ void kfree(void *ptr)
     /* Recover the block header. */
     struct heap_block *blk =
         (struct heap_block *)((uint8_t *)ptr - HEADER_SIZE);
+
+    /* Disable interrupts for the same reason as kmalloc: the free list
+     * walk and coalescing must be atomic with respect to PendSV.  When
+     * called from PendSV itself (interrupts already off) this is a no-op. */
+    uint32_t irq_save = save_and_disable_interrupts();
 
     blk->free = true;
 
@@ -145,6 +160,8 @@ void kfree(void *ptr)
         prev->size += (uint32_t)HEADER_SIZE + blk->size;
         prev->next  = blk->next;
     }
+
+    restore_interrupts(irq_save);
 }
 
 /* -------------------------------------------------------------------------
@@ -155,6 +172,8 @@ void kmem_stats(uint32_t *used, uint32_t *free_bytes, uint32_t *largest)
     uint32_t total_used    = 0;
     uint32_t total_free    = 0;
     uint32_t largest_free  = 0;
+
+    uint32_t irq_save = save_and_disable_interrupts();
 
     struct heap_block *blk = heap_head;
     while (blk != NULL) {
@@ -169,6 +188,8 @@ void kmem_stats(uint32_t *used, uint32_t *free_bytes, uint32_t *largest)
         }
         blk = blk->next;
     }
+
+    restore_interrupts(irq_save);
 
     if (used        != NULL) { *used        = total_used;   }
     if (free_bytes  != NULL) { *free_bytes  = total_free;   }
