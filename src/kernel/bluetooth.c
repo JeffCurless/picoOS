@@ -77,6 +77,11 @@ static void extract_ble_adv_data(const uint8_t *ad_data, uint8_t ad_len,
         const uint8_t *d    = ad_iterator_get_data(&ctx);
         if (d == NULL || dlen == 0) { ad_iterator_next(&ctx); continue; }
         switch (type) {
+        case 0x02u: /* Incomplete List of 16-bit Service Class UUIDs */
+        case 0x03u: /* Complete List of 16-bit Service Class UUIDs   */
+            if (dlen >= 2 && dev->service_uuid == BT_SERVICE_NONE)
+                dev->service_uuid = (uint16_t)((uint16_t)d[1] << 8 | d[0]);
+            break;
         case 0x08u: /* Shortened Local Name */
         case 0x09u: /* Complete Local Name */
             if (dev->name[0] == '\0') {
@@ -136,6 +141,7 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
         g_scan[idx].tx_power        = BT_TX_POWER_UNKNOWN;
         g_scan[idx].flags           = BT_FLAGS_NONE;
         g_scan[idx].company_id      = BT_COMPANY_NONE;
+        g_scan[idx].service_uuid    = BT_SERVICE_NONE;
 
         /* Request the human-readable name asynchronously. */
         gap_remote_name_request(
@@ -190,6 +196,7 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
         g_scan[idx].tx_power        = BT_TX_POWER_UNKNOWN;
         g_scan[idx].flags           = BT_FLAGS_NONE;
         g_scan[idx].company_id      = BT_COMPANY_NONE;
+        g_scan[idx].service_uuid    = BT_SERVICE_NONE;
 
         uint8_t       ad_len  = gap_event_advertising_report_get_data_length(packet);
         const uint8_t *ad_data = gap_event_advertising_report_get_data(packet);

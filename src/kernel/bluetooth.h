@@ -55,6 +55,7 @@ typedef enum {
 #define BT_TX_POWER_UNKNOWN  ((int8_t)  127)
 #define BT_FLAGS_NONE        ((uint8_t) 0xFFu)
 #define BT_COMPANY_NONE      ((uint16_t)0xFFFFu)
+#define BT_SERVICE_NONE      ((uint16_t)0x0000u)  /* 0x0000 is not a valid BT UUID */
 
 typedef struct {
     uint8_t       addr[BT_ADDR_LEN];
@@ -66,6 +67,7 @@ typedef struct {
     int8_t        tx_power;         /* TX Power Level dBm (AD 0x0A)            */
     uint8_t       flags;            /* AD Flags byte (AD 0x01)                 */
     uint16_t      company_id;       /* Manufacturer company ID (AD 0xFF)       */
+    uint16_t      service_uuid;     /* First 16-bit service UUID (AD 0x02/03)  */
 } bt_scan_result_t;
 
 void          bt_init(void);
