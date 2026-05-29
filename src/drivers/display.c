@@ -194,6 +194,25 @@ static uint8_t  bg_color      = COLOR_BLACK;
 static bool     initialized   = false;
 static uint32_t write_cursor  = 0u;
 
+/* Mutex protecting the framebuffer, dirty tracking, write_cursor, and the
+ * SPI bus (hardware_spi's spi_write_blocking is not thread-safe).
+ * Initialised in display_open() the first time it is called.
+ * display_take/give_lock skip locking before the scheduler is running
+ * (CURRENT_TCB == NULL) so the pre-scheduler splash in display_open() is safe. */
+#include "../kernel/sync.h"
+#include "../kernel/task.h"
+static kmutex_t display_mutex;
+
+static inline void display_take_lock(void)
+{
+    if (CURRENT_TCB != NULL) { kmutex_lock(&display_mutex); }
+}
+
+static inline void display_give_lock(void)
+{
+    if (CURRENT_TCB != NULL) { kmutex_unlock(&display_mutex); }
+}
+
 /* -------------------------------------------------------------------------
  * Dirty-row tracking
  *
@@ -541,6 +560,7 @@ static void draw_text_impl(int px, int py, const char *str,
 int display_open(void)
 {
     if (!initialized) {
+        kmutex_init(&display_mutex);
         display_hw_init();
         initialized = true;
 
@@ -577,6 +597,8 @@ int display_write(const uint8_t *buf, uint32_t len)
 {
     if (buf == NULL || len == 0u) { return -1; }
 
+    display_take_lock();
+
     uint32_t fb_size = DISP_WIDTH * DISP_HEIGHT;
     uint32_t written = 0u;
     uint32_t start   = write_cursor;
@@ -590,76 +612,93 @@ int display_write(const uint8_t *buf, uint32_t len)
         dirty_mark_row(start / DISP_WIDTH);
         dirty_mark_row((write_cursor - 1u) / DISP_WIDTH);
     }
+
+    display_give_lock();
     return (int)written;
 }
 
 int display_ioctl(uint32_t cmd, void *arg)
 {
+    display_take_lock();
+    int rc = -1;
+
     switch (cmd) {
     case IOCTL_DISP_CLEAR:
         memset(framebuffer, bg_color, sizeof(framebuffer));
         dirty_mark_all();
-        return 0;
+        rc = 0;
+        break;
     case IOCTL_DISP_FLUSH:
         display_flush_fb();
-        return 0;
-
+        rc = 0;
+        break;
     case IOCTL_DISP_SET_BG:
-        if (arg == NULL) { return -1; }
-        bg_color = *(uint8_t *)arg;
-        return 0;
-
+        if (arg != NULL) { bg_color = *(uint8_t *)arg; rc = 0; }
+        break;
     case IOCTL_DISP_DRAW_PIXEL: {
-        if (arg == NULL) { return -1; }
-        disp_pixel_arg_t *a = (disp_pixel_arg_t *)arg;
-        draw_pixel_impl(a->x, a->y, a->color);
-        return 0;
+        if (arg != NULL) {
+            disp_pixel_arg_t *a = (disp_pixel_arg_t *)arg;
+            draw_pixel_impl(a->x, a->y, a->color);
+            rc = 0;
+        }
+        break;
     }
     case IOCTL_DISP_DRAW_LINE: {
-        if (arg == NULL) { return -1; }
-        disp_line_arg_t *a = (disp_line_arg_t *)arg;
-        draw_line_impl(a->x0, a->y0, a->x1, a->y1, a->color);
-        return 0;
+        if (arg != NULL) {
+            disp_line_arg_t *a = (disp_line_arg_t *)arg;
+            draw_line_impl(a->x0, a->y0, a->x1, a->y1, a->color);
+            rc = 0;
+        }
+        break;
     }
     case IOCTL_DISP_DRAW_RECT: {
-        if (arg == NULL) { return -1; }
-        disp_rect_arg_t *a = (disp_rect_arg_t *)arg;
-        draw_rect_impl(a->x, a->y, a->w, a->h, a->color, a->filled != 0u);
-        return 0;
+        if (arg != NULL) {
+            disp_rect_arg_t *a = (disp_rect_arg_t *)arg;
+            draw_rect_impl(a->x, a->y, a->w, a->h, a->color, a->filled != 0u);
+            rc = 0;
+        }
+        break;
     }
     case IOCTL_DISP_DRAW_TEXT: {
-        if (arg == NULL) { return -1; }
-        disp_text_arg_t *a = (disp_text_arg_t *)arg;
-        draw_text_impl(a->x, a->y, a->str, a->color, a->bg,
-                       a->scale ? a->scale : 1u);
-        return 0;
+        if (arg != NULL) {
+            disp_text_arg_t *a = (disp_text_arg_t *)arg;
+            draw_text_impl(a->x, a->y, a->str, a->color, a->bg,
+                           a->scale ? a->scale : 1u);
+            rc = 0;
+        }
+        break;
     }
     case IOCTL_DISP_SET_BL:
-        if (arg == NULL) { return -1; }
-        backlight_set(*(uint8_t *)arg);
-        return 0;
-
+        if (arg != NULL) { backlight_set(*(uint8_t *)arg); rc = 0; }
+        break;
     case IOCTL_DISP_GET_BTNS: {
-        if (arg == NULL) { return -1; }
-        uint8_t btns = 0u;
-        /* Buttons are active-low — invert gpio_get() */
-        if (!gpio_get(DISP_PIN_BTN_A)) { btns |= DISP_BTN_A; }
-        if (!gpio_get(DISP_PIN_BTN_B)) { btns |= DISP_BTN_B; }
-        if (!gpio_get(DISP_PIN_BTN_X)) { btns |= DISP_BTN_X; }
-        if (!gpio_get(DISP_PIN_BTN_Y)) { btns |= DISP_BTN_Y; }
-        *(uint8_t *)arg = btns;
-        return 0;
+        if (arg != NULL) {
+            uint8_t btns = 0u;
+            /* Buttons are active-low — invert gpio_get() */
+            if (!gpio_get(DISP_PIN_BTN_A)) { btns |= DISP_BTN_A; }
+            if (!gpio_get(DISP_PIN_BTN_B)) { btns |= DISP_BTN_B; }
+            if (!gpio_get(DISP_PIN_BTN_X)) { btns |= DISP_BTN_X; }
+            if (!gpio_get(DISP_PIN_BTN_Y)) { btns |= DISP_BTN_Y; }
+            *(uint8_t *)arg = btns;
+            rc = 0;
+        }
+        break;
     }
     case IOCTL_DISP_GET_DIMS: {
-        if (arg == NULL) { return -1; }
-        disp_dims_arg_t *a = (disp_dims_arg_t *)arg;
-        a->width  = DISP_WIDTH;
-        a->height = DISP_HEIGHT;
-        return 0;
+        if (arg != NULL) {
+            disp_dims_arg_t *a = (disp_dims_arg_t *)arg;
+            a->width  = DISP_WIDTH;
+            a->height = DISP_HEIGHT;
+            rc = 0;
+        }
+        break;
     }
     default:
-        return -1;
+        break;
     }
+
+    display_give_lock();
+    return rc;
 }
 
 void display_close(void)
@@ -703,14 +742,15 @@ static int cmd_display(int argc, char **argv)
 
     if (strcmp(sub, "clear") == 0) {
         display_ioctl(IOCTL_DISP_CLEAR, NULL);
-        display_flush_fb();
+        display_ioctl(IOCTL_DISP_FLUSH, NULL);
 
     } else if (strcmp(sub, "fill") == 0) {
         if (argc < 3) { shell_println("usage: display fill RRGGBB"); return -1; }
         uint8_t color = parse_color(argv[2]);
-        memset(framebuffer, color, sizeof(framebuffer));
-        dirty_mark_all();
-        display_flush_fb();
+        /* Route through ioctl to hold the display mutex during framebuffer fill. */
+        display_ioctl(IOCTL_DISP_SET_BG, &color);
+        display_ioctl(IOCTL_DISP_CLEAR, NULL);
+        display_ioctl(IOCTL_DISP_FLUSH, NULL);
 
     } else if (strcmp(sub, "text") == 0) {
         if (argc < 5) { shell_println("usage: display text X Y STR"); return -1; }
@@ -722,7 +762,7 @@ static int cmd_display(int argc, char **argv)
         a.scale = 1u;
         a.str   = argv[4];
         display_ioctl(IOCTL_DISP_DRAW_TEXT, &a);
-        display_flush_fb();
+        display_ioctl(IOCTL_DISP_FLUSH, NULL);
 
     } else if (strcmp(sub, "line") == 0) {
         if (argc < 7) {
@@ -736,7 +776,7 @@ static int cmd_display(int argc, char **argv)
         a.y1    = (uint16_t)atoi(argv[5]);
         a.color = parse_color(argv[6]);
         display_ioctl(IOCTL_DISP_DRAW_LINE, &a);
-        display_flush_fb();
+        display_ioctl(IOCTL_DISP_FLUSH, NULL);
 
     } else if (strcmp(sub, "rect") == 0) {
         if (argc < 7) {
@@ -753,7 +793,7 @@ static int cmd_display(int argc, char **argv)
         a._pad1  = 0u;
         a._pad2  = 0u;
         display_ioctl(IOCTL_DISP_DRAW_RECT, &a);
-        display_flush_fb();
+        display_ioctl(IOCTL_DISP_FLUSH, NULL);
 
     } else if (strcmp(sub, "backlight") == 0) {
         if (argc < 3) { shell_println("usage: display backlight N"); return -1; }

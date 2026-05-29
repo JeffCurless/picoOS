@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------------------
 set(PICOOS_VERSION_MAJOR 0)
 set(PICOOS_VERSION_MINOR 3)
-set(PICOOS_VERSION_EDIT  0)
+set(PICOOS_VERSION_EDIT  1)
 
 message(STATUS "picoOS version        : ${PICOOS_VERSION_MAJOR}.${PICOOS_VERSION_MINOR}.${PICOOS_VERSION_EDIT}")
 
@@ -304,6 +304,7 @@ set(PICOOS_LIBS
     hardware_clocks
     pico_multicore
     pico_stdio_usb
+    pico_flash          # provides flash_safe_execute() — thread-safe flash erase/program
 )
 
 if(PICOOS_DISPLAY_ENABLE)
