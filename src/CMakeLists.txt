@@ -313,7 +313,7 @@ elseif(PICOOS_LED_ENABLE)
 endif()
 
 if(PICOOS_HAS_WIFI)
-    list(APPEND PICOOS_LIBS pico_cyw43_arch_lwip_poll)
+    list(APPEND PICOOS_LIBS pico_cyw43_arch_lwip_threadsafe_background)
 endif()
 
 if(PICOOS_HAS_BT)

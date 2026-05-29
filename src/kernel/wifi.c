@@ -53,7 +53,11 @@ int wifi_scan(void)
     g_scan_done  = false;
     g_state = WIFI_STATE_SCANNING;
     cyw43_wifi_scan_options_t opts = {0};
-    return cyw43_wifi_scan(&cyw43_state, &opts, NULL, scan_result_cb);
+    cyw43_arch_lwip_begin();
+    int rc = cyw43_wifi_scan(&cyw43_state, &opts, NULL, scan_result_cb);
+    cyw43_arch_lwip_end();
+    if (rc != 0) g_state = WIFI_STATE_DOWN;
+    return rc;
 }
 
 int wifi_connect(const char *ssid, const char *password)
@@ -68,10 +72,12 @@ int wifi_connect(const char *ssid, const char *password)
      * first join attempt even with correct credentials — a known transient
      * in the driver.  Retry up to 3 times with a short back-off. */
     for (int attempt = 1; attempt <= 3; attempt++) {
+        cyw43_arch_lwip_begin();
         int rc = cyw43_wifi_join(&cyw43_state,
                                  ssid_len, (const uint8_t *)ssid,
                                  key_len,  (const uint8_t *)password,
                                  auth, NULL, 0);
+        cyw43_arch_lwip_end();
         if (rc != 0) {
             g_state = WIFI_STATE_ERROR;
             return rc;
@@ -81,7 +87,9 @@ int wifi_connect(const char *ssid, const char *password)
          * 200 iterations × 50 ms = 10 s per attempt. */
         int status = CYW43_LINK_DOWN;
         for (int i = 0; i < 200; i++) {
+            cyw43_arch_lwip_begin();
             status = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
+            cyw43_arch_lwip_end();
             if (status == CYW43_LINK_UP) {
                 g_state = WIFI_STATE_UP;
                 return 0;
@@ -96,7 +104,9 @@ int wifi_connect(const char *ssid, const char *password)
                attempt, status, attempt < 3 ? " — retrying..." : "");
 
         /* Leave the network before re-joining to reset chip state. */
+        cyw43_arch_lwip_begin();
         cyw43_wifi_leave(&cyw43_state, CYW43_ITF_STA);
+        cyw43_arch_lwip_end();
         sys_sleep(500);
     }
 
@@ -106,7 +116,9 @@ int wifi_connect(const char *ssid, const char *password)
 
 int wifi_disconnect(void)
 {
+    cyw43_arch_lwip_begin();
     cyw43_wifi_leave(&cyw43_state, CYW43_ITF_STA);
+    cyw43_arch_lwip_end();
     g_state = WIFI_STATE_DOWN;
     return 0;
 }
@@ -143,18 +155,19 @@ static void wifi_poll_thread(void *arg)
     for (;;) {
         cyw43_arch_poll();
 
+        cyw43_arch_lwip_begin();
         /* If scan was active and is now done, update state. */
         if (g_state == WIFI_STATE_SCANNING &&
             !cyw43_wifi_scan_active(&cyw43_state)) {
             g_scan_done = true;
             g_state = WIFI_STATE_DOWN;
         }
-
         /* Detect unexpected link drop when connected. */
         if (g_state == WIFI_STATE_UP &&
             cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) != CYW43_LINK_UP) {
             g_state = WIFI_STATE_DOWN;
         }
+        cyw43_arch_lwip_end();
 
         sys_sleep(10);   /* 10 ms between polls */
     }
@@ -192,7 +205,13 @@ static int cmd_wifi(int argc, char **argv)
             return -1;
         }
         /* Wait for scan to complete (poll thread updates g_scan_done). */
-        while (!g_scan_done) { sys_sleep(50); }
+        for (int t = 0; !g_scan_done && t < 100; t++)
+            sys_sleep(100);
+        if (!g_scan_done) {
+            g_state = WIFI_STATE_DOWN;
+            shell_print("Scan timed out\r\n");
+            return -1;
+        }
         if (g_scan_count == 0) {
             shell_print("No networks found\r\n");
         } else {

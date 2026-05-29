@@ -18,28 +18,29 @@
 /*
  * lwipopts.h — lwIP configuration for picoOS
  *
- * Required by lwIP when building with pico_cyw43_arch_lwip_poll.
- * The polling arch sets PICO_CYW43_ARCH_POLL=1 and requires NO_SYS=1.
+ * Built with pico_cyw43_arch_lwip_threadsafe_background, which drives CYW43
+ * from a hardware alarm IRQ.  NO_SYS=1 still applies — it tells lwIP not to
+ * use its own OS abstraction layer, independent of the CYW43 arch variant.
  *
  * Memory budget note (RP2040, 264 KB SRAM):
  *   lwIP pool (MEM_SIZE)        4 KB
- *   PBUF pool (24 × ~556 B)    ~13 KB
+ *   PBUF pool (16 × ~556 B)    ~9 KB
  *   TCP/UDP state structs        ~2 KB
  *   ─────────────────────────────────
- *   Total lwIP overhead         ~19 KB  (within the ~102 KB headroom)
+ *   Total lwIP overhead         ~15 KB  (within the ~102 KB headroom)
  */
 
-/* ---- Required by pico_cyw43_arch_lwip_poll -------------------------------- */
-#define NO_SYS                      1   /* polling model, no RTOS             */
+/* ---- Required by lwIP ----------------------------------------------------- */
+#define NO_SYS                      1   /* lwIP runs without its own OS layer */
 #define LWIP_SOCKET                 0   /* no POSIX socket API                */
 #define LWIP_NETCONN                0   /* no netconn API                     */
 
 /* ---- Memory allocator ----------------------------------------------------- */
-/* MEM_LIBC_MALLOC=1 routes lwIP's internal allocator through the C library
- * malloc/free.  Compatible with the poll arch; saves the separate lwIP heap. */
-#define MEM_LIBC_MALLOC             1
+/* MEM_LIBC_MALLOC must be 0 with threadsafe_background: CYW43 callbacks run
+ * from an IRQ context where calling libc malloc is not safe. */
+#define MEM_LIBC_MALLOC             0
 #define MEM_ALIGNMENT               4
-#define MEM_SIZE                    4096    /* fallback pool if libc malloc off */
+#define MEM_SIZE                    4096    /* lwIP internal heap size          */
 
 /* ---- Packet buffers ------------------------------------------------------- */
 #define PBUF_POOL_SIZE              16      /* number of pre-allocated pbufs    */

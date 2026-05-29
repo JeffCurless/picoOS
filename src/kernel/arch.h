@@ -200,8 +200,10 @@ static inline uint32_t clock_get_hz(clock_handle_t h) { (void)h; return 12500000
 
 /* CYW43 stubs (only needed when building with PICOOS_WIFI_ENABLE) --------- */
 #ifdef PICOOS_WIFI_ENABLE
-static inline int  cyw43_arch_init(void)   { return 0; }
-static inline void cyw43_arch_deinit(void) {}
+static inline int  cyw43_arch_init(void)      { return 0; }
+static inline void cyw43_arch_deinit(void)    {}
+static inline void cyw43_arch_lwip_begin(void) {}
+static inline void cyw43_arch_lwip_end(void)   {}
 #endif
 
 /* Pico SDK error codes ---------------------------------------------------- */

@@ -166,10 +166,11 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
         return;
     }
 
-    /* Classic inquiry complete — stop BLE scan and signal done. */
+    /* Classic inquiry complete — signal done.  BLE scan is stopped by cmd_bt
+     * after it reads results, so the HCI disable command doesn't race with
+     * the next gap_inquiry_start() call. */
     if (event == GAP_EVENT_INQUIRY_COMPLETE) {
         g_classic_done = true;
-        gap_stop_scan();
         g_scan_done = true;
         if (g_state == BT_STATE_SCANNING) g_state = BT_STATE_IDLE;
         return;
@@ -209,18 +210,21 @@ bt_state_t bt_get_state(void) { return g_state; }
 
 int bt_scan(void)
 {
-    if (g_state == BT_STATE_OFF) return -1;
+    if (g_state == BT_STATE_OFF)      return -1;
+    if (g_state == BT_STATE_SCANNING) return -1;
+
     g_scan_count   = 0;
     g_scan_done    = false;
     g_classic_done = false;
     g_state        = BT_STATE_SCANNING;
 
+    cyw43_arch_lwip_begin();
     /* Classic inquiry: 5 × 1.28 s ≈ 6.4 s window. */
     gap_inquiry_start(5);
-
     /* BLE passive scan: interval 48 slots (30 ms), window 30 slots (18.75 ms). */
     gap_set_scan_parameters(0, 48, 30);
     gap_start_scan();
+    cyw43_arch_lwip_end();
 
     return 0;
 }
@@ -291,7 +295,16 @@ static int cmd_bt(int argc, char **argv)
             shell_print("Scan failed\r\n");
             return -1;
         }
-        while (!g_scan_done) { sys_sleep(100); }
+        for (int t = 0; !g_scan_done && t < 120; t++)
+            sys_sleep(100);
+        cyw43_arch_lwip_begin();
+        gap_stop_scan();
+        cyw43_arch_lwip_end();
+        if (!g_scan_done) {
+            g_state = BT_STATE_IDLE;
+            shell_print("Scan timed out\r\n");
+            return -1;
+        }
 
         if (g_scan_count == 0) {
             shell_print("No devices found\r\n");
