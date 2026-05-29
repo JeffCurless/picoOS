@@ -194,24 +194,6 @@ static uint8_t  bg_color      = COLOR_BLACK;
 static bool     initialized   = false;
 static uint32_t write_cursor  = 0u;
 
-/* Mutex protecting the framebuffer, dirty tracking, write_cursor, and the
- * SPI bus (hardware_spi's spi_write_blocking is not thread-safe).
- * Initialised in display_open() the first time it is called.
- * display_take/give_lock skip locking before the scheduler is running
- * (CURRENT_TCB == NULL) so the pre-scheduler splash in display_open() is safe. */
-#include "../kernel/sync.h"
-#include "../kernel/task.h"
-static kmutex_t display_mutex;
-
-static inline void display_take_lock(void)
-{
-    if (CURRENT_TCB != NULL) { kmutex_lock(&display_mutex); }
-}
-
-static inline void display_give_lock(void)
-{
-    if (CURRENT_TCB != NULL) { kmutex_unlock(&display_mutex); }
-}
 
 /* -------------------------------------------------------------------------
  * Dirty-row tracking
@@ -560,7 +542,6 @@ static void draw_text_impl(int px, int py, const char *str,
 int display_open(void)
 {
     if (!initialized) {
-        kmutex_init(&display_mutex);
         display_hw_init();
         initialized = true;
 
@@ -597,8 +578,6 @@ int display_write(const uint8_t *buf, uint32_t len)
 {
     if (buf == NULL || len == 0u) { return -1; }
 
-    display_take_lock();
-
     uint32_t fb_size = DISP_WIDTH * DISP_HEIGHT;
     uint32_t written = 0u;
     uint32_t start   = write_cursor;
@@ -612,14 +591,11 @@ int display_write(const uint8_t *buf, uint32_t len)
         dirty_mark_row(start / DISP_WIDTH);
         dirty_mark_row((write_cursor - 1u) / DISP_WIDTH);
     }
-
-    display_give_lock();
     return (int)written;
 }
 
 int display_ioctl(uint32_t cmd, void *arg)
 {
-    display_take_lock();
     int rc = -1;
 
     switch (cmd) {
@@ -697,7 +673,6 @@ int display_ioctl(uint32_t cmd, void *arg)
         break;
     }
 
-    display_give_lock();
     return rc;
 }
 

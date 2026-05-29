@@ -31,9 +31,23 @@
  * from two cores can race on the shared pool. */
 static spinlock_t event_pool_lock = {0};
 
+/* Shared RP2040 HW spinlock for ksemaphore_t, event_flags_t, and mqueue_t.
+ *
+ * Giving each object its own HW spinlock via spinlock_init() would exhaust
+ * the 16 user-available RP2040 spinlocks (IDs 16–31) whenever an application
+ * creates more than a handful of these primitives.
+ *
+ * Sharing one HW spinlock across all three types is conservative but safe:
+ * the critical sections are short (~10 instructions) and operations on
+ * different objects are still serialised, which is correct though not
+ * maximally parallel.  kmutex_t keeps its own per-instance spinlock because
+ * mutexes are expected to be fewer and longer-lived. */
+static spinlock_t shared_prim_lock = {0};
+
 void sync_init(void)
 {
     spinlock_init(&event_pool_lock);
+    spinlock_init(&shared_prim_lock);
 }
 
 /* Prevent the PICOOS_LOCK_DEBUG macro wrappers declared in sync.h from
@@ -333,7 +347,8 @@ void kmutex_lock_dbg(kmutex_t *m, const char *file, int line)
 
 void ksemaphore_init(ksemaphore_t *s, int32_t initial_count)
 {
-    spinlock_init(&s->spin);   /* claim RP2040 HW spinlock for SMP safety */
+    s->spin.hw   = shared_prim_lock.hw;   /* share pool HW spinlock — avoids exhaustion */
+    s->spin.lock = 0u;
     s->count   = initial_count;
     s->waiters = NULL;
 #ifdef PICOOS_LOCK_DEBUG
@@ -470,7 +485,8 @@ static void event_waiter_free(tcb_t *t)
 
 void event_flags_init(event_flags_t *e)
 {
-    spinlock_init(&e->spin);   /* claim RP2040 HW spinlock for SMP safety */
+    e->spin.hw   = shared_prim_lock.hw;   /* share pool HW spinlock — avoids exhaustion */
+    e->spin.lock = 0u;
     e->flags   = 0u;
     e->waiters = NULL;
 #ifdef PICOOS_LOCK_DEBUG
@@ -613,7 +629,8 @@ uint32_t event_flags_wait_dbg(event_flags_t *e, uint32_t mask, bool wait_for_all
 
 void mqueue_init(mqueue_t *q, uint32_t msg_size)
 {
-    spinlock_init(&q->spin);   /* claim RP2040 HW spinlock for SMP safety */
+    q->spin.hw   = shared_prim_lock.hw;   /* share pool HW spinlock — avoids exhaustion */
+    q->spin.lock = 0u;
     q->msg_size     = (msg_size <= MQ_MSG_SIZE) ? msg_size : MQ_MSG_SIZE;
     q->head         = 0u;
     q->tail         = 0u;
