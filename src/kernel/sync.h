@@ -69,6 +69,9 @@ typedef struct {
 
 /* Claim a free RP2040 hardware spinlock for SMP-safe use.  Must be called
  * once before the spinlock is first acquired on more than one core. */
+/* Initialise module-level sync state (call once from main before sched_start). */
+void sync_init(void);
+
 void spinlock_init(spinlock_t *s);
 
 /* IRQ-aware pair — saves and restores interrupt enable state. */

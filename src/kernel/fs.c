@@ -14,7 +14,8 @@
 
 #include "fs.h"
 #include "vfs.h"    /* VFS_O_* flags */
-#include "arch.h"   /* XIP_BASE, flash/multicore helpers */
+#include "arch.h"   /* XIP_BASE, flash_safe_execute, multicore helpers */
+#include "sync.h"   /* kmutex_t */
 
 #include <stdio.h>
 
@@ -63,6 +64,24 @@
  * Module state
  * ========================================================================= */
 
+/* Mutex protecting all shared filesystem state: open_fds[], superblock_ram,
+ * scratch_owner, and fs_buffer.  Initialized in fs_init().
+ *
+ * fs_take_lock / fs_give_lock skip locking before the scheduler is running
+ * (CURRENT_TCB == NULL) so that fs_init() and fs_format() can be called from
+ * main() before sched_start() without accessing scheduler state. */
+static kmutex_t fs_mutex;
+
+static inline void fs_take_lock(void)
+{
+    if (CURRENT_TCB != NULL) { kmutex_lock(&fs_mutex); }
+}
+
+static inline void fs_give_lock(void)
+{
+    if (CURRENT_TCB != NULL) { kmutex_unlock(&fs_mutex); }
+}
+
 /* In-RAM mirror of the on-flash superblock for fast metadata access. */
 static fs_superblock_t superblock_ram;
 
@@ -91,50 +110,49 @@ typedef struct {
 static fs_open_fd_t open_fds[FS_MAX_OPEN_FDS];
 
 /* =========================================================================
- * Flash write helpers
+ * Flash write helpers — using flash_safe_execute() (pico_flash library)
  *
- * Every call pairs multicore lockout with interrupt disable so that neither
- * Core 1 nor an ISR fetches from XIP during erase/program.
+ * flash_safe_execute() is the SDK-provided thread-safe wrapper for flash
+ * erase/program operations.  Internally it:
+ *   1. Pauses Core 1 via multicore_lockout_start_blocking() (Core 1 must
+ *      have called multicore_lockout_victim_init() at boot — see main.c).
+ *   2. Disables interrupts on the calling core.
+ *   3. Invokes the callback (which calls flash_range_erase/program).
+ *   4. Restores interrupts, then releases Core 1.
  *
- * Core 1 must have called multicore_lockout_victim_init() at boot time for
- * multicore_lockout_start_blocking() to return.  See core1_entry() in main.c.
+ * Using the SDK API rather than the manual lockout sequence ensures picoOS
+ * stays compatible as the SDK evolves and centralises the safety protocol
+ * in one well-tested place.
+ *
+ * UINT32_MAX as the timeout gives effectively "wait forever" behaviour,
+ * matching the original multicore_lockout_start_blocking() semantics.
  * ========================================================================= */
 
-/* flash_erase_sector — erase one FS_BLOCK_SIZE (4 KB) flash sector.
- *
- * Ordering is critical:
- *   1. multicore_lockout_start_blocking() halts Core 1 so it cannot fetch
- *      instructions from XIP while the flash bus is in use.
- *   2. save_and_disable_interrupts() prevents any ISR from running on Core 0
- *      (including SysTick / PendSV) between erase and the subsequent program.
- *   3. flash_range_erase() performs the sector erase; all bytes become 0xFF.
- *   4. Interrupts are restored, then Core 1 is released.
- *
- * flash_offset is the byte offset from the START of flash (not the XIP
- * address), and must be 4 KB-aligned. */
-static void flash_erase_sector(uint32_t flash_offset)
+typedef struct { uint32_t offset; }                         fs_erase_cb_t;
+typedef struct { uint32_t offset; const uint8_t *src; }     fs_program_cb_t;
+
+static void do_flash_erase(void *param)
 {
-    multicore_lockout_start_blocking();
-    uint32_t ints = save_and_disable_interrupts();
-    flash_range_erase(flash_offset, FS_BLOCK_SIZE);
-    restore_interrupts(ints);
-    multicore_lockout_end_blocking();
+    const fs_erase_cb_t *a = (const fs_erase_cb_t *)param;
+    flash_range_erase(a->offset, FS_BLOCK_SIZE);
 }
 
-/* flash_program_sector — program one FS_BLOCK_SIZE (4 KB) sector from src.
- *
- * The sector at flash_offset must already have been erased (all 0xFF) before
- * this call; flash cells can only be programmed from 1 → 0.  Uses the same
- * Core 1 lockout + interrupt-disable sequence as flash_erase_sector.
- * src must remain valid (in RAM) for the duration of the call; passing an
- * XIP-mapped pointer would fault because XIP is suspended during programming. */
+static void do_flash_program(void *param)
+{
+    const fs_program_cb_t *a = (const fs_program_cb_t *)param;
+    flash_range_program(a->offset, a->src, FS_BLOCK_SIZE);
+}
+
+static void flash_erase_sector(uint32_t flash_offset)
+{
+    fs_erase_cb_t args = { flash_offset };
+    flash_safe_execute(do_flash_erase, &args, UINT32_MAX);
+}
+
 static void flash_program_sector(uint32_t flash_offset, const uint8_t *src)
 {
-    multicore_lockout_start_blocking();
-    uint32_t ints = save_and_disable_interrupts();
-    flash_range_program(flash_offset, src, FS_BLOCK_SIZE);
-    restore_interrupts(ints);
-    multicore_lockout_end_blocking();
+    fs_program_cb_t args = { flash_offset, src };
+    flash_safe_execute(do_flash_program, &args, UINT32_MAX);
 }
 
 /* Write superblock_ram to the superblock flash sector.
@@ -221,6 +239,7 @@ static int alloc_open_fd(void)
  * ========================================================================= */
 void fs_init(void)
 {
+    kmutex_init(&fs_mutex);   /* must be first; subsequent ops may acquire it */
     memset(open_fds, 0, sizeof(open_fds));
     scratch_owner = -1;
 
@@ -246,6 +265,8 @@ void fs_init(void)
  * ========================================================================= */
 void fs_format(void)
 {
+    fs_take_lock();
+
     /* Close all open FDs first. */
     for (int i = 0; i < (int)FS_MAX_OPEN_FDS; i++) {
         open_fds[i].used  = false;
@@ -268,6 +289,7 @@ void fs_format(void)
     superblock_flush();
 
     printf("[fs] format complete\r\n");
+    fs_give_lock();
 }
 
 /* =========================================================================
@@ -278,6 +300,7 @@ int fs_open(const char *name, int mode)
     if (name == NULL) {
         return -1;
     }
+    fs_take_lock();
 
     /* Strip any leading '/' for comparison. */
     if (name[0] == '/') {
@@ -285,17 +308,18 @@ int fs_open(const char *name, int mode)
     }
 
     int file_idx = find_file(name);
+    int fd = -1;
 
     if (file_idx < 0) {
         /* File does not exist. */
         if (!(mode & VFS_O_CREAT)) {
-            return -1;
+            goto out;
         }
 
         /* Create a new entry. */
         file_idx = alloc_file_entry();
         if (file_idx < 0) {
-            return -1;   /* directory full */
+            goto out;   /* directory full */
         }
 
         fs_entry_t *entry  = &superblock_ram.files[file_idx];
@@ -323,7 +347,7 @@ int fs_open(const char *name, int mode)
     if (writing) {
         if (scratch_owner != -1) {
             /* Another file is already using the write buffer. */
-            return -1;
+            goto out;
         }
         scratch_owner = file_idx;
 
@@ -339,12 +363,12 @@ int fs_open(const char *name, int mode)
         }
     }
 
-    int fd = alloc_open_fd();
+    fd = alloc_open_fd();
     if (fd < 0) {
         if (writing) {
             scratch_owner = -1;
         }
-        return -1;
+        goto out;
     }
 
     /* When appending, start the write cursor at the current end of file so
@@ -360,6 +384,8 @@ int fs_open(const char *name, int mode)
     open_fds[fd].pos      = initial_pos;
     open_fds[fd].mode     = mode;
 
+out:
+    fs_give_lock();
     return fd;
 }
 
@@ -381,26 +407,29 @@ int fs_read(int fd, uint8_t *buf, uint32_t n)
         return 0;
     }
 
+    fs_take_lock();
+
     fs_open_fd_t *ofd   = &open_fds[fd];
     fs_entry_t   *entry = &superblock_ram.files[ofd->file_idx];
 
     uint32_t available = entry->size > ofd->pos ? entry->size - ofd->pos : 0u;
     uint32_t to_read   = n < available ? n : available;
 
-    if (to_read == 0u) {
-        return 0;   /* EOF */
+    int result = 0;
+    if (to_read > 0u) {
+        if ((int)ofd->file_idx == scratch_owner && ofd->dirty) {
+            /* File is being written — read from fs_buffer. */
+            memcpy(buf, fs_buffer + ofd->pos, to_read);
+        } else {
+            /* Read directly from XIP flash — no RAM copy required. */
+            memcpy(buf, FILE_XIP_PTR(ofd->file_idx, ofd->pos), to_read);
+        }
+        ofd->pos += to_read;
+        result = (int)to_read;
     }
 
-    if ((int)ofd->file_idx == scratch_owner && ofd->dirty) {
-        /* File is being written — read from fs_buffer. */
-        memcpy(buf, fs_buffer + ofd->pos, to_read);
-    } else {
-        /* Read directly from XIP flash — no RAM copy required. */
-        memcpy(buf, FILE_XIP_PTR(ofd->file_idx, ofd->pos), to_read);
-    }
-
-    ofd->pos += to_read;
-    return (int)to_read;
+    fs_give_lock();
+    return result;
 }
 
 /* =========================================================================
@@ -419,32 +448,33 @@ int fs_write(int fd, const uint8_t *buf, uint32_t n)
         return 0;
     }
 
+    fs_take_lock();
+
     fs_open_fd_t *ofd   = &open_fds[fd];
     fs_entry_t   *entry = &superblock_ram.files[ofd->file_idx];
 
+    int result = -1;
+
     /* Only write-mode fds can write. */
-    if (!(ofd->mode & VFS_O_WRONLY)) {
-        return -1;
+    if (ofd->mode & VFS_O_WRONLY) {
+        /* Clamp to the capacity of one flash sector. */
+        uint32_t capacity  = FS_MAX_FILE_DATA;
+        uint32_t remaining = capacity > ofd->pos ? capacity - ofd->pos : 0u;
+        uint32_t to_write  = n < remaining ? n : remaining;
+
+        if (to_write > 0u) {
+            memcpy(fs_buffer + ofd->pos, buf, to_write);
+            ofd->pos  += to_write;
+            ofd->dirty = true;
+            if (ofd->pos > entry->size) {
+                entry->size = ofd->pos;
+            }
+            result = (int)to_write;
+        }
     }
 
-    /* Clamp to the capacity of one flash sector. */
-    uint32_t capacity  = FS_MAX_FILE_DATA;
-    uint32_t remaining = capacity > ofd->pos ? capacity - ofd->pos : 0u;
-    uint32_t to_write  = n < remaining ? n : remaining;
-
-    if (to_write == 0u) {
-        return -1;   /* no space */
-    }
-
-    memcpy(fs_buffer + ofd->pos, buf, to_write);
-    ofd->pos += to_write;
-    ofd->dirty = true;
-
-    if (ofd->pos > entry->size) {
-        entry->size = ofd->pos;
-    }
-
-    return (int)to_write;
+    fs_give_lock();
+    return result;
 }
 
 /* =========================================================================
@@ -461,10 +491,12 @@ int fs_close(int fd)
         return -1;
     }
 
+    fs_take_lock();
+
     fs_open_fd_t *ofd = &open_fds[fd];
 
     if (ofd->dirty) {
-        uint32_t file_idx    = ofd->file_idx;
+        uint32_t file_idx     = ofd->file_idx;
         uint32_t flash_offset = FILE_FLASH_OFFSET(file_idx);
 
         /* Step 1 & 2: erase the data sector then program from fs_buffer. */
@@ -478,6 +510,8 @@ int fs_close(int fd)
 
     open_fds[fd].used  = false;
     open_fds[fd].dirty = false;
+
+    fs_give_lock();
     return 0;
 }
 
@@ -493,8 +527,11 @@ int fs_delete(const char *name)
         name++;
     }
 
+    fs_take_lock();
+
     int idx = find_file(name);
     if (idx < 0) {
+        fs_give_lock();
         return -1;
     }
 
@@ -521,6 +558,7 @@ int fs_delete(const char *name)
     /* Persist the updated superblock. */
     superblock_flush();
 
+    fs_give_lock();
     return 0;
 }
 
@@ -532,6 +570,9 @@ void fs_list(int (*callback)(const fs_entry_t *entry))
     if (callback == NULL) {
         return;
     }
+
+    fs_take_lock();
+
     for (uint32_t i = 0u; i < FS_MAX_FILES; i++) {
         if (superblock_ram.files[i].used) {
             int rc = callback(&superblock_ram.files[i]);
@@ -540,4 +581,6 @@ void fs_list(int (*callback)(const fs_entry_t *entry))
             }
         }
     }
+
+    fs_give_lock();
 }

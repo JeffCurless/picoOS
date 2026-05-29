@@ -64,6 +64,7 @@
 #include "hardware/watchdog.h"
 #include "pico/bootrom.h"
 #include "hardware/flash.h"
+#include "pico/flash.h"        /* flash_safe_execute() — thread-safe wrapper */
 #include "hardware/clocks.h"   /* clock_get_hz(clk_sys) */
 #include "pico/multicore.h"    /* multicore_lockout_start/end_blocking */
 #ifdef PICOOS_DISPLAY_ENABLE
@@ -207,7 +208,17 @@ static inline void cyw43_arch_lwip_end(void)   {}
 #endif
 
 /* Pico SDK error codes ---------------------------------------------------- */
+#define PICO_OK            0
 #define PICO_ERROR_TIMEOUT (-1)
+
+/* pico_flash stub — flash_safe_execute() for host builds ------------------ */
+static inline int flash_safe_execute(void (*func)(void *), void *param,
+                                     uint32_t timeout_ms)
+{
+    (void)timeout_ms;
+    func(param);
+    return 0;   /* PICO_OK */
+}
 
 /* Pico SDK GPIO ----------------------------------------------------------- */
 #define GPIO_IN  0u

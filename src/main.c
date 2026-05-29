@@ -19,6 +19,7 @@
 #include "kernel/task.h"
 #include "kernel/sched.h"
 #include "kernel/mem.h"
+#include "kernel/sync.h"
 #include "kernel/dev.h"
 #include "kernel/vfs.h"
 #include "kernel/fs.h"
@@ -182,6 +183,7 @@ int main(void)
      * 4. Kernel subsystem initialisation (order matters)
      * ------------------------------------------------------------------ */
     kmem_init();   /* heap must be ready before any kmalloc        */
+    sync_init();   /* claim HW spinlocks for event_waiter_pool     */
     task_init();   /* TCB/PCB pools, ID counters                   */
     dev_init();    /* register device descriptors                  */
     vfs_init();    /* mount /dev entries, open-fd table            */

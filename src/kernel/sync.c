@@ -18,6 +18,24 @@
 
 #include <string.h>
 
+/* =========================================================================
+ * Module-level sync_init
+ *
+ * Initialises module-level spinlocks that must be claimed before any
+ * sync primitive can be used from more than one core simultaneously.
+ * Call once from main() before sched_start().
+ * ========================================================================= */
+
+/* Protects event_waiter_pool[] across all event_flags_t objects.
+ * Without this, concurrent event_flags_set() calls on different objects
+ * from two cores can race on the shared pool. */
+static spinlock_t event_pool_lock = {0};
+
+void sync_init(void)
+{
+    spinlock_init(&event_pool_lock);
+}
+
 /* Prevent the PICOOS_LOCK_DEBUG macro wrappers declared in sync.h from
  * expanding function-definition tokens below.  External callers still use
  * the macro versions (via their own #include "sync.h"). */
@@ -315,9 +333,9 @@ void kmutex_lock_dbg(kmutex_t *m, const char *file, int line)
 
 void ksemaphore_init(ksemaphore_t *s, int32_t initial_count)
 {
-    s->spin.lock = 0u;
-    s->count     = initial_count;
-    s->waiters   = NULL;
+    spinlock_init(&s->spin);   /* claim RP2040 HW spinlock for SMP safety */
+    s->count   = initial_count;
+    s->waiters = NULL;
 #ifdef PICOOS_LOCK_DEBUG
     s->spin.acq_file = NULL;
     s->spin.acq_line = 0;
@@ -413,44 +431,48 @@ static event_waiter_t event_waiter_pool[MAX_EVENT_WAITERS];
 
 /* event_waiter_alloc — reserve a slot in the event waiter pool for thread t.
  *
- * Stores the wait mask and the wait-for-all flag alongside the TCB pointer so
- * that event_flags_set() can later check whether each blocked thread's
- * condition has been met.  Returns the pool index on success, or -1 if the
- * pool is full (which cannot happen in normal operation since the pool is
- * sized to MAX_THREADS). */
+ * event_pool_lock protects event_waiter_pool[] across all event_flags_t
+ * objects.  Without it, two cores holding different e->spin locks could race
+ * on the pool simultaneously.  IRQs are already disabled by the caller's
+ * spinlock_irq_acquire(&e->spin), so the nested acquire is a no-op for IRQ
+ * state and only serves to claim the HW spinlock.
+ *
+ * Returns the pool index on success, or -1 if the pool is full. */
 static int event_waiter_alloc(tcb_t *t, uint32_t mask, bool wait_for_all)
 {
+    uint32_t save = spinlock_irq_acquire(&event_pool_lock);
+    int idx = -1;
     for (int i = 0; i < MAX_EVENT_WAITERS; i++) {
         if (event_waiter_pool[i].thread == NULL) {
             event_waiter_pool[i].thread       = t;
             event_waiter_pool[i].mask         = mask;
             event_waiter_pool[i].wait_for_all = wait_for_all;
-            return i;
+            idx = i;
+            break;
         }
     }
-    return -1;
+    spinlock_irq_release(&event_pool_lock, save);
+    return idx;
 }
 
-/* event_waiter_free — release the pool slot held by thread t.
- *
- * Called after a thread's wait condition is satisfied (inside
- * event_flags_set()) or when a thread is forcibly unblocked.  Clears the
- * thread pointer so the slot becomes available for future waiters. */
+/* event_waiter_free — release the pool slot held by thread t. */
 static void event_waiter_free(tcb_t *t)
 {
+    uint32_t save = spinlock_irq_acquire(&event_pool_lock);
     for (int i = 0; i < MAX_EVENT_WAITERS; i++) {
         if (event_waiter_pool[i].thread == t) {
             event_waiter_pool[i].thread = NULL;
-            return;
+            break;
         }
     }
+    spinlock_irq_release(&event_pool_lock, save);
 }
 
 void event_flags_init(event_flags_t *e)
 {
-    e->spin.lock = 0u;
-    e->flags     = 0u;
-    e->waiters   = NULL;
+    spinlock_init(&e->spin);   /* claim RP2040 HW spinlock for SMP safety */
+    e->flags   = 0u;
+    e->waiters = NULL;
 #ifdef PICOOS_LOCK_DEBUG
     e->spin.acq_file = NULL;
     e->spin.acq_line = 0;
@@ -471,17 +493,21 @@ void event_flags_set(event_flags_t *e, uint32_t mask)
     while (cur != NULL) {
         tcb_t *next = cur->next;
 
-        /* Find this thread's wait parameters. */
+        /* Find this thread's wait parameters under the pool lock. */
         bool   satisfied    = false;
         bool   wait_for_all = false;
         uint32_t wait_mask  = 0u;
 
-        for (int i = 0; i < MAX_EVENT_WAITERS; i++) {
-            if (event_waiter_pool[i].thread == cur) {
-                wait_mask    = event_waiter_pool[i].mask;
-                wait_for_all = event_waiter_pool[i].wait_for_all;
-                break;
+        {
+            uint32_t pool_save = spinlock_irq_acquire(&event_pool_lock);
+            for (int i = 0; i < MAX_EVENT_WAITERS; i++) {
+                if (event_waiter_pool[i].thread == cur) {
+                    wait_mask    = event_waiter_pool[i].mask;
+                    wait_for_all = event_waiter_pool[i].wait_for_all;
+                    break;
+                }
             }
+            spinlock_irq_release(&event_pool_lock, pool_save);
         }
 
         if (wait_for_all) {
@@ -587,7 +613,7 @@ uint32_t event_flags_wait_dbg(event_flags_t *e, uint32_t mask, bool wait_for_all
 
 void mqueue_init(mqueue_t *q, uint32_t msg_size)
 {
-    q->spin.lock    = 0u;
+    spinlock_init(&q->spin);   /* claim RP2040 HW spinlock for SMP safety */
     q->msg_size     = (msg_size <= MQ_MSG_SIZE) ? msg_size : MQ_MSG_SIZE;
     q->head         = 0u;
     q->tail         = 0u;
