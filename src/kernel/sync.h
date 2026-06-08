@@ -72,6 +72,16 @@ typedef struct {
 /* Initialise module-level sync state (call once from main before sched_start). */
 void sync_init(void);
 
+/* sync_spinlock_report — diagnostics for the shell `info` command.
+ *
+ * Reports how many of the 8 scarce "claim-free" RP2040 HW spinlocks (IDs
+ * 24-31 — the only range spin_lock_claim_unused() can hand out) are claimed
+ * system-wide right now, and how many exist in that range in total.  See the
+ * "HW spinlock budget" comment at the top of sync.c for the full picture of
+ * how picoOS allocates its HW spinlocks and why this range is the one to
+ * watch — exhausting it halts the system silently (commit aa38e26). */
+void sync_spinlock_report(uint32_t *used, uint32_t *total);
+
 void spinlock_init(spinlock_t *s);
 
 /* IRQ-aware pair — saves and restores interrupt enable state. */

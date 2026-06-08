@@ -168,6 +168,14 @@ static inline void spin_unlock_unsafe(spin_lock_t *lock)
                                          { (void)lock; }
 static inline unsigned int spin_lock_claim_unused(int required)
                                          { (void)required; return 0; }
+static inline void     spin_lock_claim(unsigned int lock_num)
+                                         { (void)lock_num; }
+static inline bool     spin_lock_is_claimed(unsigned int lock_num)
+                                         { (void)lock_num; return false; }
+#define PICO_SPINLOCK_ID_OS1               14
+#define PICO_SPINLOCK_ID_OS2               15
+#define PICO_SPINLOCK_ID_CLAIM_FREE_FIRST  24
+#define PICO_SPINLOCK_ID_CLAIM_FREE_LAST   31
 
 /* Pico SDK flash ---------------------------------------------------------- */
 #ifdef HOST_TEST

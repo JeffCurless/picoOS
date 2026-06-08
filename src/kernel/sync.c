@@ -26,28 +26,131 @@
  * Call once from main() before sched_start().
  * ========================================================================= */
 
+/* -------------------------------------------------------------------------
+ * HW spinlock budget
+ *
+ * The RP2040 has 32 HW spinlock registers, but only 8 of them — IDs 24-31,
+ * the SDK's "claim-free" range — are reachable via spin_lock_claim_unused(),
+ * which is what spinlock_init() below calls.  IDs 0-13 are reserved for the
+ * SDK's own use; 16-23 are a separate "striped" pool that the SDK shares
+ * internally for mutex_init()/sem_init()/critical_section_init() (and hence
+ * for lwIP, BTstack, and async_context) — designed to tolerate contention,
+ * so it never exhausts.  The 8-slot claim-free range is the one that can.
+ *
+ * A prior revision gave every ksemaphore_t / event_flags_t / mqueue_t its own
+ * HW spinlock; creating more than a handful would make spin_lock_claim_unused
+ * (true) panic and halt the system silently (commit 9a4ac10, fixed by
+ * aa38e26).  That fix introduced one HW spinlock shared by those three types,
+ * but kmutex_t — the one primitive an application can freely instantiate,
+ * since "process" is a software abstraction with no MPU enforcement — still
+ * claimed one HW spinlock per instance.
+ *
+ * This revision generalises the fix: all four primitive types now draw their
+ * HW spinlock from prim_pool[] below, a small fixed-size striping pool — the
+ * same technique the SDK uses for its own internal striped range.  Spreading
+ * objects across PRIM_POOL_SIZE stripes (rather than funnelling everything
+ * through one shared lock) keeps cross-object contention low while bounding
+ * total HW spinlock consumption to a constant, no matter how many software
+ * locks the OS or an application creates.
+ *
+ * The pool's first two stripes claim PICO_SPINLOCK_ID_OS1 and _OS2 (IDs 14,
+ * 15) directly instead of going through spin_lock_claim_unused().  The SDK
+ * documents these as "reserved for exclusive use by an operating system...
+ * co-existing with the SDK," and a full-tree search confirms nothing in the
+ * SDK, CYW43, lwIP, or BTstack ever claims them — two HW spinlocks for free,
+ * without touching the scarce 8-slot claim-free range at all.
+ *
+ * picoOS's total HW spinlock claims, with this revision:
+ *   event_pool_lock, heap_lock (mem.c), sched_lock (sched.c) — one each,
+ *     dedicated, because they sit on the hottest paths in the kernel (every
+ *     kmalloc/kfree, every context switch); sharing a stripe with unrelated
+ *     objects there would be a real throughput loss.
+ *   prim_pool[0..PRIM_POOL_SIZE-1] — shared by kmutex_t, ksemaphore_t,
+ *     event_flags_t, and mqueue_t via prim_pool_assign().
+ * That's (3 + PRIM_POOL_SIZE) HW spinlocks total, of which only
+ * (1 + PRIM_POOL_SIZE) come from the contended claim-free range (event_pool_
+ * lock, heap_lock, sched_lock, plus all but the first two pool stripes) —
+ * see sync_spinlock_report() for a runtime view of how much headroom remains.
+ * ------------------------------------------------------------------------- */
+#define PRIM_POOL_SIZE 4
+
 /* Protects event_waiter_pool[] across all event_flags_t objects.
  * Without this, concurrent event_flags_set() calls on different objects
  * from two cores can race on the shared pool. */
 static spinlock_t event_pool_lock = {0};
 
-/* Shared RP2040 HW spinlock for ksemaphore_t, event_flags_t, and mqueue_t.
+/* Shared striping pool — see "HW spinlock budget" above.  Each entry wraps
+ * exactly one RP2040 HW spinlock; kmutex_t / ksemaphore_t / event_flags_t /
+ * mqueue_t alias their spin.hw to one of these via prim_pool_assign() instead
+ * of claiming a HW spinlock of their own. */
+static spinlock_t prim_pool[PRIM_POOL_SIZE];
+
+/* claim_spinlock_by_id — claim a *specific* RP2040 HW spinlock by ID instead
+ * of letting the SDK pick one from the contended claim-free range (24-31).
  *
- * Giving each object its own HW spinlock via spinlock_init() would exhaust
- * the 16 user-available RP2040 spinlocks (IDs 16–31) whenever an application
- * creates more than a handful of these primitives.
+ * Used only for the OS1/OS2 IDs that the SDK carves out for OS use and never
+ * touches itself.  spin_lock_claim() registers the claim in the SDK's claim
+ * bitmask purely for hygiene — spin_lock_claim_unused() never selects IDs
+ * outside 24-31 regardless, but registering the claim makes any future
+ * accidental double-claim of these IDs assert loudly instead of corrupting
+ * shared state quietly. */
+static void claim_spinlock_by_id(spinlock_t *s, uint lock_num)
+{
+    spin_lock_claim(lock_num);
+    s->hw   = spin_lock_init(lock_num);
+    s->lock = 0u;
+#ifdef PICOOS_LOCK_DEBUG
+    s->acq_file = NULL;
+    s->acq_line = 0;
+    s->acq_tid  = -1;
+#endif
+}
+
+/* prim_pool_assign — alias *s to one of the shared pool's HW spinlocks.
  *
- * Sharing one HW spinlock across all three types is conservative but safe:
- * the critical sections are short (~10 instructions) and operations on
- * different objects are still serialised, which is correct though not
- * maximally parallel.  kmutex_t keeps its own per-instance spinlock because
- * mutexes are expected to be fewer and longer-lived. */
-static spinlock_t shared_prim_lock = {0};
+ * The stripe is chosen from the object's own address rather than a shared
+ * counter: that spreads objects across stripes — better than funnelling
+ * everything through a single lock, as the original shared_prim_lock did —
+ * without needing any additional synchronised state (and hence no extra
+ * lock) to make the choice.  Must be called before *s is used from more than
+ * one core. */
+static void prim_pool_assign(spinlock_t *s, const void *owner)
+{
+    uintptr_t idx = ((uintptr_t)owner >> 4) % PRIM_POOL_SIZE;
+
+    s->hw   = prim_pool[idx].hw;
+    s->lock = 0u;
+#ifdef PICOOS_LOCK_DEBUG
+    s->acq_file = NULL;
+    s->acq_line = 0;
+    s->acq_tid  = -1;
+#endif
+}
+
+void sync_spinlock_report(uint32_t *used, uint32_t *total)
+{
+    uint32_t n = 0;
+
+    for (uint id = PICO_SPINLOCK_ID_CLAIM_FREE_FIRST; id <= PICO_SPINLOCK_ID_CLAIM_FREE_LAST; id++) {
+        if (spin_lock_is_claimed(id)) {
+            n++;
+        }
+    }
+    *used  = n;
+    *total = (uint32_t)(PICO_SPINLOCK_ID_CLAIM_FREE_LAST - PICO_SPINLOCK_ID_CLAIM_FREE_FIRST + 1);
+}
 
 void sync_init(void)
 {
+    /* Stripes 0 and 1 ride the free OS1/OS2 IDs; the rest draw from the
+     * regular claim-free range via spinlock_init(). */
+    claim_spinlock_by_id(&prim_pool[0], PICO_SPINLOCK_ID_OS1);
+    claim_spinlock_by_id(&prim_pool[1], PICO_SPINLOCK_ID_OS2);
+    for (uint32_t i = 2; i < PRIM_POOL_SIZE; i++) {
+        spinlock_init(&prim_pool[i]);
+    }
+
     spinlock_init(&event_pool_lock);
-    spinlock_init(&shared_prim_lock);
 }
 
 /* Prevent the PICOOS_LOCK_DEBUG macro wrappers declared in sync.h from
@@ -247,7 +350,7 @@ static tcb_t *waiter_dequeue(tcb_t **head)
 
 void kmutex_init(kmutex_t *m)
 {
-    spinlock_init(&m->spin);  /* claim an RP2040 HW spinlock for SMP safety */
+    prim_pool_assign(&m->spin, m);  /* shared pooled HW spinlock — see prim_pool */
     m->owner_tid  = -1;
     m->count      = 0u;
     m->waiters    = NULL;
@@ -347,15 +450,9 @@ void kmutex_lock_dbg(kmutex_t *m, const char *file, int line)
 
 void ksemaphore_init(ksemaphore_t *s, int32_t initial_count)
 {
-    s->spin.hw   = shared_prim_lock.hw;   /* share pool HW spinlock — avoids exhaustion */
-    s->spin.lock = 0u;
+    prim_pool_assign(&s->spin, s);   /* shared pooled HW spinlock — see prim_pool */
     s->count   = initial_count;
     s->waiters = NULL;
-#ifdef PICOOS_LOCK_DEBUG
-    s->spin.acq_file = NULL;
-    s->spin.acq_line = 0;
-    s->spin.acq_tid  = -1;
-#endif
 }
 
 void ksemaphore_wait(ksemaphore_t *s)
@@ -485,15 +582,9 @@ static void event_waiter_free(tcb_t *t)
 
 void event_flags_init(event_flags_t *e)
 {
-    e->spin.hw   = shared_prim_lock.hw;   /* share pool HW spinlock — avoids exhaustion */
-    e->spin.lock = 0u;
+    prim_pool_assign(&e->spin, e);   /* shared pooled HW spinlock — see prim_pool */
     e->flags   = 0u;
     e->waiters = NULL;
-#ifdef PICOOS_LOCK_DEBUG
-    e->spin.acq_file = NULL;
-    e->spin.acq_line = 0;
-    e->spin.acq_tid  = -1;
-#endif
 }
 
 void event_flags_set(event_flags_t *e, uint32_t mask)
@@ -629,8 +720,7 @@ uint32_t event_flags_wait_dbg(event_flags_t *e, uint32_t mask, bool wait_for_all
 
 void mqueue_init(mqueue_t *q, uint32_t msg_size)
 {
-    q->spin.hw   = shared_prim_lock.hw;   /* share pool HW spinlock — avoids exhaustion */
-    q->spin.lock = 0u;
+    prim_pool_assign(&q->spin, q);   /* shared pooled HW spinlock — see prim_pool */
     q->msg_size     = (msg_size <= MQ_MSG_SIZE) ? msg_size : MQ_MSG_SIZE;
     q->head         = 0u;
     q->tail         = 0u;
@@ -638,11 +728,6 @@ void mqueue_init(mqueue_t *q, uint32_t msg_size)
     q->send_waiters = NULL;
     q->recv_waiters = NULL;
     memset(q->buf, 0, sizeof(q->buf));
-#ifdef PICOOS_LOCK_DEBUG
-    q->spin.acq_file = NULL;
-    q->spin.acq_line = 0;
-    q->spin.acq_tid  = -1;
-#endif
 }
 
 void mqueue_send(mqueue_t *q, const void *msg)

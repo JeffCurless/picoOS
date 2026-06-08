@@ -19,6 +19,7 @@
 #include "../kernel/vfs.h"
 #include "../kernel/fs.h"
 #include "../kernel/syscall.h"
+#include "../kernel/sync.h"
 #include "../apps/app_table.h"
 
 #include "../kernel/arch.h"   /* SDK wrappers + host stubs */
@@ -549,6 +550,11 @@ static int cmd_info(int argc, char **argv)
     shell_print("Platform  : " PICOOS_PLATFORM_STR "\r\n");
     shell_print("SRAM      : " PICOOS_SRAM_STR "\r\n");
     shell_print("Flash     : " PICOOS_FLASH_STR "\r\n");
+    {
+        uint32_t spin_used, spin_total;
+        sync_spinlock_report(&spin_used, &spin_total);
+        shell_print("Spinlocks : %u/%u claim-free HW slots in use\r\n", spin_used, spin_total);
+    }
 #ifdef PICOOS_WIFI_ENABLE
     shell_print("WiFi      : CYW43 (enabled)\r\n");
 #endif
