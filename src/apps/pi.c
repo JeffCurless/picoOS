@@ -31,7 +31,7 @@
 #include "../kernel/syscall.h"
 #include "../kernel/task.h"
 #include "../kernel/mem.h"
-#include "../kernel/arch.h"
+#include "../kernel/dev.h"    /* DEV_TIMER, IOCTL_TIMER_GET_US */
 #include "../shell/shell.h"
 
 #include <stdint.h>
@@ -159,25 +159,45 @@ void pi_estimate(void *arg)
         0xDEAD1337u, 0xCAFEBABEu, 0x8BADF00Du, 0xFEEDFACEu,
     };
 
-    uint64_t t0 = time_us_64();
+    uint64_t t0 = 0u;
+    dev_ioctl(DEV_TIMER, IOCTL_TIMER_GET_US, &t0);
 
+    /* task_create_thread returns NULL when the thread pool or heap is
+     * exhausted.  Stop at the first failure: a missing worker would never
+     * signal pi_done, and waiting for it would hang this thread forever. */
+    uint32_t started = 0u;
     for (uint32_t i = 0u; i < PI_NUM_WORKERS; i++) {
         pi_args[i].seed     = seeds[i];
         pi_args[i].n        = PI_PER_WORKER;
         pi_args[i].hits     = 0u;
         pi_args[i].affinity = affinity[i];
-        task_create_thread(proc, "pi-worker", pi_worker, &pi_args[i],
-                           4u, DEFAULT_STACK_SIZE);
+        if (task_create_thread(proc, "pi-worker", pi_worker, &pi_args[i],
+                               4u, DEFAULT_STACK_SIZE) == NULL) {
+            shell_print("[pi] ERROR: could not create worker %u "
+                        "(out of threads or heap)\r\n", (unsigned)i);
+            break;
+        }
+        started++;
     }
 
-    /* Wait for all workers — each signals pi_done once on completion. */
-    for (uint32_t i = 0u; i < PI_NUM_WORKERS; i++) {
+    /* Wait for every worker that did start — each signals pi_done once on
+     * completion.  Even on failure we must wait: running workers still write
+     * to pi_args[] and signal pi_done, which a later run would re-initialise. */
+    for (uint32_t i = 0u; i < started; i++) {
         ksemaphore_wait(&pi_done);
         shell_print("[pi] %u/%u workers done\r\n",
-                    (unsigned)(i + 1u), (unsigned)PI_NUM_WORKERS);
+                    (unsigned)(i + 1u), (unsigned)started);
     }
 
-    uint64_t elapsed_us = time_us_64() - t0;
+    if (started < PI_NUM_WORKERS) {
+        shell_print("[pi] aborted: only %u of %u workers started\r\n",
+                    (unsigned)started, (unsigned)PI_NUM_WORKERS);
+        return;
+    }
+
+    uint64_t t1 = 0u;
+    dev_ioctl(DEV_TIMER, IOCTL_TIMER_GET_US, &t1);
+    uint64_t elapsed_us = t1 - t0;
 
     /* Sum hits and report per-worker breakdown. */
     uint32_t total_hits = 0u;

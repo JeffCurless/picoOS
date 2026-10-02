@@ -283,7 +283,7 @@ and pumps USB for ~500 ms before halting (so the message reaches the host termin
 
 | Mechanism | Covers |
 |---|---|
-| **Spinlock spin-loop timeout** | `spinlock_irq_acquire` and `spinlock_acquire` record a `time_us_64()` deadline before entering the spin loop and call `lock_deadlock_panic()` if it expires |
+| **Spinlock spin-loop timeout** | `spinlock_irq_acquire`'s software fallback (used when no hardware spinlock is attached, `hw == NULL`, as in host tests) records a `time_us_64()` deadline and calls `lock_deadlock_panic()` if it expires. The hardware-spinlock path on the target and `spinlock_acquire` spin without a timeout |
 | **SysTick BLOCKED-thread scanner** | Every 1 ms SysTick checks all `THREAD_BLOCKED` threads; if any has `blk_time_us` set and has waited longer than the threshold, it sets a victim pointer and pends PendSV |
 | **`sched_next_thread()` check** | Called from PendSV with PRIMASK set (same environment as `stack_overflow_panic`); reads the victim pointer and calls `lock_deadlock_panic()` before returning |
 

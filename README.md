@@ -196,6 +196,7 @@ picoOS/
 │   ├── application.md         How to write and register a new app
 │   ├── picoOS_API.md          Developer API reference
 │   ├── imperfections.md       Catalogue of deliberate teaching imperfections
+│   ├── locking.md             How the locking mechanisms work (HW spinlocks, striping, primitives)
 │   ├── studentwork.md         Student build guide (Fedora)
 │   ├── fedora-build.md        Full Fedora cross-compile setup guide
 │   ├── expandfilesystem.md    Filesystem sizing analysis and implementation notes
@@ -214,14 +215,16 @@ picoOS/
 │   │   ├── dev.[ch]        Device abstraction layer
 │   │   ├── vfs.[ch]        VFS routing (device files vs. filesystem)
 │   │   ├── fs.[ch]         Flash-native persistent filesystem
-│   │   ├── wifi.[ch]       CYW43 WiFi module — scan, connect, poll thread (pico_w/pico2_w)
+│   │   ├── wifi.[ch]       CYW43 WiFi module — scan, connect, MAC, multicast UDP, poll thread (pico_w/pico2_w)
 │   │   └── bluetooth.[ch]  CYW43 Bluetooth module — Classic + BLE scan, device-type detection (pico_w/pico2_w)
 │   ├── shell/
 │   │   └── shell.[ch]      USB CDC interactive shell
 │   ├── apps/
 │   │   ├── app_table.[ch]  Stable app registration ABI (app_entry_t, app_table extern)
 │   │   ├── demo.[ch]       Built-in producer/consumer/sensor demo threads + app_table[]
-│   │   └── pi.[ch]         Monte Carlo π estimation — SMP worker threads, run-time arg
+│   │   ├── pi.[ch]         Monte Carlo π estimation — SMP worker threads, run-time arg
+│   │   ├── cray_one.c      Multi-node WiFi multicast color-grid demo (pico_w/pico2_w + display)
+│   │   └── wifi_test.c     WiFi multicast test (not currently built)
 │   └── drivers/
 │       ├── display.[ch]    ST7789 240×135 driver — /dev/display (optional)
 │       └── led.[ch]        Pimoroni RGB LED driver — /dev/led (optional)

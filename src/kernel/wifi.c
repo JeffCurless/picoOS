@@ -22,6 +22,12 @@
 #include <string.h>
 #include <stdio.h>
 
+#ifdef __arm__
+#include "lwip/udp.h"
+#include "lwip/igmp.h"
+#include "lwip/pbuf.h"
+#endif
+
 /* ---- state --------------------------------------------------------------- */
 static volatile wifi_state_t  g_state      = WIFI_STATE_DOWN;
 static wifi_scan_result_t     g_scan[WIFI_MAX_SCAN_RESULTS];
@@ -147,6 +153,160 @@ const char *wifi_get_ip_str(void)
 #endif
     return buf;
 }
+
+int wifi_get_mac(uint8_t mac[6])
+{
+    if (mac == NULL) return WIFI_ERR_ARG;
+#ifdef __arm__
+    cyw43_arch_lwip_begin();
+    int rc = cyw43_wifi_get_mac(&cyw43_state, CYW43_ITF_STA, mac);
+    cyw43_arch_lwip_end();
+    return rc == 0 ? 0 : WIFI_ERR_ARG;
+#else
+    memset(mac, 0, 6);
+    return 0;
+#endif
+}
+
+/* ---- multicast UDP ------------------------------------------------------- */
+#ifdef __arm__
+typedef struct {
+    struct udp_pcb     *pcb;      /* NULL = slot free                  */
+    ip4_addr_t          group;
+    uint16_t            port;
+    wifi_mcast_rx_cb_t  cb;
+    void               *ctx;
+} mcast_sock_t;
+
+/* Guarded by the lwIP lock (cyw43_arch_lwip_begin/end). */
+static mcast_sock_t g_mcast[WIFI_MCAST_MAX_SOCKETS];
+
+/* lwIP receive hook — runs on the wifi-poll thread inside cyw43_arch_poll().
+ * Copies the pbuf chain into a flat NUL-terminated buffer and hands it to
+ * the application callback. */
+static void mcast_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
+                       const ip_addr_t *src, u16_t port)
+{
+    (void)pcb;
+    (void)port;
+    mcast_sock_t *ms = (mcast_sock_t *)arg;
+
+    if (p == NULL) return;
+
+    char buf[WIFI_MCAST_MAX_PAYLOAD + 1];
+    u16_t len = p->tot_len < WIFI_MCAST_MAX_PAYLOAD
+                    ? p->tot_len : (u16_t)WIFI_MCAST_MAX_PAYLOAD;
+    pbuf_copy_partial(p, buf, len, 0);
+    buf[len] = '\0';
+    pbuf_free(p);
+
+    if (ms->cb != NULL) {
+        ms->cb(buf, len, ipaddr_ntoa(src), ms->ctx);
+    }
+}
+
+int wifi_mcast_open(const char *group, uint16_t port,
+                    wifi_mcast_rx_cb_t cb, void *ctx)
+{
+    ip4_addr_t grp;
+    if (group == NULL || !ip4addr_aton(group, &grp)) return WIFI_ERR_ARG;
+    if (g_state != WIFI_STATE_UP) return WIFI_ERR_ARG;
+
+    cyw43_arch_lwip_begin();
+
+    int sock = -1;
+    for (int i = 0; i < WIFI_MCAST_MAX_SOCKETS; i++) {
+        if (g_mcast[i].pcb == NULL) { sock = i; break; }
+    }
+    if (sock < 0) {
+        cyw43_arch_lwip_end();
+        return WIFI_ERR_NOSOCK;
+    }
+
+    struct udp_pcb *pcb = udp_new();
+    if (pcb == NULL) {
+        cyw43_arch_lwip_end();
+        return WIFI_ERR_NOMEM;
+    }
+    if (udp_bind(pcb, IP_ADDR_ANY, port) != ERR_OK) {
+        udp_remove(pcb);
+        cyw43_arch_lwip_end();
+        return WIFI_ERR_BIND;
+    }
+    const ip4_addr_t *me = netif_ip4_addr(&cyw43_state.netif[CYW43_ITF_STA]);
+    if (igmp_joingroup(me, &grp) != ERR_OK) {
+        udp_remove(pcb);
+        cyw43_arch_lwip_end();
+        return WIFI_ERR_JOIN;
+    }
+
+    mcast_sock_t *ms = &g_mcast[sock];
+    ms->pcb   = pcb;
+    ms->group = grp;
+    ms->port  = port;
+    ms->cb    = cb;
+    ms->ctx   = ctx;
+    udp_recv(pcb, mcast_recv, ms);
+
+    cyw43_arch_lwip_end();
+    return sock;
+}
+
+int wifi_mcast_send(int sock, const void *data, uint16_t len)
+{
+    if (sock < 0 || sock >= WIFI_MCAST_MAX_SOCKETS || data == NULL) {
+        return WIFI_ERR_ARG;
+    }
+
+    cyw43_arch_lwip_begin();
+    mcast_sock_t *ms = &g_mcast[sock];
+    if (ms->pcb == NULL) {
+        cyw43_arch_lwip_end();
+        return WIFI_ERR_ARG;
+    }
+    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, len, PBUF_RAM);
+    if (p == NULL) {
+        cyw43_arch_lwip_end();
+        return WIFI_ERR_NOMEM;
+    }
+    memcpy(p->payload, data, len);
+    err_t err = udp_sendto(ms->pcb, p, (const ip_addr_t *)&ms->group, ms->port);
+    pbuf_free(p);
+    cyw43_arch_lwip_end();
+
+    return err == ERR_OK ? 0 : WIFI_ERR_SEND;
+}
+
+void wifi_mcast_close(int sock)
+{
+    if (sock < 0 || sock >= WIFI_MCAST_MAX_SOCKETS) return;
+
+    cyw43_arch_lwip_begin();
+    mcast_sock_t *ms = &g_mcast[sock];
+    if (ms->pcb != NULL) {
+        const ip4_addr_t *me = netif_ip4_addr(&cyw43_state.netif[CYW43_ITF_STA]);
+        igmp_leavegroup(me, &ms->group);
+        udp_remove(ms->pcb);
+        ms->pcb = NULL;
+        ms->cb  = NULL;
+        ms->ctx = NULL;
+    }
+    cyw43_arch_lwip_end();
+}
+#else  /* host / LSP build — no network stack */
+int wifi_mcast_open(const char *group, uint16_t port,
+                    wifi_mcast_rx_cb_t cb, void *ctx)
+{
+    (void)group; (void)port; (void)cb; (void)ctx;
+    return WIFI_ERR_ARG;
+}
+int wifi_mcast_send(int sock, const void *data, uint16_t len)
+{
+    (void)sock; (void)data; (void)len;
+    return WIFI_ERR_ARG;
+}
+void wifi_mcast_close(int sock) { (void)sock; }
+#endif /* __arm__ */
 
 /* ---- poll thread --------------------------------------------------------- */
 static void wifi_poll_thread(void *arg)

@@ -191,14 +191,26 @@ static int flash_write(const uint8_t *buf, uint32_t len)
     return -1;
 }
 
-/* flash_ioctl — stub.  Future commands might include:
+/* flash_ioctl — flash device control.
+ *
+ *   IOCTL_FLASH_GET_UID : copies the flash chip's FLASH_UID_SIZE-byte unique
+ *                         ID into (uint8_t *)arg.  The SDK reads the ID once
+ *                         at boot, so this is safe to call at any time.
+ *
+ * Future commands might include:
  *   IOCTL_FLASH_ERASE_SECTOR  — erase one 4 KB sector by offset
  *   IOCTL_FLASH_GET_INFO      — return flash size and page/sector geometry
- * TODO Phase 5: implement these commands with proper XIP lockout. */
+ * TODO Phase 5: implement these commands with proper XIP lockout.
+ * Returns 0 on success, -1 for unknown commands or NULL arg. */
 static int flash_ioctl(uint32_t cmd, void *arg)
 {
-    (void)cmd;
-    (void)arg;
+    if (cmd == IOCTL_FLASH_GET_UID) {
+        if (arg == NULL) { return -1; }
+        pico_unique_board_id_t uid;
+        pico_get_unique_board_id(&uid);
+        memcpy(arg, uid.id, FLASH_UID_SIZE);
+        return 0;
+    }
     return -1;
 }
 

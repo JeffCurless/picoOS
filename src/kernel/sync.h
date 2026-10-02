@@ -52,10 +52,18 @@
  *     Acquires and releases the lock without touching interrupt state.
  *     Use only when the caller already manages interrupts (e.g. IRQs are
  *     already disabled) or the critical section contains no scheduler calls.
+ *     An IRQ handler on the same core must never take a lock held this way,
+ *     or the core deadlocks.  Currently no kernel code uses this pair.
  *
- * Teaching note: a production SMP spinlock would use LDREX/STREX for the
- * test-and-set; here we rely on interrupt disable for atomicity, which is
- * sufficient for the RP2040 teaching workload.
+ * Atomicity: Cortex-M0+ has no LDREX/STREX, so cross-core atomicity comes
+ * from the RP2040's SIO hardware spinlock registers (`hw`).  Before a
+ * hardware lock is attached (hw == NULL, early single-core boot) the
+ * software `lock` word plus interrupt disable is used instead.
+ *
+ * Hardware spinlocks are scarce: only 8 (IDs 24-31) can be claimed on
+ * demand, and spinlock_init() panics when they run out.  Kernel code should
+ * claim one only for hot, dedicated locks (sched_lock, heap_lock).  See
+ * docs/locking.md for the full allocation picture.
  * ------------------------------------------------------------------------- */
 typedef struct {
     spin_lock_t      *hw;         /* RP2040 HW spinlock — SMP-safe; NULL until spinlock_init() */
@@ -67,8 +75,6 @@ typedef struct {
 #endif
 } spinlock_t;
 
-/* Claim a free RP2040 hardware spinlock for SMP-safe use.  Must be called
- * once before the spinlock is first acquired on more than one core. */
 /* Initialise module-level sync state (call once from main before sched_start). */
 void sync_init(void);
 
@@ -82,6 +88,9 @@ void sync_init(void);
  * watch — exhausting it halts the system silently (commit aa38e26). */
 void sync_spinlock_report(uint32_t *used, uint32_t *total);
 
+/* Claim a free RP2040 hardware spinlock for SMP-safe use.  Must be called
+ * once before the spinlock is first acquired on more than one core.  Each
+ * call permanently consumes one of the 8 claim-free hardware spinlocks. */
 void spinlock_init(spinlock_t *s);
 
 /* IRQ-aware pair — saves and restores interrupt enable state. */
@@ -117,11 +126,12 @@ void kmutex_unlock(kmutex_t *m);
 /* -------------------------------------------------------------------------
  * Semaphore
  *
- * Counting semaphore.  count < 0 means that (-count) threads are waiting.
+ * Counting semaphore.  count never goes below 0: a thread that finds
+ * count == 0 blocks on the waiter list without touching count.
  * ------------------------------------------------------------------------- */
 typedef struct {
     spinlock_t       spin;
-    volatile int32_t count;    /* current count; negative = threads waiting */
+    volatile int32_t count;    /* available units; always >= 0              */
     tcb_t           *waiters;  /* head of blocked-thread list               */
 } ksemaphore_t;
 

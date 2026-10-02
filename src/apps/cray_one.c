@@ -27,14 +27,6 @@
 #include <stdio.h>
 #include <stdint.h>
 
-#ifdef __arm__
-#include "lwip/udp.h"
-#include "lwip/igmp.h"
-#include "lwip/pbuf.h"
-#include "pico/cyw43_arch.h"
-#include "pico/unique_id.h"
-#endif
-
 /* -------------------------------------------------------------------------
  * Configuration
  * ------------------------------------------------------------------------- */
@@ -42,6 +34,7 @@
 #define CONFIG_BUFSZ         256
 #define CRED_MAXLEN          64
 
+#define MCAST_GROUP          "239.255.0.1"
 #define MCAST_PORT           4210u
 #define ANNOUNCE_INTERVAL_MS 2000u
 #define DISPLAY_INTERVAL_MS   100u
@@ -211,16 +204,12 @@ static event_flags_t g_cray_done;              /* thread completion signals     
 static volatile bool g_cray_running    = false;
 static volatile bool g_my_colors_dirty = false;
 
-#ifdef __arm__
-/* Survive a thread kill: store PCB and multicast state so the next run can
- * clean up before allocating new resources. */
-static struct udp_pcb *g_pcb         = NULL;
-static ip4_addr_t      g_mcast_group_addr;
-static bool            g_mcast_active = false;
+/* Survive a thread kill: keep the multicast socket handle so the next run
+ * can close it before opening a new one. */
+static int             g_sock        = -1;
 
 /* Set by mcast_recv_cb on any parse error; cleared + checked each TX cycle. */
 static volatile bool   g_net_error   = false;
-#endif
 
 /* -------------------------------------------------------------------------
  * draw_block — fill one grid cell with a solid color.
@@ -357,7 +346,7 @@ static void parse_config(const char *buf,
 }
 
 /* -------------------------------------------------------------------------
- * mcast_recv_cb — called by the wifi-poll thread during cyw43_arch_poll()
+ * mcast_recv_cb — called on the wifi-poll thread (see wifi_mcast_open())
  * when a UDP datagram arrives on MCAST_PORT.
  *
  * Expected message format: "<nodeid>:<color_hex>"
@@ -369,25 +358,12 @@ static void parse_config(const char *buf,
  *   3. Paints that node's blocks on the display.
  *   4. Flushes the framebuffer.
  * ------------------------------------------------------------------------- */
-#ifdef __arm__
-static void mcast_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
-                           const ip_addr_t *src, u16_t port)
+static void mcast_recv_cb(const char *msg, uint16_t len,
+                          const char *src_ip, void *ctx)
 {
-    (void)arg;
-    (void)pcb;
-    (void)src;
-    (void)port;
-
-    if (p == NULL) {
-        return;
-    }
-
-    char msg[MSG_MAX];
-    u16_t copy_len = p->tot_len < (u16_t)(sizeof(msg) - 1u)
-                     ? p->tot_len : (u16_t)(sizeof(msg) - 1u);
-    pbuf_copy_partial(p, msg, copy_len, 0);
-    msg[copy_len] = '\0';
-    pbuf_free(p);
+    (void)len;
+    (void)src_ip;
+    (void)ctx;
 
     /* Locate the ':' separator */
     const char *colon = msg;
@@ -430,8 +406,8 @@ static void mcast_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     if (sender == g_nodeid || sender < 0 || sender >= g_maxnodes) {
         if (sender != g_nodeid) {
             /* Out-of-range drop: helps diagnose MAXNODES misconfiguration. */
-            printf("[cray-one] RX dropped: sender=%d (nodeid=%d maxnodes=%d)\r\n",
-                   sender, g_nodeid, g_maxnodes);
+            shell_print("[cray-one] RX dropped: sender=%d (nodeid=%d maxnodes=%d)\r\n",
+                         sender, g_nodeid, g_maxnodes);
             g_net_error = true;
         }
         return;
@@ -443,8 +419,8 @@ static void mcast_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     for (int ci = 0; ci < rx_num; ci++)
         rcp += snprintf(rx_color_str + rcp, sizeof(rx_color_str) - (size_t)rcp,
                         ci ? ",%02X" : "%02X", (unsigned)rx_colors[ci]);
-    printf("[cray-one] #%lu RX node %d colors %s\r\n",
-           (unsigned long)count, sender, rx_color_str);
+    shell_print("[cray-one] #%lu RX node %d colors %s\r\n",
+                 (unsigned long)count, sender, rx_color_str);
 
     /* Enqueue for the main loop to paint — no display work in this callback. */
     rx_msg_t m;
@@ -452,18 +428,16 @@ static void mcast_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     m.num_colors = rx_num;
     memcpy(m.colors, rx_colors, (size_t)rx_num);
     if (!mqueue_try_send(&g_rx_mq, &m)) {
-        printf("[cray-one] RX queue full — drop node %d\r\n", sender);
+        shell_print("[cray-one] RX queue full — drop node %d\r\n", sender);
         g_net_error = true;
     }
 }
-#endif /* __arm__ */
 
 /* -------------------------------------------------------------------------
  * cray_tx_thread — picks new colors and broadcasts them every
  * ANNOUNCE_INTERVAL_MS.  Sets g_my_colors_dirty so cray_disp_thread repaints
  * the local node's blocks.  Signals g_cray_done bit 0x1 on exit.
  * ------------------------------------------------------------------------- */
-#ifdef __arm__
 static void cray_tx_thread(void *arg)
 {
     (void)arg;
@@ -491,33 +465,18 @@ static void cray_tx_thread(void *arg)
                             i ? ",%02X" : "%02X", (unsigned)g_my_colors[i]);
         size_t mlen = (size_t)pos;
 
-        cyw43_arch_lwip_begin();
-        struct pbuf *pb = pbuf_alloc(PBUF_TRANSPORT, (u16_t)mlen, PBUF_RAM);
-        if (pb != NULL) {
-            memcpy(pb->payload, msg, mlen);
-            err_t tx_err = udp_sendto(g_pcb, pb,
-                                      (const ip_addr_t *)&g_mcast_group_addr,
-                                      MCAST_PORT);
-            pbuf_free(pb);
-            if (tx_err == ERR_OK) {
-                tx_count++;
-                printf("[cray-one] TX #%lu %s\r\n",
-                       (unsigned long)tx_count, msg);
-            } else {
-                printf("[cray-one] TX #%lu sendto err %d — skipping\r\n",
-                       (unsigned long)(tx_count + 1u), (int)tx_err);
-#ifdef PICOOS_LED_ENABLE
-                { uint32_t c = 0xFF0000u; dev_ioctl(DEV_LED, IOCTL_LED_SET_RGB, &c); }
-#endif
-            }
+        int tx_err = wifi_mcast_send(g_sock, msg, (uint16_t)mlen);
+        if (tx_err == 0) {
+            tx_count++;
+            shell_print("[cray-one] TX #%lu %s\r\n",
+                        (unsigned long)tx_count, msg);
         } else {
-            printf("[cray-one] TX #%lu pbuf_alloc failed — skipping\r\n",
-                   (unsigned long)(tx_count + 1u));
+            shell_print("[cray-one] TX #%lu send err %d — skipping\r\n",
+                        (unsigned long)(tx_count + 1u), tx_err);
 #ifdef PICOOS_LED_ENABLE
             { uint32_t c = 0xFF0000u; dev_ioctl(DEV_LED, IOCTL_LED_SET_RGB, &c); }
 #endif
         }
-        cyw43_arch_lwip_end();
 
         sys_sleep(ANNOUNCE_INTERVAL_MS);
     }
@@ -560,7 +519,6 @@ static void cray_disp_thread(void *arg)
 
     event_flags_set(&g_cray_done, 0x2u);
 }
-#endif /* __arm__ */
 
 /* -------------------------------------------------------------------------
  * cray_one — application entry point.
@@ -574,7 +532,7 @@ static void cray_disp_thread(void *arg)
  * 5. Joins multicast group 239.255.0.1 / UDP port 4210
  * 6. Spawns cray_tx_thread (2 s TX cycle) and cray_disp_thread (50 ms
  *    display poll); waits for both to finish via event flags
- * 7. Cleans up PCB / display / LED
+ * 7. Cleans up socket / display / LED
  * ------------------------------------------------------------------------- */
 void cray_one(void *arg)
 {
@@ -683,26 +641,25 @@ void cray_one(void *arg)
     shell_print("[cray-one] Connected — IP: %s\r\n", wifi_get_ip_str());
 
     /* ---- 3. Seed RNG from flash unique ID (all boards) ---- */
-#ifdef __arm__
     {
         /* Every Pico board has an 8-byte unique ID burned into its QSPI
          * flash chip at manufacture.  Fold all 8 bytes into a 32-bit seed
          * via XOR + rotation so no byte is lost.  Works on Pico, Pico W,
          * Pico 2, and Pico 2W — no WiFi required. */
-        pico_unique_board_id_t uid;
-        pico_get_unique_board_id(&uid);
+        uint8_t uid[FLASH_UID_SIZE] = {0};
+        dev_ioctl(DEV_FLASH, IOCTL_FLASH_GET_UID, uid);
         uint32_t seed = 0;
-        for (int i = 0; i < PICO_UNIQUE_BOARD_ID_SIZE_BYTES; i++) {
+        for (int i = 0; i < (int)FLASH_UID_SIZE; i++) {
             seed = (seed << 5) | (seed >> 27);   /* rotate left 5 */
-            seed ^= uid.id[i];
+            seed ^= uid[i];
         }
         shell_print("[cray-one] Flash UID : %02X%02X%02X%02X%02X%02X%02X%02X\r\n",
-                    uid.id[0], uid.id[1], uid.id[2], uid.id[3],
-                    uid.id[4], uid.id[5], uid.id[6], uid.id[7]);
+                    uid[0], uid[1], uid[2], uid[3],
+                    uid[4], uid[5], uid[6], uid[7]);
 
         /* On Pico W also XOR in MAC bytes for extra entropy */
         uint8_t mac[6] = {0};
-        cyw43_wifi_get_mac(&cyw43_state, CYW43_ITF_STA, mac);
+        wifi_get_mac(mac);
         uint32_t mac_seed = ((uint32_t)mac[3] << 16)
                           | ((uint32_t)mac[4] <<  8)
                           |  (uint32_t)mac[5];
@@ -715,9 +672,6 @@ void cray_one(void *arg)
 
         rng_seed(seed ? seed : 1u);
     }
-#else
-    rng_seed((uint32_t)(nodeid + 1));   /* host build fallback */
-#endif
     for (int i = 0; i < g_maxnodes && i < (int)MAXNODES_MAX; i++)
         g_my_colors[i] = color_palette[rng_next() % PALETTE_SIZE];
     shell_print("[cray-one] Color[0]  : 0x%02X\r\n", (unsigned)g_my_colors[0]);
@@ -727,67 +681,28 @@ void cray_one(void *arg)
     shell_print("[cray-one] Grid ready (%u x %u, %u blocks)\r\n",
                 GRID_COLS, GRID_ROWS, GRID_TOTAL);
 
-#ifdef __arm__
     /* ---- 5. Set up multicast UDP ---- */
-    ip4_addr_t mcast_group;
-    IP4_ADDR(&mcast_group, 239, 255, 0, 1);
 
-    cyw43_arch_lwip_begin();
-
-    /* Release any PCB left behind by a previous run that was killed before
+    /* Release a socket left behind by a previous run that was killed before
      * reaching the normal cleanup path. */
-    if (g_pcb != NULL) {
-        if (g_mcast_active) {
-            const ip4_addr_t *prev =
-                netif_ip4_addr(&cyw43_state.netif[CYW43_ITF_STA]);
-            igmp_leavegroup(prev, &g_mcast_group_addr);
-            g_mcast_active = false;
-        }
-        udp_remove(g_pcb);
-        g_pcb = NULL;
+    if (g_sock >= 0) {
+        wifi_mcast_close(g_sock);
+        g_sock = -1;
     }
 
-    struct udp_pcb *pcb = udp_new();
-    if (pcb == NULL) {
-        cyw43_arch_lwip_end();
-        shell_print("[cray-one] ERROR: udp_new failed\r\n");
+    int sock = wifi_mcast_open(MCAST_GROUP, MCAST_PORT, mcast_recv_cb, NULL);
+    if (sock < 0) {
+        shell_print("[cray-one] ERROR: multicast setup failed (err %d)\r\n", sock);
 #ifdef PICOOS_LED_ENABLE
         { uint32_t c = 0xFF0000u; dev_ioctl(DEV_LED, IOCTL_LED_SET_RGB, &c); }
 #endif
         return;
     }
+    g_sock = sock;
 
-    if (udp_bind(pcb, IP_ADDR_ANY, MCAST_PORT) != ERR_OK) {
-        udp_remove(pcb);
-        cyw43_arch_lwip_end();
-        shell_print("[cray-one] ERROR: udp_bind failed\r\n");
-#ifdef PICOOS_LED_ENABLE
-        { uint32_t c = 0xFF0000u; dev_ioctl(DEV_LED, IOCTL_LED_SET_RGB, &c); }
-#endif
-        return;
-    }
-
-    const ip4_addr_t *my_addr =
-        netif_ip4_addr(&cyw43_state.netif[CYW43_ITF_STA]);
-    if (igmp_joingroup(my_addr, &mcast_group) != ERR_OK) {
-        udp_remove(pcb);
-        cyw43_arch_lwip_end();
-        shell_print("[cray-one] ERROR: igmp_joingroup failed\r\n");
-#ifdef PICOOS_LED_ENABLE
-        { uint32_t c = 0xFF0000u; dev_ioctl(DEV_LED, IOCTL_LED_SET_RGB, &c); }
-#endif
-        return;
-    }
-    udp_recv(pcb, mcast_recv_cb, NULL);
-    g_pcb = pcb;
-    g_mcast_group_addr = mcast_group;
-    g_mcast_active = true;
-
-    cyw43_arch_lwip_end();
-
-    shell_print("[cray-one] Joined 239.255.0.1 port %u — "
+    shell_print("[cray-one] Joined %s port %u — "
                 "announcing every %u ms\r\n",
-                MCAST_PORT, ANNOUNCE_INTERVAL_MS);
+                MCAST_GROUP, MCAST_PORT, ANNOUNCE_INTERVAL_MS);
 
     /* ---- 6. Spawn TX and display threads; wait for both to finish ---- */
     mqueue_init(&g_rx_mq, sizeof(rx_msg_t));
@@ -805,13 +720,8 @@ void cray_one(void *arg)
     event_flags_wait(&g_cray_done, 0x3u, true);
 
     /* ---- 7. Cleanup ---- */
-    cyw43_arch_lwip_begin();
-    my_addr = netif_ip4_addr(&cyw43_state.netif[CYW43_ITF_STA]);
-    igmp_leavegroup(my_addr, &mcast_group);
-    udp_remove(pcb);
-    g_pcb = NULL;
-    g_mcast_active = false;
-    cyw43_arch_lwip_end();
+    wifi_mcast_close(g_sock);
+    g_sock = -1;
 
     dev_close(DEV_DISPLAY);
 
@@ -821,7 +731,6 @@ void cray_one(void *arg)
 #endif
 
     shell_print("[cray-one] stopped\r\n");
-#endif /* __arm__ */
 }
 
 #endif /* PICOOS_WIFI_ENABLE && PICOOS_DISPLAY_ENABLE */

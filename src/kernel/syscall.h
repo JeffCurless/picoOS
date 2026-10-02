@@ -40,7 +40,8 @@ typedef enum {
     SYS_GETPID        = 13,
     SYS_GETTID        = 14,
     SYS_PS            = 15,
-    SYS_KILL          = 16
+    SYS_KILL          = 16,
+    SYS_GETCORE       = 17
 } syscall_num_t;
 
 /* -------------------------------------------------------------------------
@@ -87,6 +88,11 @@ static inline int sys_getpid(void)
 static inline int sys_gettid(void)
 {
     return (int)syscall_dispatch(SYS_GETTID, 0, 0, 0, 0);
+}
+
+static inline int sys_getcore(void)
+{
+    return (int)syscall_dispatch(SYS_GETCORE, 0, 0, 0, 0);
 }
 
 #endif /* KERNEL_SYSCALL_H */

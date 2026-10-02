@@ -306,6 +306,15 @@ int32_t syscall_dispatch(uint32_t num,
         return 0;
     }
 
+    /* ------------------------------------------------------------------
+     * SYS_GETCORE — return the core (0 or 1) the calling thread is
+     * running on right now.  A thread with THREAD_AFFINITY_ANY may get a
+     * different answer on its next call.
+     * ------------------------------------------------------------------ */
+    case SYS_GETCORE: {
+        return (int32_t)get_core_num();
+    }
+
     default:
         return -1;
     }

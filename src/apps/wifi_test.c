@@ -22,17 +22,11 @@
 #include <stddef.h>
 #include <stdio.h>
 
-#ifdef __arm__
-#include "lwip/udp.h"
-#include "lwip/igmp.h"
-#include "lwip/pbuf.h"
-#include "pico/cyw43_arch.h"
-#endif
-
 #define CONFIG_FILE           "config.txt"
 #define CONFIG_BUFSZ          256
 #define CRED_MAXLEN           64
 
+#define MCAST_GROUP           "239.255.0.1"
 #define MCAST_PORT            4210u
 #define ANNOUNCE_INTERVAL_MS  2000u
 
@@ -73,40 +67,26 @@ static void parse_config(const char *buf,
 
 /* ---- mcast_recv_cb -------------------------------------------------------
  *
- * Called from the wifi-poll thread during cyw43_arch_poll() whenever a UDP
+ * Called on the wifi-poll thread (see wifi_mcast_open()) whenever a UDP
  * datagram arrives on the multicast port.  Prints the sender's address and
  * the message payload.
  * ------------------------------------------------------------------------- */
-#ifdef __arm__
-static volatile uint32_t g_rx_count  = 0;
-static struct udp_pcb   *g_pcb       = NULL;
-static ip4_addr_t        g_mcast_group_addr;
-static bool              g_mcast_active = false;
+static volatile uint32_t g_rx_count = 0;
 
-static void mcast_recv_cb(void *arg, struct udp_pcb *pcb, struct pbuf *p,
-                           const ip_addr_t *src, u16_t port)
+/* Survive a thread kill: keep the socket handle so the next run can close
+ * it before opening a new one. */
+static int g_sock = -1;
+
+static void mcast_recv_cb(const char *msg, uint16_t len,
+                          const char *src_ip, void *ctx)
 {
-    (void)arg;
-    (void)pcb;
-    (void)port;
-
-    if (p == NULL) {
-        return;
-    }
-
-    char msg[64];
-    u16_t copy_len = p->tot_len < (u16_t)(sizeof(msg) - 1u)
-                         ? p->tot_len
-                         : (u16_t)(sizeof(msg) - 1u);
-    pbuf_copy_partial(p, msg, copy_len, 0);
-    msg[copy_len] = '\0';
-    pbuf_free(p);
+    (void)len;
+    (void)ctx;
 
     uint32_t count = ++g_rx_count;
-    printf("[wifi-test] #%lu RX from %s: %s\r\n",
-           (unsigned long)count, ipaddr_ntoa(src), msg);
+    shell_print("[wifi-test] #%lu RX from %s: %s\r\n",
+                (unsigned long)count, src_ip, msg);
 }
-#endif /* __arm__ */
 
 /* ---- wifi_test -----------------------------------------------------------
  *
@@ -169,94 +149,41 @@ void wifi_test(void *arg)
     /* ---- 4. Report IP ---- */
     shell_print("[wifi-test] Connected — IP: %s\r\n", wifi_get_ip_str());
 
-#ifdef __arm__
     /* ---- 5. Set up multicast UDP ---- */
-    ip4_addr_t mcast_group;
-    IP4_ADDR(&mcast_group, 239, 255, 0, 1);
 
-    cyw43_arch_lwip_begin();
-
-    /* Release any PCB left behind by a previous run that was killed before
+    /* Release a socket left behind by a previous run that was killed before
      * reaching the normal cleanup path. */
-    if (g_pcb != NULL) {
-        if (g_mcast_active) {
-            const ip4_addr_t *prev =
-                netif_ip4_addr(&cyw43_state.netif[CYW43_ITF_STA]);
-            igmp_leavegroup(prev, &g_mcast_group_addr);
-            g_mcast_active = false;
-        }
-        udp_remove(g_pcb);
-        g_pcb = NULL;
+    if (g_sock >= 0) {
+        wifi_mcast_close(g_sock);
+        g_sock = -1;
     }
 
-    struct udp_pcb *pcb = udp_new();
-    if (pcb == NULL) {
-        cyw43_arch_lwip_end();
-        shell_print("[wifi-test] ERROR: udp_new failed\r\n");
+    /* mcast_recv_cb is invoked on the wifi-poll thread whenever a datagram
+     * arrives. */
+    g_sock = wifi_mcast_open(MCAST_GROUP, MCAST_PORT, mcast_recv_cb, NULL);
+    if (g_sock < 0) {
+        shell_print("[wifi-test] ERROR: multicast setup failed (err %d)\r\n", g_sock);
+        g_sock = -1;
         return;
     }
 
-    /* Bind to any local address on MCAST_PORT so we receive incoming
-     * datagrams sent to the multicast group. */
-    if (udp_bind(pcb, IP_ADDR_ANY, MCAST_PORT) != ERR_OK) {
-        udp_remove(pcb);
-        cyw43_arch_lwip_end();
-        shell_print("[wifi-test] ERROR: udp_bind failed\r\n");
-        return;
-    }
-
-    /* Join the multicast group on the STA interface. */
-    const ip4_addr_t *my_addr =
-        netif_ip4_addr(&cyw43_state.netif[CYW43_ITF_STA]);
-    if (igmp_joingroup(my_addr, &mcast_group) != ERR_OK) {
-        udp_remove(pcb);
-        cyw43_arch_lwip_end();
-        shell_print("[wifi-test] ERROR: igmp_joingroup failed\r\n");
-        return;
-    }
-
-    /* mcast_recv_cb is invoked by the wifi-poll thread during
-     * cyw43_arch_poll() whenever a datagram arrives. */
-    udp_recv(pcb, mcast_recv_cb, NULL);
-    g_pcb = pcb;
-    g_mcast_group_addr = mcast_group;
-    g_mcast_active = true;
-
-    cyw43_arch_lwip_end();
-
-    shell_print("[wifi-test] Joined 239.255.0.1 port %u — "
+    shell_print("[wifi-test] Joined %s port %u — "
                 "advertising every %u ms\r\n",
-                MCAST_PORT, ANNOUNCE_INTERVAL_MS);
+                MCAST_GROUP, MCAST_PORT, ANNOUNCE_INTERVAL_MS);
 
     /* ---- 6. Announce / listen loop ---- */
     char msg[48];
     while (wifi_get_state() == WIFI_STATE_UP) {
         snprintf(msg, sizeof(msg), "picoOS@%s", wifi_get_ip_str());
-        size_t mlen = strlen(msg);
-
-        cyw43_arch_lwip_begin();
-        struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t)mlen, PBUF_RAM);
-        if (p != NULL) {
-            memcpy(p->payload, msg, mlen);
-            udp_sendto(pcb, p, (const ip_addr_t *)&mcast_group, MCAST_PORT);
-            pbuf_free(p);
-        }
-        cyw43_arch_lwip_end();
-
+        wifi_mcast_send(g_sock, msg, (uint16_t)strlen(msg));
         sys_sleep(ANNOUNCE_INTERVAL_MS);
     }
 
     /* ---- 7. Clean up ---- */
-    cyw43_arch_lwip_begin();
-    my_addr = netif_ip4_addr(&cyw43_state.netif[CYW43_ITF_STA]);
-    igmp_leavegroup(my_addr, &mcast_group);
-    udp_remove(pcb);
-    g_pcb = NULL;
-    g_mcast_active = false;
-    cyw43_arch_lwip_end();
+    wifi_mcast_close(g_sock);
+    g_sock = -1;
 
     shell_print("[wifi-test] Link lost — multicast stopped\r\n");
-#endif /* __arm__ */
 }
 
 #endif /* PICOOS_WIFI_ENABLE */

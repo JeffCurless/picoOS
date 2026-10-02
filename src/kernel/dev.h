@@ -42,6 +42,10 @@ typedef enum {
 #define IOCTL_GPIO_SET_DIR      0x0200u   /* arg: uint32_t pin | (dir << 16)     */
 #define IOCTL_GPIO_SET_VAL      0x0201u   /* arg: uint32_t pin | (val << 16)     */
 #define IOCTL_GPIO_GET_VAL      0x0202u   /* arg: uint32_t * — fills pin value   */
+#define IOCTL_FLASH_GET_UID     0x0500u   /* arg: uint8_t[FLASH_UID_SIZE] — fills ID */
+
+/* Size of the unique ID burned into every Pico's QSPI flash chip. */
+#define FLASH_UID_SIZE          8u
 
 #ifdef PICOOS_DISPLAY_ENABLE
 /* Display IOCTL commands (0x0300–0x030F) --------------------------------- */

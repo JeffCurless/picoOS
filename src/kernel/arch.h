@@ -65,6 +65,7 @@
 #include "pico/bootrom.h"
 #include "hardware/flash.h"
 #include "pico/flash.h"        /* flash_safe_execute() — thread-safe wrapper */
+#include "pico/unique_id.h"    /* pico_get_unique_board_id() */
 #include "hardware/clocks.h"   /* clock_get_hz(clk_sys) */
 #include "pico/multicore.h"    /* multicore_lockout_start/end_blocking */
 #ifdef PICOOS_DISPLAY_ENABLE
@@ -193,6 +194,14 @@ static inline void flash_range_erase(uint32_t offset, size_t count)
 static inline void flash_range_program(uint32_t offset, const uint8_t *data, size_t count)
     { (void)offset; (void)data; (void)count; }
 #endif
+
+/* pico_unique_id stub ----------------------------------------------------- */
+#define PICO_UNIQUE_BOARD_ID_SIZE_BYTES 8
+typedef struct { uint8_t id[PICO_UNIQUE_BOARD_ID_SIZE_BYTES]; } pico_unique_board_id_t;
+static inline void pico_get_unique_board_id(pico_unique_board_id_t *uid)
+{
+    for (int i = 0; i < PICO_UNIQUE_BOARD_ID_SIZE_BYTES; i++) { uid->id[i] = 0u; }
+}
 
 /* TinyUSB stub ------------------------------------------------------------ */
 static inline void tud_task(void) {}

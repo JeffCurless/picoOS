@@ -23,10 +23,25 @@ When the user types `run my_app` at the shell, the kernel:
 3. Adds the thread to the ready queue; the scheduler runs it preemptively.
 
 Applications interact with the kernel through the syscall wrappers in
-`kernel/syscall.h`, the synchronisation primitives in `kernel/sync.h`, and the
-filesystem in `kernel/fs.h`.  Because there is no MPU enforcement, they may
-also call Pico SDK functions directly, but preferring the kernel APIs keeps the
-code portable and teaches the right concepts.
+`kernel/syscall.h`, the synchronisation primitives in `kernel/sync.h`, the
+filesystem in `kernel/fs.h`, devices via `kernel/dev.h`, console output via
+`shell/shell.h`, and (on pico_w / pico2_w) networking via `kernel/wifi.h`.
+
+**Apps use picoOS APIs only.**  Because there is no MPU enforcement an app
+*could* call the Pico SDK, lwIP, or the CYW43 driver directly, but the built-in
+demos never do, and new apps should not either.  If an app needs something no
+picoOS API provides, add a small wrapper to the kernel first.  Common
+replacements:
+
+| Instead of (SDK / lwIP) | Use (picoOS) |
+|-------------------------|--------------|
+| `printf()` | `shell_print()` / `shell_println()` |
+| `sleep_ms()` | `sys_sleep()` |
+| `get_core_num()` | `sys_getcore()` |
+| `time_us_64()` | `dev_ioctl(DEV_TIMER, IOCTL_TIMER_GET_US, &us)` |
+| `pico_get_unique_board_id()` | `dev_ioctl(DEV_FLASH, IOCTL_FLASH_GET_UID, uid)` |
+| `cyw43_wifi_get_mac()` | `wifi_get_mac()` |
+| lwIP `udp_*` / `igmp_*` / `pbuf_*` | `wifi_mcast_open()` / `wifi_mcast_send()` / `wifi_mcast_close()` |
 
 ---
 
@@ -50,8 +65,8 @@ Minimal template — `src/apps/myapp.c`:
 ```c
 #include "../kernel/syscall.h"   /* sys_sleep, sys_yield, sys_exit */
 #include "../kernel/fs.h"        /* fs_open, fs_read, fs_write, fs_close */
+#include "../shell/shell.h"      /* shell_print */
 
-#include <stdio.h>               /* printf */
 #include <stdint.h>
 
 /* myapp — a minimal application that prints a counter every second. */
@@ -63,7 +78,7 @@ void myapp(void *arg)
 
     for (;;) {
         sys_sleep(1000);   /* sleep 1 second — yields CPU while waiting */
-        printf("[myapp] tick %u\r\n", count);
+        shell_print("[myapp] tick %u\r\n", count);
         count++;
     }
 }
@@ -295,7 +310,7 @@ mqueue_send(&my_queue, &out);
 /* Receiver: */
 my_msg_t in;
 mqueue_recv(&my_queue, &in);
-printf("got %u\r\n", in.value);
+shell_print("got %u\r\n", in.value);
 ```
 
 `msg_size` passed to `mqueue_init` must be ≤ `MQ_MSG_SIZE` (64 bytes).
@@ -320,14 +335,15 @@ if (fd >= 0) {
     int n = fs_read(fd, buf, sizeof(buf) - 1u);
     if (n > 0) {
         buf[n] = '\0';
-        printf("read: %s\r\n", (char *)buf);
+        shell_print("read: %s\r\n", (char *)buf);
     }
     fs_close(fd);
 }
 ```
 
 Files survive a reboot.  The filesystem is stored in external QSPI flash
-starting at 1 MB from the base address; up to 32 files, 4 KB each.
+starting at 1 MB from the base address; up to `FS_MAX_FILES` files (64 on
+RP2040, 127 on RP2350), 4 KB each.
 
 Only **one file at a time** can be open for writing.  Opening a second write
 fd returns -1.  Always close the write fd before opening another.
@@ -344,9 +360,9 @@ Open-mode flags (may be OR'd):
 
 ### Output
 
-Standard `printf` works out of the box — it routes to the USB CDC serial port
-via the Pico SDK's stdio layer.  Use `\r\n` line endings so the host terminal
-renders correctly.
+Use `shell_print()` (printf-style) or `shell_println()` from `shell/shell.h`.
+Output goes to the USB CDC serial port.  Use `\r\n` line endings so the host
+terminal renders correctly.
 
 ---
 
@@ -375,7 +391,7 @@ make the console unresponsive.
 
 Pass one of the constants from `kernel/task.h` as the stack size when the
 thread is created by `run`.  The `run` command always uses `DEFAULT_STACK_SIZE`
-(2 KB).  If your app uses deep call chains, large local arrays, or heavy printf
+(2 KB).  If your app uses deep call chains, large local arrays, or heavy shell_print
 formatting, it may need more stack — in that case launch it programmatically
 from `main.c` using `task_create_thread` with `DEEP_STACK_SIZE` (3 KB)
 instead.
@@ -383,7 +399,7 @@ instead.
 | Constant | Size | Suitable for |
 |----------|------|--------------|
 | `DEFAULT_STACK_SIZE` | 2 KB | Simple loops, small local variables |
-| `DEEP_STACK_SIZE` | 3 KB | Apps with deep call chains or heavy printf |
+| `DEEP_STACK_SIZE` | 3 KB | Apps with deep call chains or heavy shell_print |
 | `IDLE_STACK_SIZE` | 512 B | Idle thread only |
 
 A stack canary (`0xDEADBEEF`) is placed at the base of every stack.  Check it
@@ -415,7 +431,7 @@ appropriate when your app naturally decomposes into parallel workers.
 #include "../kernel/task.h"
 #include "../kernel/syscall.h"
 #include "../kernel/sync.h"
-#include <stdio.h>
+#include "../shell/shell.h"
 
 static ksemaphore_t work_ready;
 static uint32_t     shared_value;
@@ -425,7 +441,7 @@ static void worker_thread(void *arg)
     (void)arg;
     for (;;) {
         ksemaphore_wait(&work_ready);
-        printf("[worker] processing value %u\r\n", shared_value);
+        shell_print("[worker] processing value %u\r\n", shared_value);
     }
 }
 
@@ -437,9 +453,13 @@ void myapp_mt(void *arg)
 
     /* Create a worker thread inside this process. */
     pcb_t *proc = task_find_process((uint32_t)sys_getpid());
-    if (proc != NULL) {
+    if (proc == NULL ||
         task_create_thread(proc, "worker", worker_thread, NULL,
-                           5u, DEFAULT_STACK_SIZE);
+                           5u, DEFAULT_STACK_SIZE) == NULL) {
+        /* Out of thread slots or heap — never wait on a worker that
+         * does not exist (see src/apps/pi.c). */
+        shell_print("[myapp_mt] could not create worker\r\n");
+        return;
     }
 
     /* Main thread acts as the coordinator. */
@@ -479,4 +499,4 @@ following the same pattern used by `demo_ipc_init()` in `demo.c`.
 | Console freezes when app is running | App using `sleep_ms()` instead of `sys_sleep()` |
 | `mem` shows `*** OVERFLOWED ***` | Stack too small — switch to `SERVICE_STACK_SIZE` |
 | `fs_open` returns -1 on second write fd | Only one write fd allowed at a time — close it first |
-| `printf` output appears corrupted | Missing `\r` before `\n` — use `\r\n` throughout |
+| `shell_print` output appears corrupted | Missing `\r` before `\n` — use `\r\n` throughout |

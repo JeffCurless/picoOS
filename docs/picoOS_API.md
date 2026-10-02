@@ -88,6 +88,7 @@ Include: `src/kernel/syscall.h`
 | `sys_exit` | `void sys_exit(int code)` | Exit the current thread |
 | `sys_getpid` | `int sys_getpid(void)` | Return the current process ID |
 | `sys_gettid` | `int sys_gettid(void)` | Return the current thread ID |
+| `sys_getcore` | `int sys_getcore(void)` | Return the core (0 or 1) the caller is running on now |
 
 ### 3.2 Spawning Processes and Threads
 
@@ -537,6 +538,10 @@ int rc = wifi_connect("OpenNetwork", "");
 
 // Disconnect
 wifi_disconnect();
+
+// STA MAC address
+uint8_t mac[6];
+wifi_get_mac(mac);                               // 0 on success
 ```
 
 **`wifi_state_t`:**
@@ -571,6 +576,42 @@ typedef struct {
 
 Up to `WIFI_MAX_SCAN_RESULTS` (16) results are stored internally.  The poll thread
 manages `cyw43_arch_poll()` so applications do not need to call it directly.
+
+**Multicast UDP** — a socket-style wrapper so applications never call lwIP or the
+CYW43 driver directly.  The link must be up before `wifi_mcast_open()`.
+
+```c
+static void on_rx(const char *data, uint16_t len, const char *src_ip, void *ctx)
+{
+    // Runs on the wifi-poll thread: copy the data out and return quickly.
+    // data[len] == '\0'; payloads over WIFI_MCAST_MAX_PAYLOAD (128) are truncated.
+}
+
+int sock = wifi_mcast_open("239.255.0.1", 4210, on_rx, NULL);  // handle >= 0
+if (sock >= 0) {
+    wifi_mcast_send(sock, "hello", 5);                         // 0 on success
+    wifi_mcast_close(sock);
+}
+```
+
+| Function | Returns |
+|----------|---------|
+| `wifi_mcast_open(group, port, cb, ctx)` | Socket handle `>= 0`, or a `WIFI_ERR_*` code |
+| `wifi_mcast_send(sock, data, len)` | `0`, or a `WIFI_ERR_*` code |
+| `wifi_mcast_close(sock)` | — (invalid handles are ignored) |
+
+| Error | Value | Meaning |
+|-------|-------|---------|
+| `WIFI_ERR_ARG` | -1 | Bad argument or handle, or link not up |
+| `WIFI_ERR_NOSOCK` | -2 | All `WIFI_MCAST_MAX_SOCKETS` (2) in use |
+| `WIFI_ERR_NOMEM` | -3 | lwIP out of memory |
+| `WIFI_ERR_BIND` | -4 | Port already bound |
+| `WIFI_ERR_JOIN` | -5 | IGMP join failed |
+| `WIFI_ERR_SEND` | -6 | lwIP rejected the datagram |
+
+Sockets are not owned by a process.  An app that may be killed should keep its handle
+in a `static int` initialised to `-1` and close it on its next start (see
+`src/apps/cray_one.c`).
 
 ### 6.6 Bluetooth (requires `PICOOS_BT_ENABLE` — pico_w / pico2_w builds only)
 
@@ -655,6 +696,19 @@ typedef struct {
 Up to `BT_MAX_SCAN_RESULTS` (20) devices are stored.  Duplicates are suppressed by
 address.  Classic scan duration is fixed at 5 × 1.28 s ≈ 6.4 s; the BLE scan runs
 concurrently and stops when the Classic inquiry completes.
+
+---
+
+### 6.7 Flash
+
+```c
+uint8_t uid[FLASH_UID_SIZE];                        // 8 bytes
+dev_ioctl(DEV_FLASH, IOCTL_FLASH_GET_UID, uid);    // unique ID of the flash chip
+```
+
+| Command | Arg type | Description |
+|---------|----------|-------------|
+| `IOCTL_FLASH_GET_UID` (0x0500) | `uint8_t[FLASH_UID_SIZE]` | Fills the board's unique 8-byte flash ID |
 
 ---
 
@@ -803,6 +857,7 @@ heap, leaving ~32 KB for other allocations.
 | 14 | `SYS_GETTID` | `sys_gettid()` | Get thread ID |
 | 15 | `SYS_PS` | — | Process/thread list |
 | 16 | `SYS_KILL` | — | Kill thread by TID |
+| 17 | `SYS_GETCORE` | `sys_getcore()` | Get current core number |
 
 ### Thread Affinity
 
@@ -844,6 +899,7 @@ Set via `CURRENT_TCB->affinity = THREAD_AFFINITY_C1;` (etc.) at thread start.
 | `IOCTL_GPIO_SET_DIR` | 0x0200 | `DEV_GPIO` | `pin \| (dir << 16)` |
 | `IOCTL_GPIO_SET_VAL` | 0x0201 | `DEV_GPIO` | `pin \| (val << 16)` |
 | `IOCTL_GPIO_GET_VAL` | 0x0202 | `DEV_GPIO` | `uint32_t *` |
+| `IOCTL_FLASH_GET_UID` | 0x0500 | `DEV_FLASH` | `uint8_t[FLASH_UID_SIZE]` |
 | `IOCTL_DISP_CLEAR` | 0x0300 | `DEV_DISPLAY` | `NULL` |
 | `IOCTL_DISP_FLUSH` | 0x0301 | `DEV_DISPLAY` | `NULL` |
 | `IOCTL_DISP_SET_BG` | 0x0302 | `DEV_DISPLAY` | `uint8_t *` |

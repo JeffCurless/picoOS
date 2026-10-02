@@ -17,9 +17,7 @@
 #include "../kernel/sync.h"
 #include "../kernel/syscall.h"
 #include "../kernel/task.h"   /* CURRENT_TCB, THREAD_AFFINITY_* */
-#include "../kernel/arch.h"   /* get_core_num() */
 
-#include <stdio.h>
 #include <stdint.h>
 #include "../shell/shell.h"
 
@@ -78,7 +76,7 @@ void demo_producer(void *arg)
     (void)arg;
 
     CURRENT_TCB->affinity = THREAD_AFFINITY_C0;
-    shell_print("[producer] core %u: starting\r\n", (unsigned)get_core_num());
+    shell_print("[producer] core %u: starting\r\n", (unsigned)sys_getcore());
 
     demo_ipc_init();
 
@@ -95,7 +93,7 @@ void demo_producer(void *arg)
         ksemaphore_signal(&producer_sem);
 
         shell_print("[producer] core %u: sent %u\r\n",
-                    (unsigned)get_core_num(), (unsigned)(counter - 1u));
+                    (unsigned)sys_getcore(), (unsigned)(counter - 1u));
     }
 }
 
@@ -110,7 +108,7 @@ void demo_consumer(void *arg)
     (void)arg;
 
     CURRENT_TCB->affinity = THREAD_AFFINITY_C1;
-    shell_print("[consumer] core %u: starting\r\n", (unsigned)get_core_num());
+    shell_print("[consumer] core %u: starting\r\n", (unsigned)sys_getcore());
 
     /* Wait for the producer to initialise the shared IPC objects.  With SMP
      * both threads can start simultaneously; accessing an uninitialised
@@ -126,7 +124,7 @@ void demo_consumer(void *arg)
         mqueue_recv(&producer_queue, &msg);
 
         shell_print("[consumer] core %u: received %u\r\n",
-                    (unsigned)get_core_num(), (unsigned)msg.value);
+                    (unsigned)sys_getcore(), (unsigned)msg.value);
     }
 }
 
@@ -151,7 +149,7 @@ void demo_sensor(void *arg)
         uint32_t integer_part  = temp_tenths / 10u;
         uint32_t decimal_part  = temp_tenths % 10u;
 
-        printf("[sensor] temp=%u.%u C\r\n", integer_part, decimal_part);
+        shell_print("[sensor] temp=%u.%u C\r\n", integer_part, decimal_part);
 
         tick++;
     }

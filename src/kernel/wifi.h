@@ -45,6 +45,48 @@ int          wifi_get_scan_results(const wifi_scan_result_t **out_results, int *
 int          wifi_connect(const char *ssid, const char *password);
 int          wifi_disconnect(void);
 const char  *wifi_get_ip_str(void);  /* returns dotted-decimal IP, or "0.0.0.0" */
+int          wifi_get_mac(uint8_t mac[6]);  /* STA MAC address; 0 on success */
+
+/* --- Multicast UDP -------------------------------------------------------
+ *
+ * A minimal socket-style wrapper around lwIP so applications never touch
+ * lwIP or the CYW43 driver directly.  All calls take the lwIP lock
+ * internally.  The link must be up (wifi_connect() returned 0) before
+ * wifi_mcast_open().
+ *
+ * The receive callback runs on the wifi-poll thread, not the caller's
+ * thread.  Keep it short: copy the data out (e.g. mqueue_try_send) and
+ * return.  Do not call wifi_mcast_* or block from inside it.  `data` is
+ * NUL-terminated (data[len] == '\0'); payloads longer than
+ * WIFI_MCAST_MAX_PAYLOAD bytes are truncated.
+ *
+ * Sockets are not tied to a process: an app that may be killed should keep
+ * its handle in a static and close it on its next start.
+ * ------------------------------------------------------------------------- */
+#define WIFI_MCAST_MAX_SOCKETS  2
+#define WIFI_MCAST_MAX_PAYLOAD  128
+
+/* Error codes returned by wifi_mcast_* (all negative). */
+#define WIFI_ERR_ARG     (-1)   /* bad argument, bad handle, or link not up */
+#define WIFI_ERR_NOSOCK  (-2)   /* all WIFI_MCAST_MAX_SOCKETS in use        */
+#define WIFI_ERR_NOMEM   (-3)   /* lwIP out of memory                       */
+#define WIFI_ERR_BIND    (-4)   /* port already bound                       */
+#define WIFI_ERR_JOIN    (-5)   /* IGMP join failed                         */
+#define WIFI_ERR_SEND    (-6)   /* lwIP rejected the datagram               */
+
+typedef void (*wifi_mcast_rx_cb_t)(const char *data, uint16_t len,
+                                   const char *src_ip, void *ctx);
+
+/* Join `group` (dotted-decimal, e.g. "239.255.0.1") and listen on `port`.
+ * Returns a socket handle >= 0, or a WIFI_ERR_* code. */
+int  wifi_mcast_open(const char *group, uint16_t port,
+                     wifi_mcast_rx_cb_t cb, void *ctx);
+
+/* Send `len` bytes to the socket's group and port.  0 or WIFI_ERR_*. */
+int  wifi_mcast_send(int sock, const void *data, uint16_t len);
+
+/* Leave the group and free the socket.  Ignores invalid handles. */
+void wifi_mcast_close(int sock);
 
 /* --- Host / LSP stubs ---------------------------------------------------- */
 #ifndef __arm__

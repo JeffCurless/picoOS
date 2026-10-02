@@ -179,8 +179,9 @@ void sync_init(void)
  * Use only when the caller already controls interrupt state or the section
  * contains no scheduler calls.
  *
- * A production SMP spinlock would use LDREX/STREX; both versions here rely
- * on interrupt disable (or caller-guaranteed exclusion) for atomicity.
+ * Cortex-M0+ has no LDREX/STREX, so both versions get cross-core atomicity
+ * from the RP2040 SIO hardware spinlock in s->hw.  The software s->lock
+ * word is only a fallback for early single-core boot (hw == NULL).
  * ========================================================================= */
 
 /* spinlock_init — claim a free RP2040 hardware spinlock for SMP-safe use.
