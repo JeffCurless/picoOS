@@ -39,8 +39,15 @@ typedef struct {
 
 void         wifi_init(void);
 wifi_state_t wifi_get_state(void);
+/* Start a scan.  0, WIFI_ERR_BUSY if one is already running, or a CYW43
+ * error code. */
 int          wifi_scan(void);
 int          wifi_scan_is_done(void);
+/* Copy up to `max` scan results into the caller's `buf`.  Returns the number
+ * copied (0..max) or WIFI_ERR_ARG.  Safe to call while a scan is running. */
+int          wifi_copy_scan_results(wifi_scan_result_t *buf, int max);
+/* Deprecated: returns the live kernel buffer with no lock, so entries can be
+ * torn while a scan is running.  Use wifi_copy_scan_results() instead. */
 int          wifi_get_scan_results(const wifi_scan_result_t **out_results, int *out_count);
 int          wifi_connect(const char *ssid, const char *password);
 int          wifi_disconnect(void);
@@ -66,13 +73,15 @@ int          wifi_get_mac(uint8_t mac[6]);  /* STA MAC address; 0 on success */
 #define WIFI_MCAST_MAX_SOCKETS  2
 #define WIFI_MCAST_MAX_PAYLOAD  128
 
-/* Error codes returned by wifi_mcast_* (all negative). */
+/* Error codes returned by wifi_scan, wifi_copy_scan_results and wifi_mcast_*
+ * (all negative). */
 #define WIFI_ERR_ARG     (-1)   /* bad argument, bad handle, or link not up */
 #define WIFI_ERR_NOSOCK  (-2)   /* all WIFI_MCAST_MAX_SOCKETS in use        */
 #define WIFI_ERR_NOMEM   (-3)   /* lwIP out of memory                       */
 #define WIFI_ERR_BIND    (-4)   /* port already bound                       */
 #define WIFI_ERR_JOIN    (-5)   /* IGMP join failed                         */
 #define WIFI_ERR_SEND    (-6)   /* lwIP rejected the datagram               */
+#define WIFI_ERR_BUSY    (-7)   /* a scan is already running                */
 
 typedef void (*wifi_mcast_rx_cb_t)(const char *data, uint16_t len,
                                    const char *src_ip, void *ctx);

@@ -207,6 +207,38 @@ calling `read`/`write` does nothing useful.
 
 ---
 
+## 10. Scan-result pointer getters share a live buffer with an IRQ
+
+**Current behavior**: `wifi_get_scan_results()` and `bt_get_scan_results()`
+return a pointer to the kernel's `g_scan[]` array and its current count, with
+no lock and no copy. The array is written by the CYW43 async context, a
+low-priority IRQ on core 0. A reader on core 1 runs in parallel with it, and a
+reader on core 0 can be interrupted by it partway through a read. Either way
+the reader can see a half-written SSID or name, a Classic device name being
+filled in, or the buffer being reset by a new scan. Both getters are
+deprecated and kept as an example of this bug.
+
+**File:line**: `src/kernel/wifi.c` (`wifi_get_scan_results`),
+`src/kernel/bluetooth.c` (`bt_get_scan_results`)
+
+**Better implementation**: already provided as `wifi_copy_scan_results()` and
+`bt_copy_scan_results()`, which copy the buffer while holding the async
+context lock (`cyw43_arch_lwip_begin/end`). The writers also fill a slot
+before publishing it by bumping the count. Exercises for students:
+- Run `run scantest raw` and compare it with `run scantest`. Which checks catch
+  the race, and which kinds of tearing does publish-after-fill already prevent?
+- `cyw43_arch_lwip_begin()` is a recursive mutex owned by a *core*, not a
+  thread. Two picoOS threads on the same core do not exclude each other
+  through it. Find the places where that matters (lwIP calls from several
+  threads) and fix them with a picoOS mutex taken around the lwIP lock.
+
+**SRAM impact**: None. Callers need their own result buffer (704 B for WiFi,
+about 1 KB for BT), which should be `static`.
+
+**Difficulty**: Low
+
+---
+
 ## SRAM Impact Summary
 
 Thread stacks are `kmalloc`'d at creation and `kfree`'d on exit, replacing the

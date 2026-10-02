@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------------------
 set(PICOOS_VERSION_MAJOR 0)
 set(PICOOS_VERSION_MINOR 3)
-set(PICOOS_VERSION_EDIT  3)
+set(PICOOS_VERSION_EDIT  4)
 
 message(STATUS "picoOS version        : ${PICOOS_VERSION_MAJOR}.${PICOOS_VERSION_MINOR}.${PICOOS_VERSION_EDIT}")
 
@@ -23,6 +23,21 @@ option(PICOOS_LOCK_DEBUG "Enable lock deadlock detection (adds ~1 KB, for debug 
 if (PICOOS_LOCK_DEBUG)
     set(PICOOS_LOCK_TIMEOUT_MS "5000" CACHE STRING "Deadlock timeout in ms")
     message(STATUS "picoOS lock debug     : ON  (timeout ${PICOOS_LOCK_TIMEOUT_MS} ms)")
+endif()
+
+# ---------------------------------------------------------------------------
+# Scan-race fault injection (TEST ONLY — pico_w / pico2_w)
+#
+# When ON, the WiFi/BT scan callbacks go back to publishing a result slot
+# before filling it, poison the slot, and busy-wait in between.  Lock-free
+# readers ("run scantest raw") should then report errors, while the copy-out
+# API ("run scantest") should still pass.  Never ship firmware built with it.
+#   cmake -B build_picow_INJ -DPICO_BOARD=picow -DPICOOS_SCAN_RACE_INJECT=ON
+# Output names get an "_INJ" suffix so they cannot be mistaken for releases.
+# ---------------------------------------------------------------------------
+option(PICOOS_SCAN_RACE_INJECT "Test only: re-open the scan-buffer race for scantest" OFF)
+if (PICOOS_SCAN_RACE_INJECT)
+    message(STATUS "picoOS scan race inj. : ON  (TEST BUILD ONLY)")
 endif()
 
 # ---------------------------------------------------------------------------
@@ -189,6 +204,9 @@ endif()
 
 if(PICOOS_HAS_WIFI)
     list(APPEND PICOOS_SOURCES kernel/wifi.c)
+    if(PICOOS_INCLUDE_DEMO_APPS)
+        list(APPEND PICOOS_SOURCES apps/scantest.c)
+    endif()
     if(PICOOS_DISPLAY_ENABLE AND PICOOS_INCLUDE_DEMO_APPS)
         list(APPEND PICOOS_SOURCES apps/cray_one.c)
     endif()
@@ -225,6 +243,9 @@ elseif(PICOOS_DISPLAY_ENABLE)
     set(_disp_suffix "_D")
 else()
     set(_disp_suffix "")
+endif()
+if(PICOOS_SCAN_RACE_INJECT)
+    string(APPEND _disp_suffix "_INJ")
 endif()
 set(_output_name
     "${_board_clean}os${_disp_suffix}-v${PICOOS_VERSION_MAJOR}.${PICOOS_VERSION_MINOR}.${PICOOS_VERSION_EDIT}")
@@ -289,6 +310,10 @@ if(PICOOS_LOCK_DEBUG)
     target_compile_definitions(picoos PRIVATE
         PICOOS_LOCK_DEBUG=1
         PICOOS_LOCK_TIMEOUT_MS=${PICOOS_LOCK_TIMEOUT_MS})
+endif()
+
+if(PICOOS_SCAN_RACE_INJECT AND PICOOS_HAS_WIFI)
+    target_compile_definitions(picoos PRIVATE PICOOS_SCAN_RACE_INJECT=1)
 endif()
 
 # ---------------------------------------------------------------------------

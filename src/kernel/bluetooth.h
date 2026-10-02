@@ -74,6 +74,11 @@ void          bt_init(void);
 bt_state_t    bt_get_state(void);
 int           bt_scan(void);
 int           bt_scan_is_done(void);
+/* Copy up to `max` scan results into the caller's `buf`.  Returns the number
+ * copied (0..max) or -1 on a bad argument.  Safe to call while a scan runs. */
+int           bt_copy_scan_results(bt_scan_result_t *buf, int max);
+/* Deprecated: returns the live kernel buffer with no lock, so entries can be
+ * torn while a scan is running.  Use bt_copy_scan_results() instead. */
 int           bt_get_scan_results(const bt_scan_result_t **out, int *out_count);
 const char   *bt_devclass_str(bt_devclass_t cls);
 

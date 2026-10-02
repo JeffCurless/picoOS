@@ -14,6 +14,9 @@
 
 #include "demo.h"
 #include "pi.h"
+#ifdef PICOOS_WIFI_ENABLE
+#include "scantest.h"
+#endif
 #include "../kernel/sync.h"
 #include "../kernel/syscall.h"
 #include "../kernel/task.h"   /* CURRENT_TCB, THREAD_AFFINITY_* */
@@ -165,6 +168,9 @@ const app_entry_t app_table[] = {
     { "pi",        pi_estimate,   3u },
 #if defined(PICOOS_WIFI_ENABLE) && defined(PICOOS_DISPLAY_ENABLE)
     { "cray-one",  cray_one,      3u },
+#endif
+#ifdef PICOOS_WIFI_ENABLE
+    { "scantest",  scantest,      4u },
 #endif
 };
 

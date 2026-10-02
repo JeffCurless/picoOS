@@ -28,7 +28,14 @@
 #include "lwip/pbuf.h"
 #endif
 
-/* ---- state --------------------------------------------------------------- */
+/* ---- state --------------------------------------------------------------- *
+ * g_scan[] and g_scan_count are written by scan_result_cb(), which runs in the
+ * CYW43 async context: a low-priority IRQ on core 0 (this build links
+ * pico_cyw43_arch_lwip_threadsafe_background, so cyw43_arch_poll() does
+ * nothing).  Thread-side code touches them only while holding the async
+ * context lock (cyw43_arch_lwip_begin/end), which defers the callback until
+ * the lock is released.  The lock's owner is the core, not the thread, so it
+ * does not order two threads on the same core against each other. */
 static volatile wifi_state_t  g_state      = WIFI_STATE_DOWN;
 static wifi_scan_result_t     g_scan[WIFI_MAX_SCAN_RESULTS];
 static volatile int           g_scan_count = 0;
@@ -38,15 +45,30 @@ static volatile bool          g_scan_done  = false;
 static int scan_result_cb(void *env, const cyw43_ev_scan_result_t *r)
 {
     (void)env;
-    if (g_scan_count >= WIFI_MAX_SCAN_RESULTS) return 0;
-    int i = g_scan_count++;
+    int i = g_scan_count;
+    if (i >= WIFI_MAX_SCAN_RESULTS) return 0;
+
+    wifi_scan_result_t *e = &g_scan[i];
+#ifdef PICOOS_SCAN_RACE_INJECT
+    /* TEST ONLY: the old bug, widened.  Publish the slot, poison it
+     * (unterminated SSID, channel 255), and hold it there for a while. */
+    g_scan_count = i + 1;
+    memset(e, 0xFF, sizeof(*e));
+    busy_wait_us_32(50);
+#endif
+
+    /* Fill the slot first, then publish it by bumping the count. */
     int len = r->ssid_len < 32 ? r->ssid_len : 32;
-    memcpy(g_scan[i].ssid, r->ssid, len);
-    g_scan[i].ssid[len] = '\0';
-    memcpy(g_scan[i].bssid, r->bssid, 6);
-    g_scan[i].rssi      = r->rssi;
-    g_scan[i].channel   = r->channel;
-    g_scan[i].auth_mode = (uint8_t)r->auth_mode;
+    memcpy(e->ssid, r->ssid, len);
+    e->ssid[len] = '\0';
+    memcpy(e->bssid, r->bssid, 6);
+    e->rssi      = r->rssi;
+    e->channel   = r->channel;
+    e->auth_mode = (uint8_t)r->auth_mode;
+#ifndef PICOOS_SCAN_RACE_INJECT
+    __dmb();
+    g_scan_count = i + 1;
+#endif
     return 0;
 }
 
@@ -55,14 +77,24 @@ wifi_state_t wifi_get_state(void) { return g_state; }
 
 int wifi_scan(void)
 {
-    g_scan_count = 0;
-    g_scan_done  = false;
-    g_state = WIFI_STATE_SCANNING;
     cyw43_wifi_scan_options_t opts = {0};
     cyw43_arch_lwip_begin();
+
+    /* Refuse rather than reset the buffer under a scan someone else started
+     * (e.g. "wifi scan" at the shell while an app is scanning). */
+    if (cyw43_wifi_scan_active(&cyw43_state)) {
+        cyw43_arch_lwip_end();
+        return WIFI_ERR_BUSY;
+    }
+
+    g_scan_count = 0;
+    g_scan_done  = false;
     int rc = cyw43_wifi_scan(&cyw43_state, &opts, NULL, scan_result_cb);
+
+    /* Enter SCANNING only once the scan is active, so wifi-poll never sees
+     * SCANNING with no scan running and reports it done too early. */
+    g_state = (rc == 0) ? WIFI_STATE_SCANNING : WIFI_STATE_DOWN;
     cyw43_arch_lwip_end();
-    if (rc != 0) g_state = WIFI_STATE_DOWN;
     return rc;
 }
 
@@ -134,6 +166,18 @@ int wifi_scan_is_done(void)
     return g_scan_done ? 1 : 0;
 }
 
+int wifi_copy_scan_results(wifi_scan_result_t *buf, int max)
+{
+    if (buf == NULL || max < 0) return WIFI_ERR_ARG;
+    cyw43_arch_lwip_begin();
+    int n = g_scan_count < max ? g_scan_count : max;
+    memcpy(buf, g_scan, (size_t)n * sizeof(buf[0]));
+    cyw43_arch_lwip_end();
+    return n;
+}
+
+/* Deprecated — see wifi.h.  Kept as a teaching example of a buffer shared
+ * with an IRQ-context writer and no lock. */
 int wifi_get_scan_results(const wifi_scan_result_t **out_results, int *out_count)
 {
     *out_results = g_scan;
@@ -181,8 +225,8 @@ typedef struct {
 /* Guarded by the lwIP lock (cyw43_arch_lwip_begin/end). */
 static mcast_sock_t g_mcast[WIFI_MCAST_MAX_SOCKETS];
 
-/* lwIP receive hook — runs on the wifi-poll thread inside cyw43_arch_poll().
- * Copies the pbuf chain into a flat NUL-terminated buffer and hands it to
+/* lwIP receive hook — runs in the CYW43 async context (low-priority IRQ on
+ * core 0), so it must not block.  Copies the pbuf chain into a flat NUL-terminated buffer and hands it to
  * the application callback. */
 static void mcast_recv(void *arg, struct udp_pcb *pcb, struct pbuf *p,
                        const ip_addr_t *src, u16_t port)
@@ -360,7 +404,12 @@ static int cmd_wifi(int argc, char **argv)
 
     if (strcmp(sub, "scan") == 0) {
         shell_print("Scanning...\r\n");
-        if (wifi_scan() != 0) {
+        int rc = wifi_scan();
+        if (rc == WIFI_ERR_BUSY) {
+            shell_print("A scan is already running\r\n");
+            return -1;
+        }
+        if (rc != 0) {
             shell_print("Scan failed\r\n");
             return -1;
         }
@@ -372,14 +421,18 @@ static int cmd_wifi(int argc, char **argv)
             shell_print("Scan timed out\r\n");
             return -1;
         }
-        if (g_scan_count == 0) {
+        /* Print from a snapshot: shell_print can block on USB, and the
+         * async context lock must not be held that long. */
+        static wifi_scan_result_t res[WIFI_MAX_SCAN_RESULTS];
+        int n = wifi_copy_scan_results(res, WIFI_MAX_SCAN_RESULTS);
+        if (n <= 0) {
             shell_print("No networks found\r\n");
         } else {
             shell_print("%-32s  %5s  Ch  Auth\r\n", "SSID", "RSSI");
-            for (int i = 0; i < g_scan_count; i++) {
+            for (int i = 0; i < n; i++) {
                 shell_print("%-32s  %5d  %2u  %u\r\n",
-                    g_scan[i].ssid, (int)g_scan[i].rssi,
-                    g_scan[i].channel, g_scan[i].auth_mode);
+                    res[i].ssid, (int)res[i].rssi,
+                    res[i].channel, res[i].auth_mode);
             }
         }
         return 0;
