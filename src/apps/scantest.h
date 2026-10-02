@@ -1,0 +1,21 @@
+/*
+ * MIT License with Commons Clause
+ *
+ * Copyright (c) 2026 Jeff Curless
+ *
+ * Required Notice: Copyright (c) 2026 Jeff Curless.
+ *
+ * This software is licensed under the MIT License, subject to the Commons Clause
+ * License Condition v1.0. You may use, copy, modify, and distribute this software,
+ * but you may not sell the software itself, offer it as a paid service, or use it
+ * in a product or service whose value derives substantially from the software
+ * without prior written permission from the copyright holder.
+ */
+
+#ifndef APPS_SCANTEST_H
+#define APPS_SCANTEST_H
+
+/* WiFi/BT scan-buffer stress test — entry point for 'run scantest [raw]'. */
+void scantest(void *arg);
+
+#endif /* APPS_SCANTEST_H */

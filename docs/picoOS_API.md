@@ -527,8 +527,16 @@ wifi_state_t s = wifi_get_state();
 // Returns: WIFI_STATE_DOWN, WIFI_STATE_SCANNING, WIFI_STATE_CONNECTING,
 //          WIFI_STATE_UP, or WIFI_STATE_ERROR
 
-// Start a background scan (results available once state returns to DOWN)
+// Start a background scan.  Returns 0, WIFI_ERR_BUSY if a scan is already
+// running (the running scan and its results are left alone), or a CYW43 error.
 wifi_scan();
+while (!wifi_scan_is_done()) { sys_sleep(50); }
+
+// Copy the results out.  Safe while a scan is still running; returns the
+// number copied (0..max) or WIFI_ERR_ARG.  Keep the buffer static — 16
+// entries is 704 bytes, a third of a default thread stack.
+static wifi_scan_result_t nets[WIFI_MAX_SCAN_RESULTS];
+int n = wifi_copy_scan_results(nets, WIFI_MAX_SCAN_RESULTS);
 
 // Connect to an AP (blocks up to 10 seconds)
 int rc = wifi_connect("MyNetwork", "password");  // rc == 0 on success
@@ -568,14 +576,26 @@ wifi disconnect                  — drop the current connection
 ```c
 typedef struct {
     char    ssid[33];
+    uint8_t bssid[6];
     int16_t rssi;
     uint8_t channel;
     uint8_t auth_mode;   // 0 = open, CYW43_AUTH_WPA2_AES_PSK = WPA2
 } wifi_scan_result_t;
 ```
 
-Up to `WIFI_MAX_SCAN_RESULTS` (16) results are stored internally.  The poll thread
-manages `cyw43_arch_poll()` so applications do not need to call it directly.
+Up to `WIFI_MAX_SCAN_RESULTS` (16) results are stored internally.
+
+**Where the radio code runs.**  picoOS links `pico_cyw43_arch_lwip_threadsafe_background`,
+so CYW43, lwIP and BTstack work runs in the SDK async context: a low-priority IRQ on
+core 0, the core that called `wifi_init()`.  `cyw43_arch_poll()` does nothing in this
+mode.  The `wifi-poll` thread only watches for the end of a scan and for link drops.
+Scan results, multicast receive callbacks and BT events are all delivered from that IRQ.
+
+**Scan results are copied out.**  The kernel buffer is filled from the IRQ while a scan
+runs, so read it only with `wifi_copy_scan_results()`, which copies under the async
+context lock.  `wifi_get_scan_results(&ptr, &count)` still exists but is deprecated: it
+returns the live buffer with no lock, so entries can be torn mid-scan (see
+`docs/imperfections.md` §10).
 
 **Multicast UDP** — a socket-style wrapper so applications never call lwIP or the
 CYW43 driver directly.  The link must be up before `wifi_mcast_open()`.
@@ -583,7 +603,8 @@ CYW43 driver directly.  The link must be up before `wifi_mcast_open()`.
 ```c
 static void on_rx(const char *data, uint16_t len, const char *src_ip, void *ctx)
 {
-    // Runs on the wifi-poll thread: copy the data out and return quickly.
+    // Runs in the CYW43 async context (IRQ on core 0): copy the data out and
+    // return quickly.  Never block or sleep here.
     // data[len] == '\0'; payloads over WIFI_MCAST_MAX_PAYLOAD (128) are truncated.
 }
 
@@ -608,6 +629,7 @@ if (sock >= 0) {
 | `WIFI_ERR_BIND` | -4 | Port already bound |
 | `WIFI_ERR_JOIN` | -5 | IGMP join failed |
 | `WIFI_ERR_SEND` | -6 | lwIP rejected the datagram |
+| `WIFI_ERR_BUSY` | -7 | `wifi_scan()`: a scan is already running |
 
 Sockets are not owned by a process.  An app that may be killed should keep its handle
 in a `static int` initialised to `-1` and close it on its next start (see
@@ -619,24 +641,27 @@ Include: `src/kernel/bluetooth.h`
 
 `bt_init()` is called automatically by `main.c` after `wifi_init()` when `PICOOS_BT_ENABLE`
 is defined.  It hooks BTstack into the CYW43 async context already created by `wifi_init()`
-and powers on the BT radio asynchronously.  No separate poll thread is created — the
-existing `wifi-poll` thread drives both stacks via `cyw43_arch_poll()`.
+and powers on the BT radio asynchronously.  No separate thread is created: BTstack
+events are delivered from the same async-context IRQ as WiFi (see §6.5).
 
 ```c
 // Query current state
 bt_state_t s = bt_get_state();
 // Returns: BT_STATE_OFF, BT_STATE_IDLE, BT_STATE_SCANNING, or BT_STATE_ERROR
 
-// Start a simultaneous Classic inquiry (~6.4 s) + BLE passive scan
+// Start a simultaneous Classic inquiry (~6.4 s) + BLE passive scan.
+// Returns -1 if the radio is off or a scan is already running.
 bt_scan();
 
 // Poll for completion (or sleep-loop as shown in cmd_bt)
 while (!bt_scan_is_done()) { sys_sleep(100); }
 
-// Retrieve results
-const bt_scan_result_t *results;
-int count;
-bt_get_scan_results(&results, &count);
+// Copy the results out (safe while a scan is still running).  Returns the
+// number copied (0..max) or -1 on a bad argument.  BLE results keep arriving
+// after bt_scan_is_done(), and Classic names fill in as name requests return,
+// so copy again for the latest view.
+static bt_scan_result_t results[BT_MAX_SCAN_RESULTS];
+int count = bt_copy_scan_results(results, BT_MAX_SCAN_RESULTS);
 for (int i = 0; i < count; i++) {
     const bt_scan_result_t *r = &results[i];
     // r->addr[6]          — device address (big-endian byte order)
@@ -690,6 +715,10 @@ typedef struct {
     bt_devtype_t  type;              /* BT_DEVTYPE_CLASSIC or BT_DEVTYPE_BLE */
     bt_devclass_t dev_class;         /* major device class */
     uint32_t      class_of_device;   /* raw 24-bit CoD (0 for BLE) */
+    int8_t        tx_power;          /* TX power dBm, BT_TX_POWER_UNKNOWN if absent */
+    uint8_t       flags;             /* AD flags, BT_FLAGS_NONE if absent */
+    uint16_t      company_id;        /* manufacturer ID, BT_COMPANY_NONE if absent */
+    uint16_t      service_uuid;      /* first 16-bit service UUID, BT_SERVICE_NONE if absent */
 } bt_scan_result_t;
 ```
 

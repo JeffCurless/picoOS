@@ -251,6 +251,93 @@ tests/
 
 ---
 
+## On-device tests (pico_w / pico2_w)
+
+Some bugs only show up with real hardware: two cores and real radio interrupts.
+These tests are built-in apps that you run from the shell on a board with a CYW43 chip.
+
+### `scantest` — WiFi/BT scan-result buffers
+
+Scan results are written by the CYW43 async context, a low-priority IRQ on core 0.
+Threads on either core read them with `wifi_copy_scan_results()` /
+`bt_copy_scan_results()`. `scantest` checks that those reads never see a torn entry
+(see `docs/imperfections.md` §10).
+
+**Build and flash.** `./build wifi` builds the six WiFi-enabled variants (`picow` and
+`pico2w`, each with ND / D / D2 display options) into `kits/`. It also builds two
+fault-injection test images, `picowos_INJ-v<ver>.uf2` and `pico2wos_INJ-v<ver>.uf2`
+(see below):
+
+```bash
+./build wifi
+# flash the image for your board, e.g. kits/picowos-v<ver>.uf2 or kits/pico2wos_D-v<ver>.uf2
+```
+
+`scantest` is in every WiFi build (`PICOOS_HAS_WIFI` and `PICOOS_INCLUDE_DEMO_APPS`).
+The BT phase is compiled in only when `PICOOS_BT_ENABLE` is on, which is the default.
+
+**Run it**, either from the shell:
+
+```
+run scantest          test the copy-out API
+run scantest raw      run the same checks against the deprecated pointer getters
+```
+
+or from the host, which exits 0 on PASS and 1 on FAIL or timeout:
+
+```bash
+python3 tools/scantest.py              # auto-detects the Pico
+python3 tools/scantest.py --raw --log scantest.log
+```
+
+Close any other console on the port first. Don't run other scans while it runs
+(`wifi scan`, `bt scan`, netmon): readers can't tell another scan's reset from a race.
+
+**What it does.** It runs 5 WiFi scans, then 3 BT scans (about 45 s in all). During
+each phase, one reader thread is pinned to each core. Each reader snapshots the results
+in a tight loop and counts:
+
+| Counter | Meaning |
+|---|---|
+| `bad` | An entry is malformed: unterminated SSID/name, WiFi channel outside 1–14, RSSI outside −127..0, all-zero BT address, unknown type/class |
+| `regressed` | The result count went down within one scan |
+| `changed` | An entry already seen changed within one scan (a BT name may go from empty to set, once) |
+| `skipped` | Snapshot discarded because a scan start overlapped it. Not an error |
+
+The coordinator also checks the API contract. A second `wifi_scan()` while one is running
+must return `WIFI_ERR_BUSY`, and a second `bt_scan()` must return -1; if either wiped the
+buffer, the readers' `regressed` count goes up. The copy functions must reject a NULL
+buffer or a negative `max` and must truncate to `max`.
+
+**Reading the result.** It ends with one line, `[scantest] RESULT: PASS` or `FAIL`.
+A `WARNING: a phase saw no results` line means there were no APs or BT devices in range,
+so that phase couldn't exercise the race. Run it somewhere with radio traffic, or with a
+phone advertising over BLE nearby.
+
+**Proving the test can fail (`_INJ` images).** On normal firmware, `raw` mode usually
+passes too. Writers fill a slot before publishing it, which removes most tearing even
+without the lock, so a clean `raw` run doesn't show that the checks work. The `_INJ`
+images are built with `-DPICOOS_SCAN_RACE_INJECT=ON`. That restores the old bug: each
+slot is published first, then filled with `0xFF` (so its string is unterminated and its
+fields are out of range), held for 50 µs, and only then filled with real data. On an
+`_INJ` image:
+
+| Command | Expected |
+|---|---|
+| `run scantest raw` | `RESULT: FAIL`, with `bad` counts, mostly on the core 1 reader |
+| `run scantest` | `RESULT: PASS`. The copy runs under the lock, so it never sees a slot mid-fill |
+
+Getting both results shows that the checks catch the race and that the lock prevents it.
+Never use an `_INJ` image for anything else. The app prints a `TEST BUILD` line when it
+runs on one.
+
+**Reader duty cycle.** Readers call `sys_yield()` every 32 snapshots rather than
+sleeping. A thread woken from `sys_sleep()` only runs again at the next 10 ms time-slice
+boundary (`TIME_SLICE_MS`). The first version slept, so its readers were idle more than
+99% of the time and barely overlapped the radio IRQ.
+
+---
+
 ## Lock deadlock detection (`PICOOS_LOCK_DEBUG`)
 
 The `PICOOS_LOCK_DEBUG` build option adds timeout-based deadlock detection to every blocking lock primitive.  It is **off by default** in firmware builds and **on** in the `test_sync` host build.

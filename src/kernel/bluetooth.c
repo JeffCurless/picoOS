@@ -21,7 +21,11 @@
 #include <string.h>
 #include <stdio.h>
 
-/* ---- state --------------------------------------------------------------- */
+/* ---- state --------------------------------------------------------------- *
+ * packet_handler() runs in the CYW43 async context (a low-priority IRQ on
+ * core 0), so g_scan[], g_scan_count and the scan state are touched from
+ * threads only while holding the async context lock (cyw43_arch_lwip_begin/
+ * end).  See the matching note in wifi.c. */
 static volatile bt_state_t  g_state        = BT_STATE_OFF;
 static bt_scan_result_t     g_scan[BT_MAX_SCAN_RESULTS];
 static volatile int         g_scan_count   = 0;
@@ -58,12 +62,34 @@ static int find_slot_by_addr(const bd_addr_t addr)
     return -1;
 }
 
-/* Reserve a new slot; returns index or -1 if full. */
-static int alloc_slot(void)
+/* Index of the next free slot, or -1 if full.  The slot is not visible to
+ * readers until publish_slot() is called, so fill it completely first. */
+#ifndef PICOOS_SCAN_RACE_INJECT
+static int next_slot(void)
+{
+    return g_scan_count < BT_MAX_SCAN_RESULTS ? g_scan_count : -1;
+}
+
+static void publish_slot(void)
+{
+    __dmb();
+    g_scan_count = g_scan_count + 1;
+}
+#else
+/* TEST ONLY (PICOOS_SCAN_RACE_INJECT): the old bug, widened.  The slot is
+ * published as soon as it is reserved, poisoned (unterminated name, invalid
+ * type), and held there before the caller fills it. */
+static int next_slot(void)
 {
     if (g_scan_count >= BT_MAX_SCAN_RESULTS) return -1;
-    return g_scan_count++;
+    int idx = g_scan_count++;
+    memset(&g_scan[idx], 0xFF, sizeof(g_scan[idx]));
+    busy_wait_us_32(50);
+    return idx;
 }
+
+static void publish_slot(void) {}
+#endif
 
 /* ---- BLE AD data parser: extracts name, flags, TX power, company ID ------- */
 static void extract_ble_adv_data(const uint8_t *ad_data, uint8_t ad_len,
@@ -124,7 +150,7 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
         /* Skip duplicates. */
         if (find_slot_by_addr(addr) >= 0) return;
 
-        int idx = alloc_slot();
+        int idx = next_slot();
         if (idx < 0) return;
 
         reverse_bd_addr(addr, g_scan[idx].addr);
@@ -142,6 +168,7 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
         g_scan[idx].flags           = BT_FLAGS_NONE;
         g_scan[idx].company_id      = BT_COMPANY_NONE;
         g_scan[idx].service_uuid    = BT_SERVICE_NONE;
+        publish_slot();   /* before the name request: its reply looks us up */
 
         /* Request the human-readable name asynchronously. */
         gap_remote_name_request(
@@ -184,7 +211,7 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
         /* Skip duplicates. */
         if (find_slot_by_addr(addr) >= 0) return;
 
-        int idx = alloc_slot();
+        int idx = next_slot();
         if (idx < 0) return;
 
         reverse_bd_addr(addr, g_scan[idx].addr);
@@ -202,6 +229,7 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
         uint8_t       ad_len  = gap_event_advertising_report_get_data_length(packet);
         const uint8_t *ad_data = gap_event_advertising_report_get_data(packet);
         extract_ble_adv_data(ad_data, ad_len, &g_scan[idx]);
+        publish_slot();
     }
 }
 
@@ -210,15 +238,19 @@ bt_state_t bt_get_state(void) { return g_state; }
 
 int bt_scan(void)
 {
-    if (g_state == BT_STATE_OFF)      return -1;
-    if (g_state == BT_STATE_SCANNING) return -1;
+    /* Check, reset and start in one locked section so the buffer is never
+     * reset under a scan that is still delivering results. */
+    cyw43_arch_lwip_begin();
+    if (g_state == BT_STATE_OFF || g_state == BT_STATE_SCANNING) {
+        cyw43_arch_lwip_end();
+        return -1;
+    }
 
     g_scan_count   = 0;
     g_scan_done    = false;
     g_classic_done = false;
     g_state        = BT_STATE_SCANNING;
 
-    cyw43_arch_lwip_begin();
     /* Classic inquiry: 5 × 1.28 s ≈ 6.4 s window. */
     gap_inquiry_start(5);
     /* BLE passive scan: interval 48 slots (30 ms), window 30 slots (18.75 ms). */
@@ -234,6 +266,18 @@ int bt_scan_is_done(void)
     return g_scan_done ? 1 : 0;
 }
 
+int bt_copy_scan_results(bt_scan_result_t *buf, int max)
+{
+    if (buf == NULL || max < 0) return -1;
+    cyw43_arch_lwip_begin();
+    int n = g_scan_count < max ? g_scan_count : max;
+    memcpy(buf, g_scan, (size_t)n * sizeof(buf[0]));
+    cyw43_arch_lwip_end();
+    return n;
+}
+
+/* Deprecated — see bluetooth.h.  Kept as a teaching example of a buffer
+ * shared with an IRQ-context writer and no lock. */
 int bt_get_scan_results(const bt_scan_result_t **out, int *out_count)
 {
     *out       = g_scan;
@@ -306,7 +350,11 @@ static int cmd_bt(int argc, char **argv)
             return -1;
         }
 
-        if (g_scan_count == 0) {
+        /* Print from a snapshot: shell_print can block on USB, and the
+         * async context lock must not be held that long. */
+        static bt_scan_result_t res[BT_MAX_SCAN_RESULTS];
+        int n = bt_copy_scan_results(res, BT_MAX_SCAN_RESULTS);
+        if (n <= 0) {
             shell_print("No devices found\r\n");
             return 0;
         }
@@ -315,8 +363,8 @@ static int cmd_bt(int argc, char **argv)
                     "Address", "RSSI", "Type", "Class", "Name");
         shell_print("%-17s  %4s  %-7s  %-10s  %s\r\n",
                     "-----------------", "----", "-------", "----------", "----");
-        for (int i = 0; i < g_scan_count; i++) {
-            const bt_scan_result_t *r = &g_scan[i];
+        for (int i = 0; i < n; i++) {
+            const bt_scan_result_t *r = &res[i];
             print_addr(r->addr);
             shell_print("  %4d  %-7s  %-10s  %s\r\n",
                         (int)r->rssi,

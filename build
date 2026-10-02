@@ -6,6 +6,8 @@
 #   ./build all       build all 12 firmware variants
 #   ./build pico      build pico + picow  (6 variants)
 #   ./build pico2     build pico2 + pico2w  (6 variants)
+#   ./build wifi      build picow + pico2w  (6 variants) plus 2 *_INJ test images
+#                     with PICOOS_SCAN_RACE_INJECT on, for the on-device scantest
 #   ./build tests     build and run host-native unit tests
 #
 # Build directories: build_<board>_ND | build_<board>_D | build_<board>_D2
@@ -34,8 +36,9 @@ case "${1:-all}" in
     all)   BOARDS="pico picow pico2 pico2w" ;;
     pico)  BOARDS="pico picow" ;;
     pico2) BOARDS="pico2 pico2w" ;;
+    wifi)  BOARDS="picow pico2w" ;;
     *)
-        echo "Usage: $0 [all|pico|pico2|tests]" >&2
+        echo "Usage: $0 [all|pico|pico2|wifi|tests]" >&2
         exit 1
         ;;
 esac
@@ -59,6 +62,13 @@ for board in $BOARDS; do
     build_variant "$board" D   "-DPICOOS_DISPLAY_ENABLE=ON  -DPICOOS_DISPLAY_PACK2=OFF"
     build_variant "$board" D2  "-DPICOOS_DISPLAY_ENABLE=ON  -DPICOOS_DISPLAY_PACK2=ON"
 done
+
+# Fault-injection test images (no display) — TEST ONLY, see docs/testing.md.
+if [ "${1:-all}" = "wifi" ]; then
+    for board in $BOARDS; do
+        build_variant "$board" INJ "-DPICOOS_DISPLAY_ENABLE=OFF -DPICOOS_SCAN_RACE_INJECT=ON"
+    done
+fi
 
 echo ""
 echo "Done. kits/ contents:"

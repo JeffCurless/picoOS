@@ -101,6 +101,10 @@ python3 tools/console.py
 
 # Run the host-native test suites (no hardware required)
 ./build tests
+
+# On-device WiFi/BT scan test (pico_w / pico2_w; see docs/testing.md)
+./build wifi            # then flash a picowos*/pico2wos* image from kits/
+python3 tools/scantest.py
 ```
 
 ### Board selection
