@@ -54,6 +54,7 @@ static event_flags_t        g_cont_ev;
 static volatile bool        g_cont        = false;  /* continuous mode on   */
 static volatile bool        g_tgt_cont    = false;  /* IRQ target: g_lists   */
 static volatile bool        g_inq_active  = false;  /* Classic inquiry on   */
+static uint64_t             g_inq_start_us;         /* last inquiry start   */
 static uint64_t             g_window_start_us;
 static uint32_t             g_owner_pid;
 static bt_scan_cb_t         g_cb;
@@ -538,12 +539,16 @@ int bt_scan_start(bt_scan_cb_t cb, void *ctx)
     g_name_next  = 0u;
     g_tgt_cont   = true;
     g_state      = BT_STATE_SCANNING;
-    g_inq_active = (gap_inquiry_start(BT_INQUIRY_LEN) == 0);
-    /* BLE passive scan: interval 48 slots (30 ms), window 30 slots (18.75 ms). */
-    gap_set_scan_parameters(0, 48, 30);
+    g_inq_active   = (gap_inquiry_start(BT_INQUIRY_LEN) == 0);
+    g_inq_start_us = time_us_64();
+    /* BLE passive scan, window == interval (48 slots, 30 ms): listen all the
+     * time the controller is not busy with inquiry.  Report every packet,
+     * not just the first per device, so RSSI keeps updating. */
+    gap_set_scan_parameters(0, 48, 48);
+    gap_set_scan_duplicate_filter(false);
     gap_start_scan();
 
-    g_window_start_us = time_us_64();
+    g_window_start_us = g_inq_start_us;
     g_owner_pid       = me;
     g_cb              = cb;
     g_cb_ctx          = ctx;
@@ -625,10 +630,14 @@ void bt_scan_poll(void)
     if (g_cont) {
         uint64_t now = time_us_64();
         cyw43_arch_lwip_begin();
-        /* Restart Classic inquiry here rather than in packet_handler, so a
-         * refused start (e.g. HCI busy) is simply retried 10 ms later. */
-        if (!g_inq_active && gap_inquiry_start(BT_INQUIRY_LEN) == 0)
-            g_inq_active = true;
+        /* Start the next Classic inquiry here rather than in packet_handler,
+         * so a refused start (e.g. HCI busy) is simply retried 10 ms later. */
+        if (!g_inq_active &&
+            now - g_inq_start_us >= (uint64_t)BT_INQUIRY_PERIOD_MS * 1000u &&
+            gap_inquiry_start(BT_INQUIRY_LEN) == 0) {
+            g_inq_active   = true;
+            g_inq_start_us = now;
+        }
 
         uint32_t ms = (uint32_t)((now - g_window_start_us) / 1000u);
         if (ms >= BT_WINDOW_MS) {

@@ -828,8 +828,9 @@ the radio keeps receiving BLE reports until the next `bt_scan()`.
 until then.
 
 **Continuous scanning (list swap).**  `bt_scan_start()` works like `wifi_scan_start()`
-(§6.5): BLE passive scanning stays on, Classic inquiry restarts back to back in
-1.28 s runs, and every `BT_WINDOW_MS` (1000 ms) the list of every device heard in that
+(§6.5): BLE passive scanning stays on at 100% duty, a 2.56 s Classic inquiry
+(`BT_INQUIRY_LEN` 2, both inquiry trains) starts every `BT_INQUIRY_PERIOD_MS`
+(10.24 s), and every `BT_WINDOW_MS` (1000 ms) the list of every device heard in that
 window is swapped to the subscriber.
 
 ```c
@@ -844,9 +845,13 @@ if (bt_scan_start(NULL, NULL) == 0) {                   // or bt_scan_start(cb, 
 `bt_scan_list_t` has the same header fields as `wifi_scan_list_t` (`seq`, `dropped`,
 `window_ms`, `count`) and `items[BT_MAX_SCAN_RESULTS]`.  Notes:
 
-- A Classic device answers an inquiry at most once per 1.28 s run, so it can be missing
-  from a window that falls between two answers.  Keep a short history in the app if
-  that matters.
+- The inquiry is duty-cycled because the controller shares one radio between inquiry
+  and LE scanning.  With back-to-back inquiry, measured on a Pico W, strong BLE
+  advertisers were missing from about half the 1 s windows; with this schedule they
+  are in 18–20 of 20.  The cost is that Classic devices appear only in windows during
+  an inquiry, so treat a Classic device as present for `BT_INQUIRY_PERIOD_MS` after it
+  was last heard, and a BLE device for a few windows (slow advertisers, every 1–2 s,
+  regularly miss one).
 - Names are cached for the session.  A Classic name is requested once per device; a BLE
   name is taken from advertising data whenever one carries it.  Later windows get the
   cached name even when the packet carrying it was not heard.  A failed name request is

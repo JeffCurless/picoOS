@@ -86,13 +86,18 @@ const char   *bt_devclass_str(bt_devclass_t cls);
 
 /* --- Continuous scanning --------------------------------------------------
  *
- * bt_scan_start() keeps BLE passive scanning on and restarts Classic inquiry
- * (BT_INQUIRY_LEN x 1.28 s) back to back until bt_scan_stop().  Every
- * BT_WINDOW_MS the list of every device heard in that window is handed to the
- * subscriber by swapping buffers (see kernel/scanbuf.h), not by copying.
- * Radio activity is not tied to the window: a Classic device answers at most
- * once per inquiry, so it can be missing from a window that falls between two
- * of its answers.
+ * bt_scan_start() keeps BLE passive scanning on continuously (100% duty) and
+ * runs a Classic inquiry of BT_INQUIRY_LEN x 1.28 s at the start of every
+ * BT_INQUIRY_PERIOD_MS, until bt_scan_stop().  Every BT_WINDOW_MS the list of
+ * every device heard in that window is handed to the subscriber by swapping
+ * buffers (see kernel/scanbuf.h), not by copying.
+ *
+ * Why the inquiry is duty-cycled: the controller shares one radio between
+ * inquiry and LE scanning, and back-to-back inquiry left BLE devices missing
+ * from about half the windows.  The cost is that a Classic device shows up
+ * only in the windows during an inquiry, so an app that tracks presence
+ * should treat a Classic device as present for BT_INQUIRY_PERIOD_MS after it
+ * was last heard (a BLE device: a window or two).
  *
  * Names: Classic names come from a remote name request, sent once per device
  * per session; BLE names come from advertising data.  Both are kept in a
@@ -106,8 +111,10 @@ const char   *bt_devclass_str(bt_devclass_t cls);
  * and one-shot bt_scan() exclude each other; if the subscriber's process
  * exits, scanning stops on its own.
  * ------------------------------------------------------------------------- */
-#define BT_WINDOW_MS     1000u
-#define BT_INQUIRY_LEN   1u      /* Classic inquiry length, 1.28 s units */
+#define BT_WINDOW_MS         1000u
+#define BT_INQUIRY_LEN       2u      /* Classic inquiry length, 1.28 s units:
+                                      * 2 covers both inquiry trains        */
+#define BT_INQUIRY_PERIOD_MS 10240u  /* start an inquiry this often         */
 
 /* Error codes for the continuous-scan API (bt_scan() and
  * bt_copy_scan_results() keep returning -1). */
@@ -161,6 +168,7 @@ static inline int  gap_inquiry_stop(void)          { return 0; }
 static inline void gap_set_scan_parameters(uint8_t t, uint16_t i, uint16_t w)
     { (void)t; (void)i; (void)w; }
 static inline void gap_start_scan(void)            {}
+static inline void gap_set_scan_duplicate_filter(bool e) { (void)e; }
 static inline void gap_stop_scan(void)             {}
 static inline int  gap_remote_name_request(const bd_addr_t a, uint8_t m, uint16_t c)
     { (void)a; (void)m; (void)c; return 0; }
