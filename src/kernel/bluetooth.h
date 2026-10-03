@@ -52,6 +52,7 @@ typedef enum {
 #define BT_NAME_LEN         32
 
 /* Sentinel values used when a field was not present in the advertising data. */
+#define BT_RSSI_UNKNOWN      ((int8_t) -127)  /* controller gave no RSSI */
 #define BT_TX_POWER_UNKNOWN  ((int8_t)  127)
 #define BT_FLAGS_NONE        ((uint8_t) 0xFFu)
 #define BT_COMPANY_NONE      ((uint16_t)0xFFFFu)

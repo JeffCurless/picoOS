@@ -46,6 +46,17 @@ static int scan_result_cb(void *env, const cyw43_ev_scan_result_t *r)
 {
     (void)env;
     int i = g_scan_count;
+
+    /* The chip reports each BSS many times per scan (every beacon / probe
+     * response it hears).  Refresh the existing slot instead of taking a new
+     * one, or the buffer fills with repeats and later networks are lost.
+     * rssi >= 0 is a bogus reading the firmware sometimes sends; skip it. */
+    for (int k = 0; k < i; k++) {
+        if (memcmp(g_scan[k].bssid, r->bssid, 6) == 0) {
+            if (r->rssi < 0) g_scan[k].rssi = r->rssi;
+            return 0;
+        }
+    }
     if (i >= WIFI_MAX_SCAN_RESULTS) return 0;
 
     wifi_scan_result_t *e = &g_scan[i];

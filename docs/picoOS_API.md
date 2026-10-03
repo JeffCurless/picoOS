@@ -583,7 +583,7 @@ typedef struct {
 } wifi_scan_result_t;
 ```
 
-Up to `WIFI_MAX_SCAN_RESULTS` (16) results are stored internally.
+Up to `WIFI_MAX_SCAN_RESULTS` (16) results are stored internally, one per BSSID: repeat reports of the same BSS during a scan refresh its RSSI instead of using another slot.
 
 **Where the radio code runs.**  picoOS links `pico_cyw43_arch_lwip_threadsafe_background`,
 so CYW43, lwIP and BTstack work runs in the SDK async context: a low-priority IRQ on
@@ -711,7 +711,7 @@ bt scan       — run a combined Classic + BLE scan (~7 s) and print a device ta
 typedef struct {
     uint8_t       addr[6];           /* device address — bytes [5:0] = MSB:LSB */
     char          name[32];          /* device name; empty string if not available */
-    int8_t        rssi;              /* received signal strength in dBm */
+    int8_t        rssi;              /* dBm, BT_RSSI_UNKNOWN (-127) if absent */
     bt_devtype_t  type;              /* BT_DEVTYPE_CLASSIC or BT_DEVTYPE_BLE */
     bt_devclass_t dev_class;         /* major device class */
     uint32_t      class_of_device;   /* raw 24-bit CoD (0 for BLE) */
@@ -722,8 +722,8 @@ typedef struct {
 } bt_scan_result_t;
 ```
 
-Up to `BT_MAX_SCAN_RESULTS` (20) devices are stored.  Duplicates are suppressed by
-address.  Classic scan duration is fixed at 5 × 1.28 s ≈ 6.4 s; the BLE scan runs
+Up to `BT_MAX_SCAN_RESULTS` (20) devices are stored, one per address.  Repeat
+reports of a device during the scan refresh its `rssi` with the latest reading.  Classic scan duration is fixed at 5 × 1.28 s ≈ 6.4 s; the BLE scan runs
 concurrently and stops when the Classic inquiry completes.
 
 ---

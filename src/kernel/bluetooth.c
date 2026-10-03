@@ -62,6 +62,13 @@ static int find_slot_by_addr(const bd_addr_t addr)
     return -1;
 }
 
+/* HCI reports RSSI 127 (0x7F) when it has no reading. */
+static int8_t ble_report_rssi(const uint8_t *packet)
+{
+    int8_t rssi = (int8_t)gap_event_advertising_report_get_rssi(packet);
+    return rssi == 127 ? BT_RSSI_UNKNOWN : rssi;
+}
+
 /* Index of the next free slot, or -1 if full.  The slot is not visible to
  * readers until publish_slot() is called, so fill it completely first. */
 #ifndef PICOOS_SCAN_RACE_INJECT
@@ -146,9 +153,17 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
     if (event == GAP_EVENT_INQUIRY_RESULT) {
         bd_addr_t addr;
         gap_event_inquiry_result_get_bd_addr(packet, addr);
+        int8_t rssi = gap_event_inquiry_result_get_rssi_available(packet)
+                          ? gap_event_inquiry_result_get_rssi(packet)
+                          : BT_RSSI_UNKNOWN;
 
-        /* Skip duplicates. */
-        if (find_slot_by_addr(addr) >= 0) return;
+        /* Already seen this scan: refresh the RSSI so it tracks the latest
+         * reading instead of freezing at the first one. */
+        int dup = find_slot_by_addr(addr);
+        if (dup >= 0) {
+            if (rssi != BT_RSSI_UNKNOWN) g_scan[dup].rssi = rssi;
+            return;
+        }
 
         int idx = next_slot();
         if (idx < 0) return;
@@ -160,10 +175,7 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
             gap_event_inquiry_result_get_class_of_device(packet);
         g_scan[idx].dev_class       =
             cod_to_devclass(g_scan[idx].class_of_device);
-        g_scan[idx].rssi            =
-            gap_event_inquiry_result_get_rssi_available(packet)
-                ? gap_event_inquiry_result_get_rssi(packet)
-                : -127;
+        g_scan[idx].rssi            = rssi;
         g_scan[idx].tx_power        = BT_TX_POWER_UNKNOWN;
         g_scan[idx].flags           = BT_FLAGS_NONE;
         g_scan[idx].company_id      = BT_COMPANY_NONE;
@@ -207,9 +219,14 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
     if (event == GAP_EVENT_ADVERTISING_REPORT) {
         bd_addr_t addr;
         gap_event_advertising_report_get_address(packet, addr);
+        int8_t rssi = ble_report_rssi(packet);
 
-        /* Skip duplicates. */
-        if (find_slot_by_addr(addr) >= 0) return;
+        /* Already seen this scan: refresh the RSSI (see Classic above). */
+        int dup = find_slot_by_addr(addr);
+        if (dup >= 0) {
+            if (rssi != BT_RSSI_UNKNOWN) g_scan[dup].rssi = rssi;
+            return;
+        }
 
         int idx = next_slot();
         if (idx < 0) return;
@@ -219,8 +236,7 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
         g_scan[idx].type            = BT_DEVTYPE_BLE;
         g_scan[idx].dev_class       = BT_CLASS_UNKNOWN;
         g_scan[idx].class_of_device = 0;
-        g_scan[idx].rssi            =
-            gap_event_advertising_report_get_rssi(packet);
+        g_scan[idx].rssi            = rssi;
         g_scan[idx].tx_power        = BT_TX_POWER_UNKNOWN;
         g_scan[idx].flags           = BT_FLAGS_NONE;
         g_scan[idx].company_id      = BT_COMPANY_NONE;
