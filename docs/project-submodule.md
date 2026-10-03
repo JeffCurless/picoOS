@@ -261,7 +261,7 @@ Make it executable:
 chmod +x build
 ```
 
-The output `.uf2` files land in `build_${board}_${disp}/picoOS/src/` (CMake nests the subdirectory under the picoOS path) and are then copied to `kits/`.  The naming follows picoOS convention — board name + display suffix + version — for example `picoos_D2-v0.3.4.uf2`.
+The output `.uf2` files land in `build_${board}_${disp}/picoOS/src/` (CMake nests the subdirectory under the picoOS path) and are then copied to `kits/`.  The naming follows picoOS convention — board name + display suffix + version — for example `picoos_D2-v0.3.5.uf2`.
 
 ---
 
@@ -301,7 +301,7 @@ Flash the appropriate `.uf2` to your Pico:
 1. Hold **BOOTSEL** while plugging in USB.  The Pico mounts as a mass-storage drive.
 2. Copy the `.uf2` to the drive:
    ```bash
-   cp kits/picoos_D-v0.3.4.uf2 /media/$USER/RPI-RP2/
+   cp kits/picoos_D-v0.3.5.uf2 /media/$USER/RPI-RP2/
    ```
 3. The Pico reboots automatically.
 
