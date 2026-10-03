@@ -183,7 +183,7 @@ The Pico appears as two different USB devices depending on mode:
 | Mode | VID:PID | Notes |
 |---|---|---|
 | BOOTSEL (flash mode) | `2E8A:0003` | Mass storage — accessible without extra rules |
-| Running picoOS | `2E8A:000A` | USB CDC serial — needs `dialout` group |
+| Running picoOS | `2E8A:000A` (RP2040) / `2E8A:0009` (RP2350) | USB CDC serial — needs `dialout` group |
 
 Add your user to the `dialout` group:
 
@@ -199,8 +199,8 @@ If you installed `picotool`, also add a udev rule so it can access the Pico with
 sudo bash -c 'cat > /etc/udev/rules.d/99-pico.rules <<EOF
 # Raspberry Pi Pico — BOOTSEL mode
 SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="0003", MODE="0666"
-# Raspberry Pi Pico — CDC serial (running)
-SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="000a", MODE="0666", GROUP="dialout"
+# Raspberry Pi Pico — CDC serial while running picoOS (any Raspberry Pi product ID)
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", MODE="0666", GROUP="dialout"
 EOF'
 sudo udevadm control --reload-rules
 sudo udevadm trigger
@@ -219,15 +219,25 @@ cd picoOS
 
 ## 7. Build
 
+To build every board and display variant at once (images are copied to `kits/`):
+
 ```bash
-cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk"
-make -j$(nproc) -C build
+./build            # or: ./build pico | ./build pico2 | ./build wifi
+```
+
+Or build one board by hand.  Add `-DPICO_BOARD=picow` (or `pico2`, `pico2w`) for another
+board; the default is `pico`.  Don't use `build` as the directory name — it is the
+build script:
+
+```bash
+cmake -B build_pico -DPICO_SDK_PATH="$HOME/pico-sdk"
+make -j$(nproc) -C build_pico
 ```
 
 CMake automatically reads the `pico_sdk_import.cmake` at the project root, locates the ARM cross-compiler via `arm-none-eabi-gcc` in `PATH`, and sets `CMAKE_SYSTEM_PROCESSOR=arm` — no extra toolchain flags needed.
 
-A successful build produces these files in `build/src/`, named after the board,
-display variant, and version (e.g. `picoos_D-v0.2.0.*` for a pico + Display Pack build):
+A successful build produces these files in `build_pico/src/`, named after the board,
+display variant, and version (e.g. `picoos_D-v0.3.4.*` for a pico + Display Pack build):
 
 | File | Purpose |
 |---|---|
@@ -236,19 +246,20 @@ display variant, and version (e.g. `picoos_D-v0.2.0.*` for a pico + Display Pack
 | `<board>os[_D|_D2]-v<ver>.bin` | Raw binary |
 | `<board>os[_D|_D2]-v<ver>.hex` | Intel HEX |
 | `<board>os[_D|_D2]-v<ver>.dis` | Disassembly listing |
+| `<board>os[_D|_D2]-v<ver>.elf.map` | Linker map (for `tools/mem_report.py`) |
 
 ### Incremental builds
 
 ```bash
-make -j$(nproc) -C build
+make -j$(nproc) -C build_pico
 ```
 
 ### Clean rebuild
 
 ```bash
-rm -rf build
-cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk"
-make -j$(nproc) -C build
+rm -rf build_pico      # never "rm -rf build" — that is the build script
+cmake -B build_pico -DPICO_SDK_PATH="$HOME/pico-sdk"
+make -j$(nproc) -C build_pico
 ```
 
 ---
@@ -269,7 +280,7 @@ make -j$(nproc) -C build
 3. Copy the UF2:
 
    ```bash
-   cp build/src/picoos_D-v0.2.0.uf2 /run/media/$USER/RPI-RP2/
+   cp build_pico/src/picoos_D-v0.3.4.uf2 /run/media/$USER/RPI-RP2/
    sync
    ```
 
@@ -280,7 +291,7 @@ make -j$(nproc) -C build
 With the Pico in BOOTSEL mode:
 
 ```bash
-picotool load build/src/picoos_D-v0.2.0.uf2 --force
+picotool load build_pico/src/picoos_D-v0.3.4.uf2 --force
 picotool reboot
 ```
 
@@ -310,7 +321,7 @@ Run:
 python3 tools/console.py
 ```
 
-The script auto-detects the Pico by USB VID:PID `2E8A:000A`. Press **Ctrl-C** to exit.
+The script auto-detects the Pico by USB VID:PID (`2E8A:000A` on RP2040, `2E8A:0009` on RP2350). Press **Ctrl-C** to exit.
 
 ```bash
 python3 tools/console.py --port /dev/ttyACM0   # specific port
@@ -324,7 +335,8 @@ python3 tools/console.py --log session.log      # save output
 After a successful build, symlink the CMake compile database so clangd can resolve all Pico SDK headers:
 
 ```bash
-ln -sf build/compile_commands.json compile_commands.json
+cmake -B build_pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+ln -sf build_pico/compile_commands.json compile_commands.json
 ```
 
 ---

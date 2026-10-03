@@ -26,12 +26,12 @@ optimizing for readability over production readiness.
 
 **Current behavior**: Every millisecond the SysTick ISR iterates all
 `MAX_THREADS` TCB slots to find sleeping threads whose alarm has expired
-(`isr_systick`, line 259). On every context switch `sched_next_thread` walks
+(`isr_systick`, core 0 only). On every context switch `sched_next_thread` walks
 priority queues, which is O(priorities × queue depth) but degrades to O(n) at
 a single priority level.
 
-**File:line**: `src/kernel/sched.c:259` (sleep scan), `src/kernel/sched.c:170`
-(scheduler comment)
+**File:line**: `src/kernel/sched.c:441` (sleep scan in `isr_systick`),
+`src/kernel/sched.c:311` (`sched_next_thread`)
 
 **Better implementation**: Maintain a sorted sleep queue (min-heap or sorted
 list keyed on `wake_time_us`). Wake only threads at the head whose deadline has
@@ -52,7 +52,7 @@ Over time, small allocations fragment the low end of the heap and large
 requests fail even when total free space is sufficient. Fragmentation is
 visible via the `mem` shell command.
 
-**File:line**: `src/kernel/mem.c:10`
+**File:line**: `src/kernel/mem.c:80` (`kmalloc`; first-fit search at line 92)
 
 **Better implementation**: A buddy allocator eliminates external fragmentation
 for power-of-two sizes and has O(log n) alloc/free. A slab allocator layered
@@ -67,13 +67,13 @@ without any per-object header overhead.
 
 ## 3. Linear file lookup
 
-**Current behavior**: `fs_open()` iterates all `FS_MAX_FILES` directory
-entries sequentially, comparing names with `strncmp`. `FS_MAX_FILES` is 64
+**Current behavior**: `fs_open()` calls `find_file()`, which iterates all
+`FS_MAX_FILES` directory entries sequentially, comparing names with `strncmp`. `FS_MAX_FILES` is 64
 on RP2040 and 127 on RP2350 — at these sizes the scan is still fast in
 practice, but the linear pattern does not scale and illustrates a common
 beginner mistake.
 
-**File:line**: `src/kernel/fs.c:164`
+**File:line**: `src/kernel/fs.c:194` (`find_file`)
 
 **Better implementation**: A small open-addressing hash table (64 buckets,
 FNV-1a hash) reduces average lookup to O(1). Alternatively a sorted directory
@@ -106,11 +106,12 @@ hierarchy (root + one directory layer), which covers most embedded use cases.
 ## 5. Single concurrent writer
 
 **Current behavior**: Only one file can be open for writing at a time. A
-global `scratch_buf[FS_BLOCK_SIZE]` (4 KB) accumulates write data, and
-`scratch_owner` records which file currently holds it. A second `open()` for
-write blocks or fails until the first writer closes.
+global `fs_buffer[FS_BLOCK_SIZE]` (4 KB) accumulates write data, and
+`scratch_owner` records which file currently holds it. A second `fs_open()`
+for write fails (returns -1) until the first writer closes.
 
-**File:line**: `src/kernel/fs.c:55–66`
+**File:line**: `src/kernel/fs.c:88–98` (buffer), `src/kernel/fs.c:346–353`
+(the check in `fs_open`)
 
 **Better implementation**: Allocate a write buffer per open file descriptor
 (from `kmalloc`), released on `fs_close()`. Protect each buffer with a
@@ -126,11 +127,13 @@ dynamic allocation)
 ## 6. No MPU / pointer validation in syscalls
 
 **Current behavior**: `syscall_dispatch()` casts `uint32_t` arguments directly
-to pointers and dereferences them without any validation. There is no MPU
-configuration, so a buggy user thread can corrupt kernel memory by passing a
-bad pointer to `read`, `write`, or `mq_send`.
+to pointers and dereferences them without any validation. There is no SVC
+instruction and no MPU configuration: the `sys_*` wrappers call
+`syscall_dispatch()` as an ordinary function, so a buggy user thread can
+corrupt kernel memory by passing a bad pointer to `read`, `write`, or
+`mq_send`.
 
-**File:line**: `src/kernel/syscall.c:16–18`
+**File:line**: `src/kernel/syscall.c:34` (`syscall_dispatch`)
 
 **Better implementation**: Configure MPU regions for each process (read-only
 flash, read-write stack+heap, no-access kernel). Validate pointer arguments in
@@ -145,8 +148,9 @@ offending thread rather than crashing the kernel.
 
 ## 7. Synchronous console I/O
 
-**Current behavior**: The shell calls `stdio_getchar()` and `printf` directly,
-blocking the shell thread for the entire duration of each USB CDC transaction.
+**Current behavior**: The shell polls `getchar_timeout_us(0)` (sleeping 1 ms
+between polls) and writes with `printf`/`vprintf` (`shell_print`) directly,
+blocking the calling thread for the entire duration of each USB CDC transaction.
 During a long print the shell thread cannot accept new input or service
 commands from other sources.
 
@@ -165,15 +169,17 @@ asynchronously, freeing the shell to process the next command immediately.
 
 ## 8. Linear waiter scan in event flags
 
-**Current behavior**: When `event_post()` is called it scans a flat
+**Current behavior**: When `event_flags_set()` is called it scans a flat
 `event_waiter_pool[MAX_EVENT_WAITERS]` array (sized `MAX_THREADS`) to find
-threads waiting on the posted bits. This runs inside the ISR with interrupts
-disabled, adding O(MAX_THREADS) latency to every event post.
+threads waiting on the posted bits. This runs with interrupts disabled while
+holding both the object's stripe lock and `event_pool_lock`, adding
+O(MAX_THREADS) latency to every event post.
 
-**File:line**: `src/kernel/sync.c:193–196`
+**File:line**: `src/kernel/sync.c:591` (`event_flags_set`), `src/kernel/sync.c:543`
+(`event_waiter_pool`)
 
 **Better implementation**: Embed a per-`event_flags_t` intrusive linked list of
-waiters. `event_post()` traverses only the threads actually waiting on that
+waiters. `event_flags_set()` traverses only the threads actually waiting on that
 specific event object, which is typically 1–3 threads, giving O(waiters) not
 O(MAX_THREADS).
 
@@ -185,13 +191,14 @@ O(MAX_THREADS).
 
 ## 9. Unimplemented device read/write (flash and GPIO via VFS)
 
-**Current behavior**: `dev_flash_read`, `dev_flash_write`, `dev_gpio_read`, and
-`dev_gpio_write` are stubs that return `DEV_ERR_UNSUPPORTED`. TODO comments
-mark them as Phase 5 work. Opening `/dev/flash` or `/dev/gpio` via VFS and
-calling `read`/`write` does nothing useful.
+**Current behavior**: the `read`/`write` handlers of the flash and GPIO devices
+(`flash_read`, `flash_write`, `gpio_read`, `gpio_write`) are stubs that return
+-1. TODO comments mark them as Phase 5 work. Opening `/dev/flash` or
+`/dev/gpio` via VFS and calling `read`/`write` does nothing useful; only the
+ioctls work (flash UID/geometry, GPIO direction/value).
 
-**File:line**: `src/kernel/dev.c:154–180` (flash stubs),
-`src/kernel/dev.c:205–220` (GPIO stubs)
+**File:line**: `src/kernel/dev.c:175–192` (flash stubs),
+`src/kernel/dev.c:237–252` (GPIO stubs)
 
 **Better implementation**:
 - **Flash**: sector-aligned buffered read (XIP cache flush + memcpy from flash
@@ -241,16 +248,18 @@ about 1 KB for BT), which should be `static`.
 
 ## SRAM Impact Summary
 
-Thread stacks are `kmalloc`'d at creation and `kfree`'d on exit, replacing the
-former static `stack_pool` with the shared 64 KB heap (net saving: ~32 KB).
-One additional recovery remains:
+None of the fixes above saves SRAM. Thread stacks are already `kmalloc`'d from
+the 64 KB heap at creation and `kfree`'d on exit, so an unused TCB slot costs
+only its TCB (about 72 bytes), and the TCB and PCB pools together are about
+3 KB.
 
-| Fix | SRAM Saved |
-|-----|-----------|
-| Reduce `MAX_THREADS` 16 → 8 in `task.h` | 32 KB |
-| **Total recoverable** | **~32 KB** |
+The large, adjustable items are:
 
-The CYW43 driver + lwIP stack requires roughly 40–50 KB at runtime. Combined
-with the 32 KB already recovered from dynamic stack allocation, picoOS fits
-within the RP2040's 264 KB SRAM with WiFi+BT active after reducing
-`MAX_THREADS`.
+| Item | SRAM | How to change it |
+|------|------|------------------|
+| Kernel heap | 64 KB | `HEAP_SIZE` in `mem.h` — limits how many threads (2–3 KB stacks) can exist at once |
+| Display framebuffer | ~32 KB (Display Pack) / ~75 KB (Display Pack 2) | Build with `-DPICOOS_DISPLAY_ENABLE=OFF` |
+| FS write buffer + superblock mirror | ~6 KB (RP2040) / ~8 KB (RP2350) | Fixed by `FS_BLOCK_SIZE` and `FS_MAX_FILES` |
+
+Run `python3 tools/mem_report.py <map>` on a build's `.elf.map` for the current
+numbers; a pico + Display Pack build at v0.3.4 has about 146 KB free.

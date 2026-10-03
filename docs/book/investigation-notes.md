@@ -2,6 +2,17 @@
 
 These notes record what was found during a systematic inspection of the picoOS repository. Every technical claim here traces to an actual file and line number. Uncertain interpretations are labeled as inferences.
 
+> **Update — v0.3.4 (2026-10-02).** The code has moved on since this inspection, so **line numbers below are approximate**.  Facts that changed:
+>
+> - **Boot order** (`main.c`): `kmem_init()` → `sync_init()` → `task_init()` → `dev_init()` → `vfs_init()` → `fs_init()`; kernel process; `wifi_init()` / `bt_init()`; idle threads `idle` (core 0) and `idle1` (core 1); shell process.  Core 1 does not idle in `__wfi()`: after registering as a lockout victim it waits for Core 0's scheduler and then runs its own (`sched_start_core1()`).  Both cores schedule threads (SMP).
+> - **Flash writes** go through the SDK's `flash_safe_execute()`, which pauses Core 1 via multicore lockout and disables interrupts.
+> - **Locking**: there is no global kernel lock.  Dedicated hardware spinlocks guard the ready queues, heap and event-waiter pool; blocking primitives share a striped pool; VFS and FS use mutexes.  See `docs/locking.md`.
+> - **Filesystem** is flash-backed and persistent; "RAM-backed" in older notes was simply out of date.  `fs_read()` copies from XIP flash into the caller's buffer.
+> - **WiFi/BT**: the build links `pico_cyw43_arch_lwip_threadsafe_background`, so CYW43/lwIP/BTstack callbacks run in a low-priority IRQ on core 0 and `cyw43_arch_poll()` is a no-op.  `wifi-poll` only tracks scan completion and link drops.  Scan results are read with `wifi_copy_scan_results()` / `bt_copy_scan_results()`; repeat reports refresh an entry's RSSI.
+> - **Time slice** is a fixed 10 ms (`TIME_SLICE_MS`), not 5–20 ms.
+> - **New**: `scantest` app and `tools/scantest.py` (on-device test), `PICOOS_SCAN_RACE_INJECT` test option, `./build wifi`.
+> - `docs/expandfilesystem.md` no longer exists; the superblock limit is documented in `fs.h` and `CLAUDE.md`.
+
 ---
 
 ## Files Inspected
@@ -186,14 +197,14 @@ Sector 2:     File 1 data
 
 **Maximum superblock size constraint:** 12 + N × 32 ≤ 4096. For N = 127 files: 12 + 127×32 = 4076 bytes — just fits in one sector. This constraint is noted in CLAUDE.md and documented in `docs/expandfilesystem.md`.
 
-**Read path:** Zero-copy via XIP. `fs_read()` returns a pointer directly into the XIP flash address space (`XIP_BASE + FS_FLASH_OFFSET + sector * FS_BLOCK_SIZE`).
+**Read path:** Straight from XIP. `fs_read()` `memcpy`s from the XIP flash address space (`XIP_BASE + FS_FLASH_OFFSET + sector * FS_BLOCK_SIZE`) into the caller's buffer — no RAM cache — except for a file currently open for writing, which is read from `fs_buffer`.
 
 **Write path:** Data accumulated in `fs_buffer` (static 4 KB buffer). On `fs_close()`, the sector is erased and programmed from the buffer. This means:
 1. Only one file can be open for writing at a time (single `fs_buffer`).
 2. Writes larger than 4 KB are not supported in the current implementation.
-3. Flash write requires multicore lockout + interrupt disable.
+3. Flash write requires multicore lockout + interrupt disable, provided by `flash_safe_execute()`.
 
-**Inference:** The comment "currently RAM-backed" in CLAUDE.md appears to mean that write-path data lives in RAM (the `fs_buffer`) until commit on close. The filesystem is not purely RAM-backed — reads go directly to flash XIP. The distinction is about where write data lives before commit.
+(An older CLAUDE.md called the filesystem "RAM-backed in current phase"; that was out of date and has been corrected.)
 
 ### Device Abstraction (`src/kernel/dev.c`)
 
@@ -219,14 +230,14 @@ The `vfs_fd_t` struct tracks: used flag, type (device or file), path, position, 
 
 ### WiFi Driver (`src/kernel/wifi.c`)
 
-- **Async context:** CYW43 requires polling; `wifi_poll_thread()` calls `cyw43_arch_poll()` every 10 ms.
-- **Scan callback:** `scan_result_cb()` is invoked by the CYW43 driver during an active scan. Results are stored in `g_scan[]` (max 16 entries). Duplicates are silently dropped when the buffer is full.
+- **Async context:** the build uses `pico_cyw43_arch_lwip_threadsafe_background`, so the driver runs from a low-priority IRQ on core 0 and `cyw43_arch_poll()` is a no-op.  `wifi_poll_thread()` still runs every 10 ms, but only to notice the end of a scan and link drops.
+- **Scan callback:** `scan_result_cb()` runs in that IRQ during an active scan. Results are stored in `g_scan[]` (max 16 entries, one per BSSID; a repeat report refreshes the RSSI).  Each slot is filled before the count is bumped, and readers copy the buffer with `wifi_copy_scan_results()` under the async-context lock.  New networks are dropped once the buffer is full.
 - **Connection retry:** `wifi_connect()` retries up to 3 times with 500 ms backoff. The CYW43 chip occasionally returns `CYW43_LINK_BADAUTH` spuriously on first attempt.
 - **State machine:** `WIFI_STATE_DOWN → SCANNING/CONNECTING → UP/ERROR`
 
 ### Bluetooth Driver (`src/kernel/bluetooth.c`)
 
-- **Shares CYW43 async context** with WiFi — driven by the same `wifi-poll` thread calling `cyw43_arch_poll()`. BT must be initialized after WiFi.
+- **Shares the CYW43 async context** with WiFi — BTstack events arrive from the same core-0 IRQ. BT must be initialized after WiFi.  Results are read with `bt_copy_scan_results()`.
 - **Classic inquiry:** 5 × 1.28 s = ~6.4 s window; results include address, Class of Device, RSSI.
 - **BLE passive scan:** 48-slot interval (~30 ms), 30-slot window (~18.75 ms); runs simultaneously with Classic inquiry.
 - **AD parsing:** `extract_ble_adv_data()` parses standard AD types: name (0x08/0x09), flags (0x01), TX power (0x0A), manufacturer specific (0xFF → company ID).
@@ -238,13 +249,13 @@ The `vfs_fd_t` struct tracks: used flag, type (device or file), path, position, 
 - **Main loop:** readline → tokenize (in-place whitespace split) → lookup → call handler. Handler returns int (0 = success, nonzero = error).
 - **config.txt:** Read via VFS at startup. Key=value format. `AUTORUN=<appname>` launches app at boot. `BUTTONA=<appname>` etc. bind buttons on Display Pack hardware.
 - **Button monitor:** If any button bindings found, spawns a background thread polling GPIO at 100 ms intervals. Launches bound app if not already running.
-- **App PIDs:** Kernel 1–9, autorun 50+, button bindings 200+, manual `run` command 100+. These PID ranges are set by `next_pid` in syscall.c — they are not enforced by hardware.
+- **App PIDs:** kernel 1, shell 2, autorun 50+, manual `run` command 100+, button bindings 200+.  Each range comes from a `static uint32_t` counter next to the code that launches the app in `shell.c` (`autorun_pid`, `user_pid`, `btn_pid`); nothing enforces them.
 
 ### Build System (`src/CMakeLists.txt`)
 
 **Board detection:** CMake inspects `PICO_CYW43_SUPPORTED` (set by Pico SDK when board has CYW43) to decide whether WiFi/BT sources are compiled. Feature flags default ON but auto-disable for non-CYW43 boards.
 
-**Output naming:** Target name is constructed as `{board_name}os{suffix}-v{major}.{minor}.{edit}` where suffix is `_D` (Display Pack), `_D2` (Display Pack 2), or empty. Example: `picowos_D-v0.2.1`.
+**Output naming:** Target name is constructed as `{board_name}os{suffix}-v{major}.{minor}.{edit}` where suffix is `_D` (Display Pack), `_D2` (Display Pack 2), or empty. Example: `picowos_D-v0.3.4`.  Images built with `PICOOS_SCAN_RACE_INJECT` add `_INJ` (e.g. `picowos_INJ-v0.3.4`).
 
 **FS constants per board:**
 - pico/picow (RP2040): `FS_MAX_FILES=64`, `FS_FLASH_SIZE=1MB`
@@ -306,8 +317,6 @@ make -j$(nproc) -C build
 ---
 
 ## Areas of Uncertain Interpretation
-
-- The phrase "RAM-backed in current phase" for the filesystem (CLAUDE.md) is interpreted as referring to the write buffer (`fs_buffer`) living in RAM before flash commit. Read paths still use XIP flash directly. This interpretation is consistent with `fs_read()` returning XIP pointers.
 
 - The `core1_lockout_ready` variable in `main.c` is inferred to be a global flag set by Core 1 to signal readiness. The exact mechanism (multicore FIFO or shared volatile variable) was not confirmed by direct line inspection of Core 1 entry code — the pattern matches standard CYW43 dual-core lockout initialization.
 

@@ -357,7 +357,10 @@ static int cmd_fs(int argc, char **argv)
             }
         }
 
-        fs_close(fd);
+        if (fs_close(fd) != 0) {
+            shell_print("fs write: flash commit failed for '%s'\r\n", argv[2]);
+            return -1;
+        }
         if (total < 0) {
             shell_print("fs write: failed writing to '%s'\r\n", argv[2]);
             return -1;
@@ -389,7 +392,10 @@ static int cmd_fs(int argc, char **argv)
 
         int written = fs_write(fd, (const uint8_t *)line,
                                (uint32_t)strlen(line));
-        fs_close(fd);
+        if (fs_close(fd) != 0) {
+            shell_print("fs append: flash commit failed for '%s'\r\n", argv[2]);
+            return -1;
+        }
 
         if (written < 0) {
             shell_print("fs append: failed writing to '%s'\r\n", argv[2]);

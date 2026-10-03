@@ -7,7 +7,7 @@ cmake_minimum_required(VERSION 3.13)
 #   picow   → pico_w
 #   pico2w  → pico2_w
 #
-# Usage: cmake -B build -DPICO_BOARD=picow
+# Usage: cmake -B build_picow -DPICO_BOARD=picow   (not "build" — that is a script)
 # ---------------------------------------------------------------------------
 if(PICO_BOARD STREQUAL "picow")
     set(PICO_BOARD "pico_w" CACHE STRING "" FORCE)

@@ -16,10 +16,12 @@ optional Bluetooth scanning support.
 - No SVC instruction — syscalls are direct C function calls (`syscall_dispatch`).
 - Full SMP scheduling — both RP2040/RP2350 cores run the preemptive scheduler
   concurrently. Each core has its own SysTick, PendSV, and `current_tcb` slot.
-  Core 1 also registers as a multicore lockout victim so Core 0's flash writes
-  (`multicore_lockout_start_blocking`) can safely pause it during flash erase/program.
-  Ready queues are shared and protected by an RP2040 hardware spinlock; heap
-  allocation uses a second hardware spinlock; VFS operations are serialised by a mutex.
+  Core 1 also registers as a multicore lockout victim so the filesystem's flash writes
+  (`flash_safe_execute()`) can safely pause it during flash erase/program.
+  Ready queues, the heap and the event-waiter pool each have a dedicated hardware
+  spinlock; mutexes, semaphores, event flags and message queues share a small striped
+  pool of hardware locks; VFS and filesystem operations are serialised by mutexes.
+  See [locking.md](locking.md).
 - On RP2350 (Cortex-M33) the hardware FPU is present. picoOS saves/restores
   `EXC_RETURN` per-thread in `tcb_t.exc_return` so the correct exception frame size
   (basic 8-word or extended 26-word FP frame) is used on every context switch.
@@ -70,8 +72,14 @@ const app_entry_t app_table[] = {
 };
 ```
 
-**Step 3** (optional) — Register a shell command from your app's init path before
-`sched_start()`. See [Section 8: Shell Integration](#8-shell-integration).
+**Step 3** — Add the source file to `PICOOS_SOURCES` in `src/CMakeLists.txt` (inside
+`if(PICOOS_INCLUDE_DEMO_APPS)`, or a board-feature block if the app needs WiFi or the
+display), and declare the entry function in a header that `demo.c` includes.
+
+**Step 4** (optional) — Launch it at boot with `AUTORUN=myapp` in `config.txt`, or bind
+it to a Display Pack button. See [Launching Apps at Boot](#launching-apps-at-boot-configtxt).
+
+A full walkthrough is in [application.md](application.md).
 
 ---
 
@@ -222,7 +230,7 @@ void task_free_process(pcb_t *p);
 
 ### 3.8 Boot Threads
 
-At boot, three threads are created before `sched_start()`:
+At boot, these threads are created before `sched_start()`:
 
 | TID | Priority | Core | Name | Purpose |
 |-----|----------|------|------|---------|
@@ -230,7 +238,12 @@ At boot, three threads are created before `sched_start()`:
 | 2 | 7 | 1 | `idle1` | Core 1 idle — pinned to Core 1 (`THREAD_AFFINITY_C1`) |
 | 3 | 2 | any | `shell` | USB CDC interactive shell |
 
-`MAX_THREADS = 16`, so **13 thread slots** are free at startup.
+On pico_w / pico2_w builds `wifi_init()` runs first and creates `wifi-poll` (priority 6,
+any core) as TID 1, so `idle`, `idle1` and `shell` become TIDs 2–4.
+
+`MAX_THREADS = 16`, so **13 thread slots** are free at startup (12 on WiFi builds).
+After the scheduler starts, the shell may add an AUTORUN app and, on display builds
+with button bindings, a `btn-mon` thread (priority 3).
 
 ---
 
@@ -239,9 +252,11 @@ At boot, three threads are created before `sched_start()`:
 Include: `src/kernel/sync.h`
 
 All blocking primitives (mutex, semaphore, event flags, message queue) are
-SMP-safe: each contains an embedded `spinlock_t` backed by an RP2040 hardware
-SIO spinlock, which provides cross-core atomicity without disabling interrupts
-globally.
+SMP-safe: each contains an embedded `spinlock_t` that points at one of a small
+pool of SIO hardware spinlocks (`prim_pool`, chosen from the object's address).
+You can create as many of them as you like without using up hardware locks.
+While the lock is held, interrupts are disabled on the local core only.
+Waiters block in the scheduler; they do not spin. See [locking.md](locking.md).
 
 ### 4.0 Spinlock
 
@@ -250,9 +265,7 @@ application code should use a mutex or semaphore instead.
 
 ```c
 spinlock_t s;
-spinlock_init(&s);        // claim an RP2040 hardware spinlock for SMP safety
-                          // (must be called before the spinlock is used on
-                          //  more than one core; omit for single-core use)
+spinlock_init(&s);        // claims a dedicated hardware spinlock (IDs 24-31)
 
 // IRQ-aware pair (preferred — saves and restores interrupt state)
 uint32_t saved = spinlock_irq_acquire(&s);
@@ -265,11 +278,19 @@ spinlock_release(&s);
 ```
 
 `spinlock_irq_acquire` disables IRQs and acquires the lock; the saved IRQ state
-is returned and must be passed back to `spinlock_irq_release`.  The
+is returned and must be passed back to `spinlock_irq_release`.
+
+**Avoid `spinlock_init()` in applications.**  Each call claims one of only 8
+claimable hardware spinlocks, several of which the kernel already uses, and it
+panics when none are left.  Use a `kmutex_t` instead — it costs no hardware lock.
+The plain `spinlock_acquire`/`spinlock_release` pair has no callers in the kernel
+and is only safe if no interrupt handler on the same core takes the same lock.
+
+The
 `PICOOS_LOCK_DEBUG` build adds a timeout: if the lock is held for more than
 `PICOOS_LOCK_TIMEOUT_MS` (default 5 000 ms), `lock_deadlock_panic()` is called.
 
-### 4.1 Mutex (non-recursive, FIFO)
+### 4.1 Mutex (non-recursive)
 
 ```c
 kmutex_t m;
@@ -279,6 +300,10 @@ kmutex_lock(&m);   // blocks if already held
 // critical section
 kmutex_unlock(&m);
 ```
+
+Blocked threads are woken in FIFO order, but a woken thread re-checks the lock, so a
+thread arriving at that moment can take it first.  Locking a mutex you already hold
+blocks forever, and `kmutex_unlock` does not check the caller is the owner.
 
 ### 4.2 Semaphore (counting)
 
@@ -344,15 +369,18 @@ vfs_close(fd);
 | `VFS_O_RDWR` | 0x03 | Open for reading and writing |
 | `VFS_O_CREAT` | 0x04 | Create the file if it does not exist |
 | `VFS_O_TRUNC` | 0x08 | Truncate to zero length on open |
+| `VFS_O_APPEND` | 0x10 | Start writing at the end of the file |
 
 `vfs_open` returns a non-negative file descriptor on success, or `-1` on failure.
-Maximum simultaneously open files: `VFS_MAX_OPEN = 16`.
+Maximum simultaneously open VFS descriptors: `VFS_MAX_OPEN = 16`, of which at most
+`FS_MAX_OPEN_FDS = 8` can be filesystem files.  Only one file can be open for writing
+at a time.
 
 ### Device Paths
 
 | Path | Device | Notes |
 |------|--------|-------|
-| `/dev/console` | USB CDC serial | Read/write text |
+| `/dev/console` | USB CDC serial | Read (non-blocking) / write text |
 | `/dev/timer` | System timer | ioctl only |
 | `/dev/flash` | Raw flash | ioctl only |
 | `/dev/gpio` | GPIO pins | ioctl only |
@@ -390,29 +418,36 @@ dev_ioctl(DEV_TIMER, IOCTL_TIMER_GET_US, &us);       // absolute time in µs
 
 ### 6.2 GPIO
 
-The `arg` for GPIO ioctls encodes pin number in bits [15:0] and the value/direction in
-bit 16:
+Every GPIO ioctl takes a **pointer to a `uint32_t` word**.  The pin number goes in
+bits [7:0] and the value or direction in bit 16.  (Passing the encoded value itself,
+cast to a pointer, makes the driver read from a bogus address.)
 
 ```c
+uint32_t w;
+
 // Set pin 25 as output
-dev_ioctl(DEV_GPIO, IOCTL_GPIO_SET_DIR, (void *)(uintptr_t)(25u | (1u << 16)));
+w = 25u | (1u << 16);
+dev_ioctl(DEV_GPIO, IOCTL_GPIO_SET_DIR, &w);
 
-// Drive pin 25 high
-dev_ioctl(DEV_GPIO, IOCTL_GPIO_SET_VAL, (void *)(uintptr_t)(25u | (1u << 16)));
+// Drive pin 25 high, then low
+w = 25u | (1u << 16);
+dev_ioctl(DEV_GPIO, IOCTL_GPIO_SET_VAL, &w);
+w = 25u;
+dev_ioctl(DEV_GPIO, IOCTL_GPIO_SET_VAL, &w);
 
-// Drive pin 25 low
-dev_ioctl(DEV_GPIO, IOCTL_GPIO_SET_VAL, (void *)(uintptr_t)(25u | (0u << 16)));
-
-// Read pin value (arg = uint32_t * receiving 0 or 1)
-uint32_t val;
-dev_ioctl(DEV_GPIO, IOCTL_GPIO_GET_VAL, &val);
+// Read pin 15: put the pin number in the word; it is replaced by 0 or 1
+w = 15u;
+dev_ioctl(DEV_GPIO, IOCTL_GPIO_GET_VAL, &w);
 ```
 
-| Command | Arg encoding | Description |
+| Command | Arg (`uint32_t *` to) | Description |
 |---------|-------------|-------------|
 | `IOCTL_GPIO_SET_DIR` (0x0200) | `pin \| (dir << 16)` — dir: 1=output, 0=input | Set GPIO direction |
 | `IOCTL_GPIO_SET_VAL` (0x0201) | `pin \| (val << 16)` — val: 1=high, 0=low | Set GPIO output level |
-| `IOCTL_GPIO_GET_VAL` (0x0202) | `uint32_t *` | Read GPIO pin level |
+| `IOCTL_GPIO_GET_VAL` (0x0202) | `pin` in; 0 or 1 out | Read GPIO pin level |
+
+The pins must already be set up as GPIO (the driver does not call `gpio_init`).
+`vfs_read`/`vfs_write` on `/dev/gpio` are not implemented yet.
 
 ### 6.3 Display (requires `PICOOS_DISPLAY_ENABLE`)
 
@@ -723,8 +758,11 @@ typedef struct {
 ```
 
 Up to `BT_MAX_SCAN_RESULTS` (20) devices are stored, one per address.  Repeat
-reports of a device during the scan refresh its `rssi` with the latest reading.  Classic scan duration is fixed at 5 × 1.28 s ≈ 6.4 s; the BLE scan runs
-concurrently and stops when the Classic inquiry completes.
+reports of a device during the scan refresh its `rssi` with the latest reading.  Classic
+scan duration is fixed at 5 × 1.28 s ≈ 6.4 s and `bt_scan_is_done()` turns true when it
+completes.  The BLE scan runs concurrently and is **not** stopped then: the `bt scan`
+shell command stops it, but an app that calls `bt_scan()` directly keeps receiving BLE
+results until the next `bt_scan()`.
 
 ---
 
@@ -745,8 +783,11 @@ dev_ioctl(DEV_FLASH, IOCTL_FLASH_GET_UID, uid);    // unique ID of the flash chi
 
 Include: `src/kernel/fs.h` (or use VFS paths — preferred for read/write).
 
-The filesystem is flash-backed (1 MB offset, 512 KB region). Writes are buffered in RAM
-and committed to flash on `vfs_close()`. **Flash writes briefly pause all execution.**
+The filesystem is flash-backed: it starts 1 MB into flash and is 1 MB long on RP2040
+boards (3 MB on RP2350).  Each file gets one 4 KB sector, so a file holds at most 4 KB.
+Reads come straight from XIP flash.  Writes are buffered in a single 4 KB RAM buffer and
+committed to flash on `vfs_close()`, so only one file can be open for writing at a time.
+**Flash writes briefly pause both cores** (via `flash_safe_execute()`).
 
 ### Reading and Writing Files via VFS (preferred)
 
@@ -806,8 +847,10 @@ Include: `src/shell/shell.h`
 
 ### Registering a Command
 
-Call `shell_register_cmd()` before `sched_start()` (e.g., from your module's init
-function or from `main.c`).
+Call `shell_register_cmd()` from a kernel module's init function, called from `main.c`
+before `sched_start()` (this is what `wifi_init()` and the display/LED drivers do).
+The command table has no lock, so do not register commands from app threads while the
+shell is running.
 
 ```c
 static int cmd_myapp(int argc, char **argv) {
@@ -829,6 +872,9 @@ static const shell_cmd_t my_cmd = {
 shell_register_cmd(&my_cmd);
 ```
 
+The handler runs on the shell thread, so a long-running command blocks the shell.
+Use `run` and an app for anything that should run in the background.
+
 `shell_register_cmd` returns `0` on success, `-1` if the command table is full
 (`SHELL_MAX_CMDS = 32`).
 
@@ -838,6 +884,26 @@ shell_register_cmd(&my_cmd);
 shell_print("value = %u\r\n", val);   // printf-style formatted output
 shell_println("done");                 // print string + CRLF
 ```
+
+### Launching Apps at Boot (`config.txt`)
+
+The shell reads `config.txt` from the filesystem once, when it starts:
+
+| Line | Effect |
+|------|--------|
+| `AUTORUN=<app>` | Spawn `<app>` from `app_table[]` at boot (PID 50+, priority from the table, 2 KB stack, `arg = NULL`) |
+| `BUTTONA=<app>` … `BUTTONY=<app>` | Display builds: launch `<app>` when that Display Pack button is pressed (PID 200+; a second press while it runs is ignored) |
+
+```
+pico> fs write config.txt AUTORUN=sensor
+pico> reboot
+...
+[shell] autorun: started 'sensor' PID 50 TID 4
+```
+
+Only the first 255 bytes of `config.txt` are read, only the first `AUTORUN=` line is
+used, and the value must match the app name exactly (no trailing spaces).  See
+[application.md](application.md#launching-an-app-automatically) for details.
 
 ---
 
@@ -918,6 +984,7 @@ Set via `CURRENT_TCB->affinity = THREAD_AFFINITY_C1;` (etc.) at thread start.
 | `VFS_O_RDWR` | 0x03 | Read-write |
 | `VFS_O_CREAT` | 0x04 | Create if absent |
 | `VFS_O_TRUNC` | 0x08 | Truncate on open |
+| `VFS_O_APPEND` | 0x10 | Write at end of file |
 
 ### All ioctl Commands
 
@@ -925,9 +992,9 @@ Set via `CURRENT_TCB->affinity = THREAD_AFFINITY_C1;` (etc.) at thread start.
 |---------|------|--------|----------|
 | `IOCTL_TIMER_GET_TICK` | 0x0100 | `DEV_TIMER` | `uint32_t *` |
 | `IOCTL_TIMER_GET_US` | 0x0101 | `DEV_TIMER` | `uint64_t *` |
-| `IOCTL_GPIO_SET_DIR` | 0x0200 | `DEV_GPIO` | `pin \| (dir << 16)` |
-| `IOCTL_GPIO_SET_VAL` | 0x0201 | `DEV_GPIO` | `pin \| (val << 16)` |
-| `IOCTL_GPIO_GET_VAL` | 0x0202 | `DEV_GPIO` | `uint32_t *` |
+| `IOCTL_GPIO_SET_DIR` | 0x0200 | `DEV_GPIO` | `uint32_t *` → `pin \| (dir << 16)` |
+| `IOCTL_GPIO_SET_VAL` | 0x0201 | `DEV_GPIO` | `uint32_t *` → `pin \| (val << 16)` |
+| `IOCTL_GPIO_GET_VAL` | 0x0202 | `DEV_GPIO` | `uint32_t *` → pin in, 0/1 out |
 | `IOCTL_FLASH_GET_UID` | 0x0500 | `DEV_FLASH` | `uint8_t[FLASH_UID_SIZE]` |
 | `IOCTL_DISP_CLEAR` | 0x0300 | `DEV_DISPLAY` | `NULL` |
 | `IOCTL_DISP_FLUSH` | 0x0301 | `DEV_DISPLAY` | `NULL` |
@@ -954,11 +1021,12 @@ Set via `CURRENT_TCB->affinity = THREAD_AFFINITY_C1;` (etc.) at thread start.
 
 | Constant | Value | Meaning |
 |----------|-------|---------|
-| `MAX_THREADS` | 16 | Maximum live threads (3 used at boot: idle, idle1, shell → **13 free**) |
+| `MAX_THREADS` | 16 | Maximum live threads (3 used at boot: idle, idle1, shell → **13 free**; 4 on WiFi builds) |
 | `MAX_PROCESSES` | 8 | Maximum processes |
 | `MQ_MAX_MSG` | 16 | Messages per queue |
 | `MQ_MSG_SIZE` | 64 | Max bytes per message |
 | `VFS_MAX_OPEN` | 16 | Max simultaneous open VFS fds |
+| `FS_MAX_OPEN_FDS` | 8 | Max simultaneously open filesystem files |
 | `FS_MAX_FILES` | 64 / 127 | Max files — 64 on RP2040, 127 on RP2350 |
 | `FS_MAX_FILE_DATA` | 4096 | Max bytes per file |
 | `SHELL_MAX_CMDS` | 32 | Max registered shell commands |

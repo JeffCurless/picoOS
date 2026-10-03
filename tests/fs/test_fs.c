@@ -39,6 +39,7 @@
 static void fs_reset(void)
 {
     mock_flash_init();
+    fs_init();     /* initialises fs_mutex; formats the blank (0xFF) flash */
     fs_format();
 }
 
@@ -86,6 +87,7 @@ static void test_format_creates_valid_superblock(void)
 {
     BEGIN_TEST(format_creates_valid_superblock);
     mock_flash_init();
+    fs_init();     /* initialises fs_mutex before fs_format() takes it */
     fs_format();
 
     /* Re-read the superblock through fs_init to confirm flash contents. */

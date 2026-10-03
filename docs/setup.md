@@ -91,8 +91,8 @@ cd picoOS
 
 Pass `-DPICO_BOARD=<name>` on the CMake command line.  picoOS accepts underscore-free aliases and maps them internally to SDK-canonical names:
 
-| `-DPICO_BOARD=` | Board | Chip | WiFi |
-|----------------|-------|------|------|
+| `-DPICO_BOARD=` | Board | Chip | WiFi + BT |
+|----------------|-------|------|-----------|
 | `pico` | Raspberry Pi Pico | RP2040 | No |
 | `pico2` | Raspberry Pi Pico 2 | RP2350 | No |
 | `picow` | Raspberry Pi Pico W | RP2040 | Yes |
@@ -100,27 +100,45 @@ Pass `-DPICO_BOARD=<name>` on the CMake command line.  picoOS accepts underscore
 
 If `-DPICO_BOARD` is omitted, CMake defaults to `pico`.
 
-### Configure and build
+### Build every variant with the `build` script
+
+The repository root has a `build` script (a file, not a directory) that configures and builds each board/display combination in its own `build_<board>_<ND|D|D2>/` directory and copies the `.uf2` images into `kits/`:
+
+```bash
+./build            # all 12 variants: pico, picow, pico2, pico2w × no display / Display Pack / Display Pack 2
+./build pico       # pico + picow (6 variants)
+./build pico2      # pico2 + pico2w (6 variants)
+./build wifi       # picow + pico2w (6 variants) + 2 scantest fault-injection images (*_INJ)
+./build tests      # host-native unit tests (see section 6)
+./clean            # remove the build_<board>_<variant>/ directories and tests/build
+```
+
+It uses `$PICO_SDK_PATH`, or `$HOME/workspace/pico-sdk` if that is not set.
+
+### Configure and build one board by hand
+
+Use any directory name except `build`, which is the script above:
 
 ```bash
 # Configure (replace pico with your target board)
-cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico
+cmake -B build_pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico
 
 # Build
-make -j$(nproc) -C build
+make -j$(nproc) -C build_pico
 ```
 
-A successful build produces these files in `build/src/`, named after the board and version:
+A successful build produces these files in `build_pico/src/`, named after the board, display variant and version (`<name>` below is e.g. `picoos_D-v0.3.4`):
 
 | File | Purpose |
 |------|---------|
-| `<board>os-v<ver>.uf2` | **Flash this** — UF2 image for drag-and-drop or `picotool` |
-| `<board>os-v<ver>.elf` | ELF with debug symbols (used by GDB) |
-| `<board>os-v<ver>.bin` | Raw binary |
-| `<board>os-v<ver>.dis` | Disassembly listing |
-| `<board>os-v<ver>.elf.map` | Linker map (used by `mem_report.py`) |
+| `<name>.uf2` | **Flash this** — UF2 image for drag-and-drop or `picotool` |
+| `<name>.elf` | ELF with debug symbols (used by GDB) |
+| `<name>.bin` | Raw binary |
+| `<name>.hex` | Intel HEX image |
+| `<name>.dis` | Disassembly listing |
+| `<name>.elf.map` | Linker map (used by `mem_report.py`) |
 
-Output names include the board, display variant suffix, and version.  For example, a `pico` + Display Pack build at v0.2.0 produces `picoos_D-v0.2.0.uf2`; without a display it produces `picoos-v0.2.0.uf2`; with Display Pack 2 it produces `picoos_D2-v0.2.0.uf2`.  All board and display variants can safely share the same `build/src/` output directory.
+The display suffix is `_D` for Display Pack, `_D2` for Display Pack 2 and nothing without a display; test images built with `PICOOS_SCAN_RACE_INJECT` add `_INJ`.  For example, a `pico` + Display Pack build at v0.3.4 produces `picoos_D-v0.3.4.uf2`, and a `picow` build without a display produces `picowos-v0.3.4.uf2`.  Use a separate build directory per board, as the `build` script does: the board is stored in the CMake cache when the directory is first configured.
 
 ### Build options (optional)
 
@@ -128,11 +146,11 @@ The Display Pack drivers are ON by default.  Override on the CMake command line:
 
 ```bash
 # No Display Pack hardware attached
-cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico \
+cmake -B build_pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico \
       -DPICOOS_DISPLAY_ENABLE=OFF
 
 # Display Pack present but suppress shell commands
-cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico \
+cmake -B build_pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico \
       -DPICOOS_DISPLAY_SHELL=OFF -DPICOOS_LED_SHELL=OFF
 ```
 
@@ -143,7 +161,10 @@ cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico \
 | `PICOOS_DISPLAY_SHELL` | ON | `display` shell command |
 | `PICOOS_LED_ENABLE` | ON | RGB LED driver + `/dev/led` |
 | `PICOOS_LED_SHELL` | ON | `led` shell command |
-| `PICOOS_INCLUDE_DEMO_APPS` | ON | Built-in demo apps (producer/consumer/sensor); set `OFF` to supply your own app table |
+| `PICOOS_BT_ENABLE` | ON | Bluetooth scanning on pico_w / pico2_w; ignored on boards without a CYW43 |
+| `PICOOS_INCLUDE_DEMO_APPS` | ON | Built-in apps (`producer`, `consumer`, `sensor`, `pi`, plus `cray-one` and `scantest` on WiFi boards); set `OFF` to supply your own app table |
+| `PICOOS_LOCK_DEBUG` | OFF | Deadlock detection for blocking locks (timeout `PICOOS_LOCK_TIMEOUT_MS`, default 5000) — see [testing.md](testing.md) |
+| `PICOOS_SCAN_RACE_INJECT` | OFF | **Test only** — re-opens the scan-buffer race for `scantest`; never flash these images for normal use |
 
 Setting `PICOOS_DISPLAY_ENABLE=OFF` cascades OFF to all sub-features.  Setting any sub-feature ON automatically enables `PICOOS_DISPLAY_ENABLE`.
 
@@ -152,7 +173,7 @@ Setting `PICOOS_DISPLAY_ENABLE=OFF` cascades OFF to all sub-features.  Setting a
 After editing source files, just run `make` again:
 
 ```bash
-make -j$(nproc) -C build
+make -j$(nproc) -C build_pico
 ```
 
 CMake tracks dependencies automatically — it will only recompile changed translation units.
@@ -160,10 +181,14 @@ CMake tracks dependencies automatically — it will only recompile changed trans
 ### Cleaning
 
 ```bash
-make -C build clean      # remove compiled objects, keep CMake cache
+make -C build_pico clean      # remove compiled objects, keep CMake cache
 # or wipe everything:
-rm -rf build && cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico && make -j$(nproc) -C build
+rm -rf build_pico && cmake -B build_pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico && make -j$(nproc) -C build_pico
+# or remove every build_<board>_<variant>/ directory made by ./build:
+./clean
 ```
+
+Never run `rm -rf build` in the repository root — `build` is the build script.
 
 ---
 
@@ -191,7 +216,7 @@ Test project /home/user/picoOS/tests/build
     Start 1: mem
 1/4 Test #1: mem ..............................   Passed    0.03 sec
     Start 2: sync
-2/4 Test #2: sync .............................   Passed    0.00 sec
+2/4 Test #2: sync .............................   Passed    0.10 sec
     Start 3: fs
 3/4 Test #3: fs ...............................   Passed    0.00 sec
     Start 4: vfs
@@ -205,7 +230,7 @@ Test project /home/user/picoOS/tests/build
 | Binary | Module | Cases | Coverage |
 |--------|--------|-------|---------|
 | `test_mem` | `src/kernel/mem.c` | 14 | Zero alloc, alignment, exhaustion, fragmentation, coalescing, random sizes |
-| `test_sync` | `src/kernel/sync.c` | 31 | Spinlock, mutex, semaphore, event flags, message queue — non-blocking paths |
+| `test_sync` | `src/kernel/sync.c` | 37 | Spinlock, mutex, semaphore, event flags, message queue — non-blocking paths; `PICOOS_LOCK_DEBUG` deadlock detection |
 | `test_fs` | `src/kernel/fs.c` | 17 | Format, CRUD, limits, name boundary, truncate, append, persistence, corruption |
 | `test_vfs` | `src/kernel/vfs.c` | 10 | Device/file routing, FD exhaustion, double-close, mount table limits |
 
@@ -229,8 +254,8 @@ See **[docs/testing.md](testing.md)** for a full description of each test case a
 4. Copy the `.uf2` file to the drive (substitute the actual filename for your board):
 
 ```bash
-cp build/src/picoos_D-v0.2.0.uf2 /media/$USER/RPI-RP2/
-# macOS: cp build/src/picoos_D-v0.2.0.uf2 /Volumes/RPI-RP2/
+cp build_pico/src/picoos_D-v0.3.4.uf2 /media/$USER/RPI-RP2/
+# macOS: cp build_pico/src/picoos_D-v0.3.4.uf2 /Volumes/RPI-RP2/
 ```
 
 5. The Pico unmounts and reboots into picoOS automatically.
@@ -247,7 +272,7 @@ sudo apt install picotool
 With the Pico in BOOTSEL mode:
 
 ```bash
-picotool load build/src/picoos_D-v0.2.0.uf2 --force
+picotool load build_pico/src/picoos_D-v0.3.4.uf2 --force
 picotool reboot
 ```
 
@@ -288,7 +313,7 @@ Useful flags:
 ```bash
 python3 tools/console.py --port /dev/ttyACM0   # force a specific port
 python3 tools/console.py --log session.log      # save all output to a file
-python3 tools/console.py --upload myfile.txt /myfile.txt  # upload a file
+python3 tools/console.py --upload myfile.txt myfile.txt   # upload a file (names ≤ 15 chars, no directories)
 python3 tools/console.py --list-ports           # show available serial ports
 ```
 
@@ -315,28 +340,25 @@ After flashing, the console should show something like:
 
 ```
 =======================================================
-picoOS  v0.2.0
+picoOS  v0.3.4
 
   Platform : RP2040, dual ARM Cortex-M0+ (133 MHz max)
-  Options  : none
+  Options  : DISPLAY_PACK
 =======================================================
 
 Threads created:
   TID 1  PID 1  pri 7  idle
-  TID 2  PID 2  pri 2  shell
+  TID 2  PID 1  pri 7  idle1
+  TID 3  PID 2  pri 2  shell
 
 Starting scheduler...
 
 pico>
 ```
 
-On a `picow` or `pico2w` build the Options line will include `WiFi`:
+The Options line lists the compiled-in features: `WiFi`, `Bluetooth` and `DISPLAY_PACK`, or `none`.  A `picow` build with a Display Pack shows `Options  : WiFi Bluetooth DISPLAY_PACK`, and its thread list starts with `wifi-poll` (TID 1, pri 6), followed by `idle`, `idle1` and `shell`.  On the very first boot the filesystem is formatted, which takes a moment.
 
-```
-  Options  : WiFi
-```
-
-Type `help` to list available shell commands.
+Type `help` to list available shell commands.  To start an app automatically on every boot, add an `AUTORUN=<app>` line to `config.txt` — see [application.md](application.md#launching-an-app-automatically).
 
 ---
 
@@ -344,12 +366,12 @@ Type `help` to list available shell commands.
 
 ### clangd (VS Code, Neovim, etc.)
 
-For full SDK-aware completions and diagnostics, point clangd at the compile database generated by CMake:
+For full SDK-aware completions and diagnostics, point clangd at the compile database generated by CMake.  Configure with a WiFi board if you want the WiFi/BT code (and `scantest.c`) to resolve, since those files are only compiled for `picow` / `pico2w`:
 
 ```bash
-cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico \
+cmake -B build_picow -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=picow \
       -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-ln -s build/compile_commands.json compile_commands.json
+ln -sf build_picow/compile_commands.json compile_commands.json
 ```
 
 Then open the project root in your editor.
@@ -385,7 +407,7 @@ openocd -f interface/cmsis-dap.cfg -f target/rp2350.cfg
 In another terminal, launch GDB (substitute the actual ELF name for your board):
 
 ```bash
-arm-none-eabi-gdb build/src/picoos_D-v0.2.0.elf
+arm-none-eabi-gdb build_pico/src/picoos_D-v0.3.4.elf
 (gdb) target remote :3333
 (gdb) monitor reset init
 (gdb) continue
@@ -404,3 +426,5 @@ arm-none-eabi-gdb build/src/picoos_D-v0.2.0.elf
 | `make` fails on `arm-none-eabi-gcc` not found | Toolchain not installed | Follow step 2 |
 | `picotool` can't find device | Pico not in BOOTSEL mode | Hold BOOTSEL while plugging in, or use `update` shell command |
 | No USB input on pico2_w | Stale build without M33 FPU fix | Ensure you are on the current branch and rebuild |
+| `cmake -B build` fails, or `build` vanished | `build` is the build script, not a directory | Use another directory name (`build_pico`) or `./build`; restore the script with `git checkout build` |
+| AUTORUN app does not start | Name mismatch or line past byte 255 of `config.txt` | See [application.md](application.md#launching-an-app-automatically) |

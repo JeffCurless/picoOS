@@ -16,6 +16,7 @@
 #include "vfs.h"    /* VFS_O_* flags */
 #include "arch.h"   /* XIP_BASE, flash_safe_execute, multicore helpers */
 #include "sync.h"   /* kmutex_t */
+#include "sched.h"  /* sched_yield — move to core 0 for flash writes */
 
 #include <stdio.h>
 
@@ -126,6 +127,13 @@ static fs_open_fd_t open_fds[FS_MAX_OPEN_FDS];
  *
  * UINT32_MAX as the timeout gives effectively "wait forever" behaviour,
  * matching the original multicore_lockout_start_blocking() semantics.
+ *
+ * Core 0 only: multicore lockout is one-way.  flash_safe_execute() can only
+ * pause the *other* core if that core called multicore_lockout_victim_init(),
+ * and only Core 1 does (main.c).  Called from Core 1 it returns
+ * PICO_ERROR_NOT_PERMITTED without running the callback.  The scheduler may
+ * run the calling thread on either core, and may move it between two flash
+ * operations, so fs_flash_safe() pins the thread to Core 0 for the call.
  * ========================================================================= */
 
 typedef struct { uint32_t offset; }                         fs_erase_cb_t;
@@ -143,16 +151,43 @@ static void do_flash_program(void *param)
     flash_range_program(a->offset, a->src, FS_BLOCK_SIZE);
 }
 
-static void flash_erase_sector(uint32_t flash_offset)
+/* Run fn(param) through flash_safe_execute() on Core 0.  Returns PICO_OK
+ * (0) or the SDK error code.  Before the scheduler starts (fs_init from
+ * main) there is no current thread and main already runs on Core 0. */
+static int fs_flash_safe(void (*fn)(void *), void *param)
 {
-    fs_erase_cb_t args = { flash_offset };
-    flash_safe_execute(do_flash_erase, &args, UINT32_MAX);
+    tcb_t  *self  = CURRENT_TCB;
+    int8_t  saved = THREAD_AFFINITY_ANY;
+
+    if (self != NULL) {
+        saved = self->affinity;
+        self->affinity = THREAD_AFFINITY_C0;
+        while (get_core_num() != 0u) {
+            sched_yield();          /* Core 0 picks us up at its next switch */
+        }
+    }
+
+    int rc = flash_safe_execute(fn, param, UINT32_MAX);
+
+    if (self != NULL) {
+        self->affinity = saved;
+    }
+    if (rc != 0) {
+        printf("[fs] flash operation failed (rc %d)\r\n", rc);
+    }
+    return rc;
 }
 
-static void flash_program_sector(uint32_t flash_offset, const uint8_t *src)
+static int flash_erase_sector(uint32_t flash_offset)
+{
+    fs_erase_cb_t args = { flash_offset };
+    return fs_flash_safe(do_flash_erase, &args);
+}
+
+static int flash_program_sector(uint32_t flash_offset, const uint8_t *src)
 {
     fs_program_cb_t args = { flash_offset, src };
-    flash_safe_execute(do_flash_program, &args, UINT32_MAX);
+    return fs_flash_safe(do_flash_program, &args);
 }
 
 /* Write superblock_ram to the superblock flash sector.
@@ -172,15 +207,15 @@ static void flash_program_sector(uint32_t flash_offset, const uint8_t *src)
  * After this call fs_buffer contains the serialised superblock padded with
  * 0xFF.  Callers that need fs_buffer for file data must overwrite it
  * afterwards (e.g. TRUNC zeros it, non-TRUNC copies from XIP). */
-static void superblock_flush(void)
+static int superblock_flush(void)
 {
     /* Flash erase sets all bytes to 0xFF.  Pre-fill with 0xFF so unused
      * bytes in the sector match the erased state. */
     memset(fs_buffer, 0xFF, FS_BLOCK_SIZE);
     memcpy(fs_buffer, &superblock_ram, sizeof(superblock_ram));
 
-    flash_erase_sector(SUPERBLOCK_FLASH_OFFSET);
-    flash_program_sector(SUPERBLOCK_FLASH_OFFSET, fs_buffer);
+    if (flash_erase_sector(SUPERBLOCK_FLASH_OFFSET) != 0) return -1;
+    return flash_program_sector(SUPERBLOCK_FLASH_OFFSET, fs_buffer) != 0 ? -1 : 0;
 }
 
 /* =========================================================================
@@ -494,25 +529,34 @@ int fs_close(int fd)
     fs_take_lock();
 
     fs_open_fd_t *ofd = &open_fds[fd];
+    int           rc  = 0;
 
     if (ofd->dirty) {
         uint32_t file_idx     = ofd->file_idx;
         uint32_t flash_offset = FILE_FLASH_OFFSET(file_idx);
 
         /* Step 1 & 2: erase the data sector then program from fs_buffer. */
-        flash_erase_sector(flash_offset);
-        flash_program_sector(flash_offset, fs_buffer);
+        if (flash_erase_sector(flash_offset) != 0 ||
+            flash_program_sector(flash_offset, fs_buffer) != 0) {
+            rc = -1;
+        }
 
         /* Step 3: fs_buffer is now free — use it to flush the superblock. */
         scratch_owner = -1;
-        superblock_flush();
+        if (rc == 0 && superblock_flush() != 0) {
+            rc = -1;
+        }
+    }
+    if (ofd->mode & VFS_O_WRONLY) {
+        /* Release the write buffer even if nothing was written. */
+        if (scratch_owner == (int)ofd->file_idx) scratch_owner = -1;
     }
 
     open_fds[fd].used  = false;
     open_fds[fd].dirty = false;
 
     fs_give_lock();
-    return 0;
+    return rc;
 }
 
 /* =========================================================================
@@ -552,14 +596,16 @@ int fs_delete(const char *name)
         superblock_ram.file_count--;
     }
 
-    /* Erase the file's data sector so the storage is genuinely freed. */
-    flash_erase_sector(FILE_FLASH_OFFSET((uint32_t)idx));
-
-    /* Persist the updated superblock. */
-    superblock_flush();
+    /* Erase the file's data sector so the storage is genuinely freed, then
+     * persist the updated superblock. */
+    int rc = 0;
+    if (flash_erase_sector(FILE_FLASH_OFFSET((uint32_t)idx)) != 0 ||
+        superblock_flush() != 0) {
+        rc = -1;
+    }
 
     fs_give_lock();
-    return 0;
+    return rc;
 }
 
 /* =========================================================================

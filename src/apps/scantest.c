@@ -25,8 +25,8 @@
  *
  *   - every entry is well formed (strings terminated, fields in range)
  *   - within one scan the count never goes down
- *   - within one scan an entry never changes once seen (a BT name may go
- *     from empty to set, once)
+ *   - within one scan an entry never changes once seen, except that RSSI is
+ *     refreshed by repeat reports and a BT name may go from empty to set, once
  *
  * A torn read breaks one of those rules.  The coordinator brackets every
  * scan start with a generation counter (odd while a reset is in progress)
@@ -117,6 +117,15 @@ static bool wifi_entry_ok(const wifi_scan_result_t *e)
     return true;
 }
 
+/* Same network, same fields — RSSI is refreshed in place by repeat reports. */
+static bool wifi_entry_same(const wifi_scan_result_t *old, const wifi_scan_result_t *cur)
+{
+    return memcmp(old->ssid,  cur->ssid,  sizeof(cur->ssid))  == 0 &&
+           memcmp(old->bssid, cur->bssid, sizeof(cur->bssid)) == 0 &&
+           old->channel   == cur->channel &&
+           old->auth_mode == cur->auth_mode;
+}
+
 #ifdef PICOOS_BT_ENABLE
 static int snap_bt(bt_scan_result_t *dst)
 {
@@ -141,12 +150,12 @@ static bool bt_entry_ok(const bt_scan_result_t *e)
     return true;
 }
 
-/* Same device, same fields — except a name may appear once (empty → set). */
+/* Same device, same fields — except RSSI (refreshed by repeat reports) and a
+ * name, which may appear once (empty → set). */
 static bool bt_entry_same(const bt_scan_result_t *old, const bt_scan_result_t *cur)
 {
     if (memcmp(old->addr, cur->addr, BT_ADDR_LEN) != 0) return false;
-    if (old->rssi            != cur->rssi            ||
-        old->type            != cur->type            ||
+    if (old->type            != cur->type            ||
         old->dev_class       != cur->dev_class       ||
         old->class_of_device != cur->class_of_device ||
         old->tx_power        != cur->tx_power        ||
@@ -198,7 +207,7 @@ static void st_reader(void *arg)
             for (int i = 0; i < n; i++)
                 if (!wifi_entry_ok(&cur[i])) r->bad_entry++;
             for (int i = 0; i < common; i++)
-                if (memcmp(&old[i], &cur[i], sizeof(cur[i])) != 0) r->changed++;
+                if (!wifi_entry_same(&old[i], &cur[i])) r->changed++;
         } else {
 #ifdef PICOOS_BT_ENABLE
             const bt_scan_result_t *cur = flip ? buf->bt.b : buf->bt.a;

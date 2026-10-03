@@ -81,6 +81,8 @@ add_executable(test_fs
     fs/test_fs.c
     fs/mock_flash.c
     ${KERNEL_SRC}/fs.c
+    ${KERNEL_SRC}/sync.c         # fs.c uses a kmutex_t
+    sync/mock_sched.c            # sched_* stubs + current_tcb for sync.c / fs.c
 )
 target_include_directories(test_fs PRIVATE
     ${KERNEL_SRC}

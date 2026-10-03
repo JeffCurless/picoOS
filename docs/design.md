@@ -81,17 +81,23 @@ Each core has its own SysTick, PendSV, time-slice counter, and `current_tcb` slo
 (`current_tcb[0]` for Core 0, `current_tcb[1]` for Core 1).  Both cores pull
 threads from the same shared ready queues.
 
-SMP correctness is provided by RP2040/RP2350 **hardware SIO spinlocks**, which give
-cross-core atomicity without disabling interrupts globally:
+SMP correctness is provided by RP2040/RP2350 **hardware SIO spinlocks** (the
+Cortex-M0+ has no LDREX/STREX).  A spinlock disables interrupts on the local core
+only, for as long as it is held:
 
-* one hardware spinlock guards the scheduler ready queues
-* one hardware spinlock guards the kernel heap allocator
-* a kernel mutex serialises VFS/filesystem operations
+* dedicated hardware spinlocks guard the scheduler ready queues, the kernel heap
+  allocator and the event-waiter pool
+* mutexes, semaphores, event flags and message queues share a 4-entry striped pool
+  of hardware locks (`prim_pool`), so any number of them can exist
+* kernel mutexes serialise VFS and filesystem operations
+
+[locking.md](locking.md) describes the design and the hardware-lock budget in detail.
 
 **Practical split:**
 
-* **Core 0** — USB console, SysTick sleep/wake scan, deadlock scanner, filesystem writes
-  (flash erase/program via `multicore_lockout_start_blocking`), shell.
+* **Core 0** — USB (`tud_task()` in the idle thread), SysTick sleep/wake scan, deadlock
+  scanner, the CYW43 WiFi/BT interrupt on pico_w / pico2_w, filesystem writes (flash
+  erase/program via the SDK's `flash_safe_execute()`, which pauses Core 1).
 * **Core 1** — registers as a multicore lockout victim so flash writes on Core 0 can
   safely pause it; runs its own SysTick and PendSV; executes any thread eligible for Core 1.
 
@@ -137,7 +143,9 @@ Per-thread control block (TCB):
 Behavior:
 
 * SysTick fires every 1 ms on each core independently
-* time slices of 5–20 ms; each core maintains its own slice counter
+* fixed 10 ms time slices (`TIME_SLICE_MS`); each core maintains its own slice counter.
+  A thread woken from `sys_sleep()` becomes READY at once but, unless it outranks the
+  running thread, only runs at the next slice boundary
 * priority-based linked-list ready queues (one per priority level, shared across cores)
 * sleep implemented with absolute wake timestamps; Core 0 SysTick scans sleeping threads
 * blocking on mutexes/semaphores/event flags/queues
@@ -207,22 +215,27 @@ Built-in commands:
 * `reboot` — hard reboot
 * `update` — reboot into USB BOOTSEL mode for reflashing
 
-Optional commands registered at init (pico_w / pico2_w only):
+Optional commands registered at init:
 
-* `wifi [status|scan|connect|disconnect]`
-* `bt [status|scan]`
-* `display <subcmd>` — ST7789 display control (when `PICOOS_DISPLAY_ENABLE`)
-* `led <r> <g> <b>` — RGB LED control (when `PICOOS_LED_ENABLE`)
+* `wifi [status|scan|connect|disconnect]` — pico_w / pico2_w only
+* `bt [status|scan]` — pico_w / pico2_w only
+* `display <subcmd>` — ST7789 display control (when `PICOOS_DISPLAY_SHELL`)
+* `led <r> <g> <b>` — RGB LED control (when `PICOOS_LED_SHELL`)
+
+At start-up the shell also reads `config.txt` from the filesystem: `AUTORUN=<app>`
+launches an app at boot, and `BUTTONA/B/X/Y=<app>` bind Display Pack buttons to apps.
 
 ### Host-side companion tool
 
-A small Python terminal program that:
+A small Python terminal program (`tools/console.py`) that:
 
-* connects to the Pico over USB serial
+* connects to the Pico over USB serial (auto-detected by VID:PID)
 * provides a console window
-* uploads files
-* downloads logs
-* maybe wraps commands in a nicer UI
+* uploads files (`--upload`, via `fs write` multi-line mode)
+* tees the session to a log file (`--log`)
+
+`tools/scantest.py` drives the on-device `scantest` app for scripted testing, and
+`tools/mem_report.py` reports memory use from a build's linker map.
 
 That lets the OS remain simple while the development experience still feels polished.
 
@@ -272,6 +285,14 @@ Initial constraints:
 * single root directory
 * fixed metadata slots
 * sequential file growth
+
+**As implemented** (`src/kernel/fs.c`): the region starts 1 MB into flash (1 MB long on
+RP2040, 3 MB on RP2350).  Sector 0 holds the superblock (magic, version, and a fixed
+table of `FS_MAX_FILES` entries: 64 on RP2040, 127 on RP2350).  Each file owns exactly
+one 4 KB sector, so files are at most 4 KB and there is no allocation map.  Names are up
+to 15 characters in one flat directory.  Reads come straight from XIP flash; writes go
+to a single 4 KB RAM buffer and are erased/programmed on close, so only one file can be
+open for writing at a time.  There is no wear levelling or crash recovery yet.
 
 This is not elegant, but it is perfect for teaching because students can later improve:
 
@@ -327,10 +348,10 @@ For debugging, add:
 
 Keep it intentionally small.
 
-Example syscall set:
+Implemented syscalls (`src/kernel/syscall.h`, numbers 0–17):
 
-* `spawn(name, entry, args)`
-* `thread_create(proc, entry, arg)`
+* `spawn(name, entry, arg)`
+* `thread_create(pid, entry, arg)`
 * `exit(code)`
 * `yield()`
 * `sleep(ms)`
@@ -340,8 +361,15 @@ Example syscall set:
 * `close(fd)`
 * `mq_send(q, msg)`
 * `mq_recv(q, msg)`
-* `mutex_lock(id)`
-* `mutex_unlock(id)`
+* `mutex_lock(m)`
+* `mutex_unlock(m)`
+* `getpid()`, `gettid()`, `getcore()`
+* `ps()`, `kill(tid)`
+
+All go through `syscall_dispatch()`, which is an ordinary function call: there is no
+SVC instruction and no argument validation.  Apps normally use the `sys_*` inline
+wrappers (`sys_sleep`, `sys_yield`, `sys_exit`, `sys_getpid`, `sys_gettid`,
+`sys_getcore`).
 
 This gives enough surface area to feel like an OS without exploding complexity.
 
@@ -361,18 +389,24 @@ Built-in apps included with picoOS:
 * **producer / consumer / sensor** — cross-core IPC demo using semaphores and message queues
 * **pi** — Monte Carlo π estimation; `run pi` uses all four workers split across both cores,
   `run pi single` pins all workers to Core 0 for a single-core baseline comparison
+* **cray-one** — multi-node WiFi multicast colour-grid demo (pico_w / pico2_w with a display)
+* **scantest** — on-device stress test for the WiFi/BT scan-result buffers (pico_w / pico2_w)
+
+Besides `run`, an app can be started at boot with `AUTORUN=<name>` in `config.txt`, or
+by a Display Pack button with `BUTTONA=<name>` (etc.).
 
 This is the only application model — there is no bytecode interpreter or VM.
 The teaching value comes from reading and modifying the C source directly.
 
 ## 13. Device model
 
-Keep devices simple:
+Keep devices simple.  Implemented devices (`src/kernel/dev.c`, `src/drivers/`):
 
-* console device
-* timer device
-* flash filesystem device
-* GPIO device
+* console device (`/dev/console`)
+* timer device (`/dev/timer` — tick count and microseconds via ioctl)
+* flash device (`/dev/flash` — unique ID via ioctl; raw read/write not implemented)
+* GPIO device (`/dev/gpio` — direction/value via ioctl)
+* display (`/dev/display`) and RGB LED (`/dev/led`) on Display Pack builds
 * optional UART/SPI/I2C devices later
 
 Expose a minimal device API:
@@ -454,7 +488,8 @@ That gives students real, visible optimization opportunities.
 ### Phase 5 — user services 🔲 Planned
 
 * Logger service
-* App launcher enhancements
+* App launcher enhancements (boot-time `AUTORUN=` and Display Pack button bindings via
+  `config.txt` already work)
 * Background worker threads
 
 ### Phase 6 — teaching polish 🔲 Planned

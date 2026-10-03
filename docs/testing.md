@@ -41,7 +41,7 @@ The kernel modules under test (`mem.c`, `sync.c`, `fs.c`, `vfs.c`) are compiled 
 |---|---|
 | ARM CMSIS intrinsics (`__dmb`, `__disable_irq`, …) | No-op `static inline` stubs in `src/kernel/arch.h` (the `#else` host-stub block already present for LSP support) |
 | `time_us_64()` | Returns real wall-clock time via `clock_gettime(CLOCK_MONOTONIC)` — this is required so the `PICOOS_LOCK_DEBUG` spinlock timeout test can actually expire |
-| Flash hardware (`XIP_BASE`, `flash_range_erase`, `flash_range_program`) | `HOST_TEST` guard in `arch.h` redirects these to `tests/fs/mock_flash.c`, which operates on a `malloc`-backed RAM buffer |
+| Flash hardware (`XIP_BASE`, `flash_range_erase`, `flash_range_program`, `flash_safe_execute`) | `HOST_TEST` guard in `arch.h` redirects the erase/program calls to `tests/fs/mock_flash.c`, which operates on a `malloc`-backed RAM buffer; `flash_safe_execute()` is a host stub that just calls the function |
 | Multicore lockout | No-op stubs already in `arch.h` |
 | Scheduler (`sched_block`, `sched_unblock`, `sched_yield`, `current_tcb[2]`) | Minimal stubs in `tests/sync/mock_sched.c`; `current_tcb` is a 2-element array matching the SMP layout (`current_tcb[0]` is a static dummy `tcb_t` with `tid = 1`; `current_tcb[1]` is `NULL`); the yield stub also fires a one-shot `mock_yield_hook` callback used by deadlock tests |
 | `lock_deadlock_panic()` | Test stub in `mock_sched.c` captures panic arguments and `longjmp`s back to the test instead of halting |
@@ -169,7 +169,10 @@ These tests verify the instrumentation added to `sync.c` when `PICOOS_LOCK_DEBUG
 
 **Source**: `tests/fs/test_fs.c`  
 **Module under test**: `src/kernel/fs.c`  
+**Dependencies**: `src/kernel/sync.c` (the FS mutex), `tests/sync/mock_sched.c` (scheduler stubs, `current_tcb`)  
 **Mock**: `tests/fs/mock_flash.c`
+
+Every test starts with `fs_init()`, which initialises the FS mutex; calling `fs_format()` or any other FS function first would find an uninitialised (apparently held) mutex and hang.
 
 The flash mock provides a `malloc`-backed buffer sized `(1 + FS_MAX_FILES) × 4 KB`, initialised to `0xFF` (erased state).  `flash_range_erase` does `memset` to `0xFF`; `flash_range_program` does `memcpy`.  `host_xip_base` is set so that XIP pointer arithmetic in `fs.c` (`XIP_BASE + FS_FLASH_OFFSET + offset`) resolves to the correct position in the RAM buffer.
 
@@ -301,7 +304,7 @@ in a tight loop and counts:
 |---|---|
 | `bad` | An entry is malformed: unterminated SSID/name, WiFi channel outside 1–14, RSSI outside −127..0, all-zero BT address, unknown type/class |
 | `regressed` | The result count went down within one scan |
-| `changed` | An entry already seen changed within one scan (a BT name may go from empty to set, once) |
+| `changed` | An entry already seen changed within one scan. RSSI is ignored, since repeat reports refresh it in place, and a BT name may go from empty to set, once |
 | `skipped` | Snapshot discarded because a scan start overlapped it. Not an error |
 
 The coordinator also checks the API contract. A second `wifi_scan()` while one is running

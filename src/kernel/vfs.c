@@ -262,15 +262,16 @@ int vfs_close(int fd)
         return -1;
     }
 
-    vfs_fd_t *f = &fd_table[fd];
+    vfs_fd_t *f  = &fd_table[fd];
+    int       rc = 0;
 
     if (f->type == VFS_TYPE_DEV) {
         dev_close(f->dev_id);
     } else {
-        fs_close((int)f->fs_file_id);
+        rc = fs_close((int)f->fs_file_id);   /* -1 if the flash commit failed */
     }
 
     f->used = false;
     kmutex_unlock(&vfs_lock);
-    return 0;
+    return rc;
 }

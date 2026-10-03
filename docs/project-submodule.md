@@ -111,13 +111,18 @@ The headers are resolved via the `picoOS/src` include path, which picoOS adds au
 
 | Header | What it provides |
 |--------|-----------------|
-| `kernel/syscall.h` | `sys_sleep(ms)`, `sys_yield()`, `sys_exit(code)`, `sys_getpid()`, `sys_gettid()` |
-| `kernel/sync.h` | Semaphores (`ksemaphore_t`), mutexes (`kmutex_t`), message queues (`mqueue_t`) |
+| `kernel/syscall.h` | `sys_sleep(ms)`, `sys_yield()`, `sys_exit(code)`, `sys_getpid()`, `sys_gettid()`, `sys_getcore()` |
+| `kernel/sync.h` | Semaphores (`ksemaphore_t`), mutexes (`kmutex_t`), event flags (`event_flags_t`), message queues (`mqueue_t`) |
+| `kernel/task.h` | Extra threads (`task_create_thread`), `CURRENT_TCB->affinity` |
+| `kernel/mem.h` | `kmalloc()` / `kfree()` (e.g. to free a `run` argument) |
 | `kernel/vfs.h` | File I/O — `vfs_open/read/write/close` |
 | `kernel/dev.h` | Device access — `dev_ioctl()`, device IDs (`DEV_DISPLAY`, etc.) |
 | `drivers/display.h` | Display drawing API (only when `PICOOS_DISPLAY_ENABLE=ON`) |
 | `drivers/led.h` | RGB LED API (only when `PICOOS_LED_ENABLE=ON`) |
 | `shell/shell.h` | `shell_print(fmt, ...)`, `shell_println(str)` |
+| `kernel/wifi.h`, `kernel/bluetooth.h` | WiFi, multicast UDP, scan results via `wifi_copy_scan_results()` / `bt_copy_scan_results()` (pico_w / pico2_w only) |
+
+Apps should use only picoOS APIs — not the Pico SDK, lwIP or the CYW43 driver directly, and never `kernel/arch.h`.  See [picoOS_API.md](picoOS_API.md).
 
 ### `apps/app_table.c`
 
@@ -134,7 +139,9 @@ const app_entry_t app_table[] = {
 const int app_table_size = (int)(sizeof(app_table) / sizeof(app_table[0]));
 ```
 
-Priority runs from 0 (highest) to 7 (lowest).  The kernel idle thread runs at 7; shell threads run at 2–3; user apps typically use 4–5.
+Priority runs from 0 (highest) to 7 (lowest).  The idle threads run at 7, `wifi-poll` at 6, the shell at 2 and the button monitor at 3; user apps typically use 4–5.
+
+To start an app automatically at boot, put `AUTORUN=<name>` (a name from this table) in `config.txt` on the Pico's filesystem — see [application.md](application.md#launching-an-app-automatically).
 
 To add more applications, add their entry functions to the `app_table[]` array and list their source files in `CMakeLists.txt` (see Step 4).
 
@@ -254,7 +261,7 @@ Make it executable:
 chmod +x build
 ```
 
-The output `.uf2` files land in `build_${board}_${disp}/picoOS/src/` (CMake nests the subdirectory under the picoOS path) and are then copied to `kits/`.  The naming follows picoOS convention — board name + display suffix + version — for example `picoos_D2-v0.1.9.uf2`.
+The output `.uf2` files land in `build_${board}_${disp}/picoOS/src/` (CMake nests the subdirectory under the picoOS path) and are then copied to `kits/`.  The naming follows picoOS convention — board name + display suffix + version — for example `picoos_D2-v0.3.4.uf2`.
 
 ---
 
@@ -294,14 +301,15 @@ Flash the appropriate `.uf2` to your Pico:
 1. Hold **BOOTSEL** while plugging in USB.  The Pico mounts as a mass-storage drive.
 2. Copy the `.uf2` to the drive:
    ```bash
-   cp kits/picoos_D-v0.2.0.uf2 /media/$USER/RPI-RP2/
+   cp kits/picoos_D-v0.3.4.uf2 /media/$USER/RPI-RP2/
    ```
 3. The Pico reboots automatically.
 
-Connect to the shell via USB serial (115200 baud, or use `tools/console.py` from the picoOS repo).  At the `>` prompt:
+Connect to the shell via USB serial (115200 baud, or use `tools/console.py` from the picoOS repo).  At the `pico>` prompt:
 
 ```
-> run myapp
+pico> run myapp
+run: started 'myapp' as PID 100 TID 4
 myapp: started
 myapp: tick
 myapp: tick
@@ -314,7 +322,7 @@ Kill the app with `killproc <pid>` (find the PID with `ps`).
 
 ## Building with the picoOS built-in demo apps
 
-The picoOS repo ships three demonstration apps — **producer**, **consumer**, and **sensor** — that exercise inter-process communication using message queues and semaphores.  These are useful for smoke-testing the kernel on new hardware or as reference code.
+The picoOS repo ships demonstration apps — **producer**, **consumer** and **sensor** (inter-process communication with message queues and semaphores) and **pi** (a dual-core Monte Carlo benchmark).  These are useful for smoke-testing the kernel on new hardware or as reference code.
 
 The project `CMakeLists.txt` exposes a project-owned flag `MYPROJECT_DEMO` (rename this to match your project).  Pass it to `cmake` to swap in the picoOS demo apps:
 
@@ -330,9 +338,9 @@ make -j$(nproc) -C build_pico_demo
 When `MYPROJECT_DEMO=ON`:
 - `picoOS/src/apps/demo.c` is compiled (defines `app_table[]` with the demo apps).
 - Your project's `apps/app_table.c` is **not** compiled — `PICOOS_APP_SOURCES` is not set.
-- The shell `run` command offers `producer`, `consumer`, and `sensor`.
+- The shell `run` command offers `producer`, `consumer`, `sensor` and `pi`.
 
-On a Pico W with a display attached the `cray-one` WiFi+display demo is also included automatically.
+On WiFi boards (`picow`, `pico2w`) the `scantest` on-device test is also included, and with a display enabled the `cray-one` WiFi+display demo is too.
 
 To add a `demo` target to your `build` script:
 
@@ -373,7 +381,7 @@ esac
        ${CMAKE_CURRENT_SOURCE_DIR}/apps/newapp.c   # ← new
    )
    ```
-5. **Rebuild** — run `./build pico` (or your target board).  The new app appears in the shell `help` listing and can be launched with `run newapp`.
+5. **Rebuild** — run `./build pico` (or your target board).  The new app appears in the list printed by `run` with no arguments and can be launched with `run newapp`.
 
 ---
 
