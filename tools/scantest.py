@@ -24,7 +24,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from console import DEFAULT_BAUD, open_connection  # noqa: E402
 
-TIMEOUT_S = 120.0   # 5 WiFi scans + 3 BT scans take about 40 s
+TIMEOUT_S = 150.0   # 5 WiFi + 3 BT scans + continuous mode take about 75 s
 
 
 def main():

@@ -36,6 +36,11 @@
  * starting a second scan while one is running is refused without wiping
  * the buffer.
  *
+ * A last phase per radio exercises continuous mode (*_scan_start/wait/stop):
+ * window numbers must increase, every entry must be well formed, WiFi
+ * windows must not exceed WIFI_WINDOW_MAX_MS, the BUSY/STOPPED/ARG contract
+ * must hold, and the callback mode must deliver windows on its own thread.
+ *
  * Proving the test can fail: a firmware built with PICOOS_SCAN_RACE_INJECT
  * (the *_INJ images from "./build wifi") restores the old publish-before-fill
  * order and poisons each slot while it is published but unfilled.  There,
@@ -66,6 +71,9 @@
 #define ST_BT_TIMEOUT_MS      12000u
 #define ST_READER_PRIO        6u     /* same as wifi-poll; below the shell */
 #define ST_SNAPS_PER_YIELD    32u    /* yield every N snapshots */
+#define ST_CONT_WINDOWS       10u    /* windows checked in continuous mode */
+#define ST_CB_RUN_MS          3000u  /* how long callback mode runs        */
+#define ST_WINDOW_SLACK_MS    50u    /* poll period + scheduling jitter    */
 
 typedef enum { PHASE_WIFI, PHASE_BT } st_phase_t;
 
@@ -333,6 +341,92 @@ static uint32_t run_wifi_phase(pcb_t *proc, int *seen)
     return errs;
 }
 
+
+/* ---- continuous mode ----------------------------------------------------- */
+static volatile uint32_t s_cb_windows;
+static volatile uint32_t s_cb_bad;
+
+static void wifi_cont_cb(const wifi_scan_list_t *l, void *ctx)
+{
+    (void)ctx;
+    s_cb_windows++;
+    if (l->count < 0 || l->count > WIFI_MAX_SCAN_RESULTS) s_cb_bad++;
+}
+
+/* Wait (up to ~2 s) for a listener thread to finish after stop, so the next
+ * start is not refused as BUSY. */
+static bool restart_ok(int (*start)(void))
+{
+    for (int t = 0; t < 40; t++) {
+        if (start() == 0) return true;
+        sys_sleep(50);
+    }
+    return false;
+}
+
+static int wifi_start_pull(void) { return wifi_scan_start(NULL, NULL); }
+
+static uint32_t run_wifi_cont_phase(void)
+{
+    shell_print("[scantest] WiFi continuous: %u windows\r\n",
+                (unsigned)ST_CONT_WINDOWS);
+    uint32_t errs = 0u;
+
+    if (wifi_scan_start(NULL, NULL) != 0) {
+        shell_print("[scantest]   wifi_scan_start failed\r\n");
+        return 1u;
+    }
+    api_check(wifi_scan_start(NULL, NULL) == WIFI_ERR_BUSY,
+              "second wifi_scan_start() -> BUSY");
+    api_check(wifi_scan() == WIFI_ERR_BUSY,
+              "one-shot wifi_scan() while continuous -> BUSY");
+    api_check(wifi_scan_wait(NULL) == WIFI_ERR_ARG,
+              "wifi_scan_wait(NULL) -> ARG");
+
+    uint32_t prev_seq = 0u, max_ms = 0u, total = 0u;
+    for (uint32_t w = 0u; w < ST_CONT_WINDOWS; w++) {
+        const wifi_scan_list_t *l;
+        if (wifi_scan_wait(&l) != 0) {
+            shell_print("[scantest]   wifi_scan_wait stopped early\r\n");
+            errs++;
+            break;
+        }
+        if (l->seq <= prev_seq) errs++;
+        prev_seq = l->seq;
+        if (l->count < 0 || l->count > WIFI_MAX_SCAN_RESULTS) { errs++; continue; }
+        for (int i = 0; i < l->count; i++)
+            if (!wifi_entry_ok(&l->items[i])) errs++;
+        if (l->window_ms > max_ms) max_ms = l->window_ms;
+        total += (uint32_t)l->count;
+    }
+    shell_print("[scantest]   last seq %u, longest window %u ms, avg %u networks\r\n",
+                (unsigned)prev_seq, (unsigned)max_ms,
+                (unsigned)(total / ST_CONT_WINDOWS));
+    api_check(max_ms <= WIFI_WINDOW_MAX_MS + ST_WINDOW_SLACK_MS,
+              "every window <= WIFI_WINDOW_MAX_MS");
+    wifi_scan_stop();
+    const wifi_scan_list_t *l;
+    api_check(wifi_scan_wait(&l) == WIFI_ERR_STOPPED,
+              "wifi_scan_wait() after stop -> STOPPED");
+
+    /* Callback mode. */
+    s_cb_windows = 0u;
+    s_cb_bad     = 0u;
+    if (wifi_scan_start(wifi_cont_cb, NULL) != 0) {
+        api_check(false, "wifi_scan_start(cb) -> 0");
+        return errs;
+    }
+    sys_sleep(ST_CB_RUN_MS);
+    wifi_scan_stop();
+    api_check(s_cb_windows > 0u && s_cb_bad == 0u,
+              "callback mode delivered windows");
+    shell_print("[scantest]   callback saw %u windows in %u ms\r\n",
+                (unsigned)s_cb_windows, (unsigned)ST_CB_RUN_MS);
+    api_check(restart_ok(wifi_start_pull), "restart after callback mode");
+    wifi_scan_stop();
+    return errs;
+}
+
 #ifdef PICOOS_BT_ENABLE
 static uint32_t run_bt_phase(pcb_t *proc, int *seen)
 {
@@ -377,6 +471,79 @@ static uint32_t run_bt_phase(pcb_t *proc, int *seen)
               "bt_copy_scan_results(buf, 1) truncates");
     return errs;
 }
+
+static void bt_cont_cb(const bt_scan_list_t *l, void *ctx)
+{
+    (void)ctx;
+    s_cb_windows++;
+    if (l->count < 0 || l->count > BT_MAX_SCAN_RESULTS) s_cb_bad++;
+}
+
+static int bt_start_pull(void) { return bt_scan_start(NULL, NULL); }
+
+static uint32_t run_bt_cont_phase(void)
+{
+    if (bt_get_state() == BT_STATE_OFF || bt_get_state() == BT_STATE_ERROR) {
+        shell_print("[scantest] BT continuous: radio not ready, skipping\r\n");
+        return 0u;
+    }
+    shell_print("[scantest] BT continuous: %u windows\r\n",
+                (unsigned)ST_CONT_WINDOWS);
+    uint32_t errs = 0u;
+
+    if (bt_scan_start(NULL, NULL) != 0) {
+        shell_print("[scantest]   bt_scan_start failed\r\n");
+        return 1u;
+    }
+    api_check(bt_scan_start(NULL, NULL) == BT_ERR_BUSY,
+              "second bt_scan_start() -> BUSY");
+    api_check(bt_scan() == -1, "one-shot bt_scan() while continuous -> -1");
+    api_check(bt_scan_wait(NULL) == BT_ERR_ARG, "bt_scan_wait(NULL) -> ARG");
+
+    uint32_t prev_seq = 0u, max_ms = 0u, total = 0u, named = 0u;
+    for (uint32_t w = 0u; w < ST_CONT_WINDOWS; w++) {
+        const bt_scan_list_t *l;
+        if (bt_scan_wait(&l) != 0) {
+            shell_print("[scantest]   bt_scan_wait stopped early\r\n");
+            errs++;
+            break;
+        }
+        if (l->seq <= prev_seq) errs++;
+        prev_seq = l->seq;
+        if (l->count < 0 || l->count > BT_MAX_SCAN_RESULTS) { errs++; continue; }
+        for (int i = 0; i < l->count; i++) {
+            if (!bt_entry_ok(&l->items[i])) errs++;
+            if (l->items[i].name[0] != '\0') named++;
+        }
+        if (l->window_ms > max_ms) max_ms = l->window_ms;
+        total += (uint32_t)l->count;
+    }
+    shell_print("[scantest]   last seq %u, longest window %u ms, avg %u devices, "
+                "%u named sightings\r\n", (unsigned)prev_seq, (unsigned)max_ms,
+                (unsigned)(total / ST_CONT_WINDOWS), (unsigned)named);
+    api_check(max_ms <= BT_WINDOW_MS + ST_WINDOW_SLACK_MS,
+              "every window <= BT_WINDOW_MS");
+    bt_scan_stop();
+    const bt_scan_list_t *l;
+    api_check(bt_scan_wait(&l) == BT_ERR_STOPPED,
+              "bt_scan_wait() after stop -> STOPPED");
+
+    s_cb_windows = 0u;
+    s_cb_bad     = 0u;
+    if (bt_scan_start(bt_cont_cb, NULL) != 0) {
+        api_check(false, "bt_scan_start(cb) -> 0");
+        return errs;
+    }
+    sys_sleep(ST_CB_RUN_MS);
+    bt_scan_stop();
+    api_check(s_cb_windows > 0u && s_cb_bad == 0u,
+              "callback mode delivered windows");
+    shell_print("[scantest]   callback saw %u windows in %u ms\r\n",
+                (unsigned)s_cb_windows, (unsigned)ST_CB_RUN_MS);
+    api_check(restart_ok(bt_start_pull), "restart after callback mode");
+    bt_scan_stop();
+    return errs;
+}
 #endif
 
 /* ---- entry point --------------------------------------------------------- */
@@ -407,7 +574,16 @@ void scantest(void *arg)
     uint32_t bt_errs   = 0u;
 #ifdef PICOOS_BT_ENABLE
     bt_errs = run_bt_phase(proc, &bt_seen);
+    bt_scan_stop();   /* bt_scan() leaves the BLE scan running */
 #endif
+    /* Continuous mode does not use the raw getters, so run it only once. */
+    uint32_t cont_errs = 0u;
+    if (!s_raw) {
+        cont_errs += run_wifi_cont_phase();
+#ifdef PICOOS_BT_ENABLE
+        cont_errs += run_bt_cont_phase();
+#endif
+    }
 
     shell_print("[scantest] ----------------------------------------\r\n");
     shell_print("[scantest] wifi: %u data errors, max %d networks\r\n",
@@ -416,6 +592,9 @@ void scantest(void *arg)
     shell_print("[scantest] bt  : %u data errors, max %d devices\r\n",
                 (unsigned)bt_errs, bt_seen);
 #endif
+    if (!s_raw) {
+        shell_print("[scantest] cont: %u data errors\r\n", (unsigned)cont_errs);
+    }
     shell_print("[scantest] api : %u failures\r\n", (unsigned)s_api_fail);
     bool idle = (wifi_seen == 0);
 #ifdef PICOOS_BT_ENABLE
@@ -425,6 +604,6 @@ void scantest(void *arg)
         shell_print("[scantest] WARNING: a phase saw no results, so it could "
                     "not exercise the race\r\n");
     }
-    bool pass = (wifi_errs + bt_errs + s_api_fail) == 0u;
+    bool pass = (wifi_errs + bt_errs + cont_errs + s_api_fail) == 0u;
     shell_print("[scantest] RESULT: %s\r\n", pass ? "PASS" : "FAIL");
 }

@@ -602,6 +602,7 @@ wifi_get_mac(mac);                               // 0 on success
 ```
 wifi status                      — print current state
 wifi scan                        — scan and list visible APs (SSID, RSSI, channel, auth)
+wifi watch [n]                   — continuous scan: print n windows (default 5), then stop
 wifi connect <ssid> [password]   — connect to an AP
 wifi disconnect                  — drop the current connection
 ```
@@ -631,6 +632,62 @@ runs, so read it only with `wifi_copy_scan_results()`, which copies under the as
 context lock.  `wifi_get_scan_results(&ptr, &count)` still exists but is deprecated: it
 returns the live buffer with no lock, so entries can be torn mid-scan (see
 `docs/imperfections.md` §10).
+
+**Continuous scanning (list swap).**  For an app that monitors the air rather than
+taking one snapshot, `wifi_scan_start()` keeps the radio scanning back to back and hands
+the app one list per *window* — one scan pass, at most `WIFI_WINDOW_MAX_MS` (1000 ms).
+Firmware dwell times are shortened while it runs (25 ms active, 60 ms passive per
+channel), so a pass normally takes well under a second.  The list holds every network
+heard in that window, one entry per BSSID with its latest RSSI; a network that has gone
+quiet simply drops out of the next list.
+
+The handover is a buffer swap, not a copy: the kernel keeps three lists (being filled,
+ready, held by the app — see `src/kernel/scanbuf.h`).  The list `wifi_scan_wait()`
+returns is the app's until its next `wifi_scan_wait()`, so it can be read and processed
+with no lock while the radio fills another one.  If the app falls behind, the newest
+window replaces the unread one and `dropped` counts it.
+
+```c
+// Pull model: your own worker thread does the processing.
+static void scan_worker(void *arg)
+{
+    if (wifi_scan_start(NULL, NULL) != 0) return;      // WIFI_ERR_BUSY if in use
+    const wifi_scan_list_t *l;
+    while (wifi_scan_wait(&l) == 0) {                   // blocks until next window
+        for (int i = 0; i < l->count; i++)
+            process(&l->items[i]);                      // merge, graph, ...
+    }
+    // WIFI_ERR_STOPPED: someone called wifi_scan_stop()
+}
+
+// Callback model: the kernel creates a "wifi-listen" thread in your process,
+// at your priority, and calls on_window() once per window from it.
+static void on_window(const wifi_scan_list_t *l, void *ctx) { /* may block */ }
+wifi_scan_start(on_window, NULL);
+...
+wifi_scan_stop();
+```
+
+```c
+typedef struct {
+    uint32_t           seq;        // window number, 1, 2, 3, ...
+    uint32_t           dropped;    // total windows lost to a slow reader
+    uint32_t           window_ms;  // how long this window lasted
+    int                count;      // valid entries in items[]
+    wifi_scan_result_t items[WIFI_MAX_SCAN_RESULTS];
+} wifi_scan_list_t;
+```
+
+| Function | Returns |
+|----------|---------|
+| `wifi_scan_start(cb, ctx)` | `0`, `WIFI_ERR_BUSY` (scan or subscriber active), `WIFI_ERR_NOMEM` (no listener thread), or a CYW43 error |
+| `wifi_scan_wait(&list)` | `0`, `WIFI_ERR_STOPPED`, or `WIFI_ERR_ARG` |
+| `wifi_scan_stop()` | — (safe when not running) |
+| `wifi_scan_running()` | `true` while continuous mode is on |
+
+One subscriber at a time.  Continuous mode and one-shot `wifi_scan()` refuse each other
+with `WIFI_ERR_BUSY`.  If the subscriber's process exits, the `wifi-poll` thread stops
+the scan by itself.  Scanning while connected works but takes airtime from traffic.
 
 **Multicast UDP** — a socket-style wrapper so applications never call lwIP or the
 CYW43 driver directly.  The link must be up before `wifi_mcast_open()`.
@@ -664,7 +721,8 @@ if (sock >= 0) {
 | `WIFI_ERR_BIND` | -4 | Port already bound |
 | `WIFI_ERR_JOIN` | -5 | IGMP join failed |
 | `WIFI_ERR_SEND` | -6 | lwIP rejected the datagram |
-| `WIFI_ERR_BUSY` | -7 | `wifi_scan()`: a scan is already running |
+| `WIFI_ERR_BUSY` | -7 | `wifi_scan()` / `wifi_scan_start()`: a scan is already running |
+| `WIFI_ERR_STOPPED` | -8 | `wifi_scan_wait()`: continuous scanning is not running |
 
 Sockets are not owned by a process.  An app that may be killed should keep its handle
 in a `static int` initialised to `-1` and close it on its next start (see
@@ -738,6 +796,7 @@ for (int i = 0; i < count; i++) {
 ```
 bt status     — print current state (off / idle / scanning / error)
 bt scan       — run a combined Classic + BLE scan (~7 s) and print a device table
+bt watch [n]  — continuous scan: print n 1-second windows (default 5), then stop
 ```
 
 **`bt_scan_result_t`** (from `src/kernel/bluetooth.h`):
@@ -760,9 +819,52 @@ typedef struct {
 Up to `BT_MAX_SCAN_RESULTS` (20) devices are stored, one per address.  Repeat
 reports of a device during the scan refresh its `rssi` with the latest reading.  Classic
 scan duration is fixed at 5 × 1.28 s ≈ 6.4 s and `bt_scan_is_done()` turns true when it
-completes.  The BLE scan runs concurrently and is **not** stopped then: the `bt scan`
-shell command stops it, but an app that calls `bt_scan()` directly keeps receiving BLE
-results until the next `bt_scan()`.
+completes.  The BLE scan runs concurrently and is **not** stopped then: call
+`bt_scan_stop()` once you have read the results (the `bt scan` shell command does), or
+the radio keeps receiving BLE reports until the next `bt_scan()`.
+
+`bt_get_state()` stays `BT_STATE_OFF` until BTstack reports the controller is up
+(`HCI_STATE_WORKING`), shortly after boot; `bt_scan()` and `bt_scan_start()` refuse
+until then.
+
+**Continuous scanning (list swap).**  `bt_scan_start()` works like `wifi_scan_start()`
+(§6.5): BLE passive scanning stays on at 100% duty, a 2.56 s Classic inquiry
+(`BT_INQUIRY_LEN` 2, both inquiry trains) starts every `BT_INQUIRY_PERIOD_MS`
+(10.24 s), and every `BT_WINDOW_MS` (1000 ms) the list of every device heard in that
+window is swapped to the subscriber.
+
+```c
+if (bt_scan_start(NULL, NULL) == 0) {                   // or bt_scan_start(cb, ctx)
+    const bt_scan_list_t *l;
+    while (bt_scan_wait(&l) == 0) {
+        for (int i = 0; i < l->count; i++) process(&l->items[i]);
+    }
+}
+```
+
+`bt_scan_list_t` has the same header fields as `wifi_scan_list_t` (`seq`, `dropped`,
+`window_ms`, `count`) and `items[BT_MAX_SCAN_RESULTS]`.  Notes:
+
+- The inquiry is duty-cycled because the controller shares one radio between inquiry
+  and LE scanning.  With back-to-back inquiry, measured on a Pico W, strong BLE
+  advertisers were missing from about half the 1 s windows; with this schedule they
+  are in 18–20 of 20.  The cost is that Classic devices appear only in windows during
+  an inquiry, so treat a Classic device as present for `BT_INQUIRY_PERIOD_MS` after it
+  was last heard, and a BLE device for a few windows (slow advertisers, every 1–2 s,
+  regularly miss one).
+- Names are cached for the session.  A Classic name is requested once per device; a BLE
+  name is taken from advertising data whenever one carries it.  Later windows get the
+  cached name even when the packet carrying it was not heard.  A failed name request is
+  not retried until the next `bt_scan_start()`.
+- Within one window, every BLE report from a device is merged into its entry (name,
+  flags, TX power, company ID, service UUID), not only the first.
+
+| Function | Returns |
+|----------|---------|
+| `bt_scan_start(cb, ctx)` | `0`, `BT_ERR_BUSY`, `BT_ERR_NOTREADY` (radio off / HCI not up), `BT_ERR_NOMEM` |
+| `bt_scan_wait(&list)` | `0`, `BT_ERR_STOPPED`, or `BT_ERR_ARG` |
+| `bt_scan_stop()` | — ends continuous mode, or cuts a one-shot scan short and stops its BLE scan |
+| `bt_scan_running()` | `true` while continuous mode is on |
 
 ---
 

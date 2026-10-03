@@ -16,9 +16,15 @@
 
 #include "kernel/arch.h"
 #include "kernel/wifi.h"
+#include "kernel/scanbuf.h"
+#include "kernel/sync.h"
 #include "kernel/task.h"
 #include "kernel/syscall.h"
 #include "shell/shell.h"
+#ifdef PICOOS_BT_ENABLE
+#include "kernel/bluetooth.h"   /* bt_scan_poll() */
+#endif
+#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -41,29 +47,63 @@ static wifi_scan_result_t     g_scan[WIFI_MAX_SCAN_RESULTS];
 static volatile int           g_scan_count = 0;
 static volatile bool          g_scan_done  = false;
 
+/* ---- continuous scanning state ------------------------------------------- *
+ * Three lists rotate through the fill / ready / held roles tracked by g_sb
+ * (see scanbuf.h).  scan_result_cb() reads g_sb.fill and writes that list in
+ * IRQ context.  Threads change g_sb only while holding g_cont_lock, and
+ * publish (the only operation that moves `fill`) also holds the async context
+ * lock so the IRQ cannot run mid-swap.  The kmutex is what orders threads:
+ * the async context lock is owned by a core, so on its own it would let two
+ * threads on the same core into the critical section together. */
+#define CONT_EV_READY  (1u << 0)   /* a window was published   */
+#define CONT_EV_STOP   (1u << 1)   /* continuous mode stopped  */
+
+static wifi_scan_list_t g_lists[3];
+static scanbuf_t        g_sb;
+static kmutex_t         g_cont_lock;
+static event_flags_t    g_cont_ev;
+static volatile bool    g_cont         = false;  /* continuous mode on     */
+static volatile bool    g_pass_cont    = false;  /* IRQ target: g_lists     */
+static bool             g_pass_running = false;  /* a pass we started      */
+static uint64_t         g_window_start_us;
+static uint32_t         g_owner_pid;             /* subscriber's process   */
+static wifi_scan_cb_t   g_cb;
+static void            *g_cb_ctx;
+static uint32_t         g_listen_tid;            /* 0 = no listener thread */
+
 /* ---- scan callback (called from cyw43 poll context) ---------------------- */
 static int scan_result_cb(void *env, const cyw43_ev_scan_result_t *r)
 {
     (void)env;
-    int i = g_scan_count;
+
+    /* A one-shot scan fills g_scan; a continuous pass fills the current
+     * fill list.  The target is chosen when the pass starts. */
+    wifi_scan_result_t *buf = g_scan;
+    volatile int       *cnt = &g_scan_count;
+    if (g_pass_cont) {
+        wifi_scan_list_t *l = &g_lists[g_sb.fill];
+        buf = l->items;
+        cnt = (volatile int *)&l->count;
+    }
+    int i = *cnt;
 
     /* The chip reports each BSS many times per scan (every beacon / probe
      * response it hears).  Refresh the existing slot instead of taking a new
      * one, or the buffer fills with repeats and later networks are lost.
      * rssi >= 0 is a bogus reading the firmware sometimes sends; skip it. */
     for (int k = 0; k < i; k++) {
-        if (memcmp(g_scan[k].bssid, r->bssid, 6) == 0) {
-            if (r->rssi < 0) g_scan[k].rssi = r->rssi;
+        if (memcmp(buf[k].bssid, r->bssid, 6) == 0) {
+            if (r->rssi < 0) buf[k].rssi = r->rssi;
             return 0;
         }
     }
     if (i >= WIFI_MAX_SCAN_RESULTS) return 0;
 
-    wifi_scan_result_t *e = &g_scan[i];
+    wifi_scan_result_t *e = &buf[i];
 #ifdef PICOOS_SCAN_RACE_INJECT
     /* TEST ONLY: the old bug, widened.  Publish the slot, poison it
      * (unterminated SSID, channel 255), and hold it there for a while. */
-    g_scan_count = i + 1;
+    *cnt = i + 1;
     memset(e, 0xFF, sizeof(*e));
     busy_wait_us_32(50);
 #endif
@@ -78,7 +118,7 @@ static int scan_result_cb(void *env, const cyw43_ev_scan_result_t *r)
     e->auth_mode = (uint8_t)r->auth_mode;
 #ifndef PICOOS_SCAN_RACE_INJECT
     __dmb();
-    g_scan_count = i + 1;
+    *cnt = i + 1;
 #endif
     return 0;
 }
@@ -93,13 +133,14 @@ int wifi_scan(void)
 
     /* Refuse rather than reset the buffer under a scan someone else started
      * (e.g. "wifi scan" at the shell while an app is scanning). */
-    if (cyw43_wifi_scan_active(&cyw43_state)) {
+    if (g_cont || cyw43_wifi_scan_active(&cyw43_state)) {
         cyw43_arch_lwip_end();
         return WIFI_ERR_BUSY;
     }
 
     g_scan_count = 0;
     g_scan_done  = false;
+    g_pass_cont  = false;
     int rc = cyw43_wifi_scan(&cyw43_state, &opts, NULL, scan_result_cb);
 
     /* Enter SCANNING only once the scan is active, so wifi-poll never sees
@@ -194,6 +235,245 @@ int wifi_get_scan_results(const wifi_scan_result_t **out_results, int *out_count
     *out_results = g_scan;
     *out_count   = (int)g_scan_count;
     return 0;
+}
+
+/* ---- continuous scanning ------------------------------------------------- */
+
+/* Firmware scan dwell times.  cyw43_wifi_scan() ignores its options and asks
+ * the firmware for its defaults (-1), so the only way to shorten a pass is to
+ * change those defaults with WLC ioctls.  A pass is roughly
+ *   11 active channels x ACTIVE + 2 passive channels x PASSIVE + overhead.
+ * The old values are read at start and put back at stop, so one-shot scans
+ * keep their behaviour.  The ioctl numbers are Broadcom's (wlioctl.h). */
+#define WLC_GET_SCAN_CHANNEL_TIME   184u   /* active dwell, associated   */
+#define WLC_GET_SCAN_UNASSOC_TIME   186u   /* active dwell, unassociated */
+#define WLC_GET_SCAN_PASSIVE_TIME   257u   /* passive dwell              */
+#define WIFI_DWELL_ACTIVE_MS        25u
+#define WIFI_DWELL_PASSIVE_MS       60u
+
+typedef struct {
+    uint32_t get;      /* GET ioctl; SET is get + 1 */
+    uint32_t fast;     /* value used in continuous mode */
+    uint32_t saved;    /* firmware value before start   */
+    bool     have;     /* saved is valid                */
+} wifi_dwell_t;
+
+static wifi_dwell_t g_dwell[] = {
+    { WLC_GET_SCAN_CHANNEL_TIME, WIFI_DWELL_ACTIVE_MS,  0u, false },
+    { WLC_GET_SCAN_UNASSOC_TIME, WIFI_DWELL_ACTIVE_MS,  0u, false },
+    { WLC_GET_SCAN_PASSIVE_TIME, WIFI_DWELL_PASSIVE_MS, 0u, false },
+};
+#define WIFI_N_DWELL  (sizeof(g_dwell) / sizeof(g_dwell[0]))
+
+/* cyw43_ioctl() encodes the direction in bit 0 of cmd: (wlc << 1) | set. */
+static int wlc_get_u32(uint32_t wlc, uint32_t *val)
+{
+    uint8_t b[4] = {0};
+    int rc = cyw43_ioctl(&cyw43_state, wlc << 1, sizeof(b), b, CYW43_ITF_STA);
+    *val = (uint32_t)b[0] | (uint32_t)b[1] << 8 |
+           (uint32_t)b[2] << 16 | (uint32_t)b[3] << 24;
+    return rc;
+}
+
+static void wlc_set_u32(uint32_t wlc, uint32_t val)
+{
+    uint8_t b[4] = { (uint8_t)val, (uint8_t)(val >> 8),
+                     (uint8_t)(val >> 16), (uint8_t)(val >> 24) };
+    cyw43_ioctl(&cyw43_state, (wlc << 1) | 1u, sizeof(b), b, CYW43_ITF_STA);
+}
+
+/* Caller holds the async context lock. */
+static void dwell_fast(void)
+{
+    for (unsigned i = 0; i < WIFI_N_DWELL; i++) {
+        g_dwell[i].have = (wlc_get_u32(g_dwell[i].get, &g_dwell[i].saved) == 0);
+        if (g_dwell[i].have) wlc_set_u32(g_dwell[i].get + 1u, g_dwell[i].fast);
+    }
+}
+
+static void dwell_restore(void)
+{
+    for (unsigned i = 0; i < WIFI_N_DWELL; i++) {
+        if (g_dwell[i].have) wlc_set_u32(g_dwell[i].get + 1u, g_dwell[i].saved);
+        g_dwell[i].have = false;
+    }
+}
+
+static bool owner_gone(void)
+{
+    pcb_t *p = task_find_process(g_owner_pid);
+    return p == NULL || !p->alive;
+}
+
+static bool listener_alive(void)
+{
+    if (g_listen_tid == 0u) return false;
+    tcb_t *t = task_find_thread(g_listen_tid);
+    return t != NULL && t->state != THREAD_ZOMBIE;
+}
+
+/* Caller holds g_cont_lock.  The pass under way (if any) keeps writing the
+ * fill list, which nobody reads until the next start resets it. */
+static void cont_stop_locked(void)
+{
+    cyw43_arch_lwip_begin();
+    if (g_cont) {
+        g_cont = false;
+        dwell_restore();
+    }
+    cyw43_arch_lwip_end();
+    event_flags_set(&g_cont_ev, CONT_EV_STOP);
+}
+
+/* Callback mode: one of these runs in the subscriber's process. */
+static void wifi_listen_thread(void *arg)
+{
+    (void)arg;
+    const wifi_scan_list_t *l;
+    while (wifi_scan_wait(&l) == 0) {
+        g_cb(l, g_cb_ctx);
+    }
+    kmutex_lock(&g_cont_lock);
+    if (g_listen_tid == CURRENT_TCB->tid) g_listen_tid = 0u;
+    kmutex_unlock(&g_cont_lock);
+}
+
+int wifi_scan_start(wifi_scan_cb_t cb, void *ctx)
+{
+    uint32_t me = (uint32_t)sys_getpid();
+
+    kmutex_lock(&g_cont_lock);
+    if (g_cont && owner_gone()) cont_stop_locked();   /* reclaim a dead owner */
+    if (g_cont || listener_alive()) {
+        kmutex_unlock(&g_cont_lock);
+        return WIFI_ERR_BUSY;
+    }
+
+    cyw43_arch_lwip_begin();
+    /* A one-shot scan owns the radio until it finishes.  A continuous pass
+     * left over from an earlier stop is fine: it runs into the new lists. */
+    if (g_state == WIFI_STATE_SCANNING ||
+        (cyw43_wifi_scan_active(&cyw43_state) && !g_pass_cont)) {
+        cyw43_arch_lwip_end();
+        kmutex_unlock(&g_cont_lock);
+        return WIFI_ERR_BUSY;
+    }
+
+    scanbuf_init(&g_sb);
+    for (int i = 0; i < 3; i++) g_lists[i].count = 0;
+    g_pass_cont = true;
+    dwell_fast();
+    if (!cyw43_wifi_scan_active(&cyw43_state)) {
+        cyw43_wifi_scan_options_t opts = {0};
+        int rc = cyw43_wifi_scan(&cyw43_state, &opts, NULL, scan_result_cb);
+        if (rc != 0) {
+            dwell_restore();
+            cyw43_arch_lwip_end();
+            kmutex_unlock(&g_cont_lock);
+            return rc;
+        }
+        g_pass_running = true;
+    }
+    g_window_start_us = time_us_64();
+    g_owner_pid       = me;
+    g_cb              = cb;
+    g_cb_ctx          = ctx;
+    g_cont            = true;
+    event_flags_clear(&g_cont_ev, CONT_EV_READY | CONT_EV_STOP);
+    cyw43_arch_lwip_end();
+
+    if (cb != NULL) {
+        pcb_t *proc = task_find_process(me);
+        tcb_t *t = proc ? task_create_thread(proc, "wifi-listen",
+                                             wifi_listen_thread, NULL,
+                                             CURRENT_TCB->priority,
+                                             DEFAULT_STACK_SIZE)
+                        : NULL;
+        if (t == NULL) {
+            cont_stop_locked();
+            kmutex_unlock(&g_cont_lock);
+            return WIFI_ERR_NOMEM;
+        }
+        g_listen_tid = t->tid;
+    }
+    kmutex_unlock(&g_cont_lock);
+    return 0;
+}
+
+void wifi_scan_stop(void)
+{
+    kmutex_lock(&g_cont_lock);
+    cont_stop_locked();
+    kmutex_unlock(&g_cont_lock);
+}
+
+bool wifi_scan_running(void) { return g_cont; }
+
+int wifi_scan_wait(const wifi_scan_list_t **list)
+{
+    if (list == NULL) return WIFI_ERR_ARG;
+
+    for (;;) {
+        event_flags_wait(&g_cont_ev, CONT_EV_READY | CONT_EV_STOP, false);
+
+        /* Clear before taking: a publish that lands after the take sets the
+         * flag again, so it is never missed.  A wake-up that finds nothing
+         * fresh just waits again. */
+        kmutex_lock(&g_cont_lock);
+        event_flags_clear(&g_cont_ev, CONT_EV_READY);
+        bool running = g_cont;
+        /* take moves only ready/held, never fill, so the IRQ writer does
+         * not care and the async context lock is not needed. */
+        bool took = running && scanbuf_take(&g_sb);
+        uint8_t held = g_sb.held;
+        kmutex_unlock(&g_cont_lock);
+
+        if (!running) return WIFI_ERR_STOPPED;
+        if (took) {
+            *list = &g_lists[held];
+            return 0;
+        }
+    }
+}
+
+/* Called by wifi-poll every 10 ms: notice the end of a pass, publish the
+ * window, start the next pass, and stop if the subscriber has died. */
+static void cont_poll(void)
+{
+    if (!g_cont && !g_pass_running) return;
+
+    bool published = false;
+    kmutex_lock(&g_cont_lock);
+    if (g_cont && owner_gone()) cont_stop_locked();
+
+    uint64_t now = time_us_64();
+    cyw43_arch_lwip_begin();
+    bool active = cyw43_wifi_scan_active(&cyw43_state);
+    bool ended  = g_pass_running && !active;
+    if (ended) g_pass_running = false;
+
+    if (g_cont) {
+        uint32_t ms = (uint32_t)((now - g_window_start_us) / 1000u);
+        if (ended || ms >= WIFI_WINDOW_MAX_MS) {
+            g_lists[g_sb.fill].window_ms = ms;
+            scanbuf_publish(&g_sb);
+            g_lists[g_sb.ready].seq     = g_sb.seq;
+            g_lists[g_sb.ready].dropped = g_sb.dropped;
+            g_lists[g_sb.fill].count    = 0;
+            g_window_start_us = now;
+            published = true;
+        }
+        if (!active) {
+            cyw43_wifi_scan_options_t opts = {0};
+            g_pass_cont = true;
+            if (cyw43_wifi_scan(&cyw43_state, &opts, NULL, scan_result_cb) == 0)
+                g_pass_running = true;
+        }
+    }
+    cyw43_arch_lwip_end();
+    kmutex_unlock(&g_cont_lock);
+
+    if (published) event_flags_set(&g_cont_ev, CONT_EV_READY);
 }
 
 const char *wifi_get_ip_str(void)
@@ -384,6 +664,11 @@ static void wifi_poll_thread(void *arg)
         }
         cyw43_arch_lwip_end();
 
+        cont_poll();
+#ifdef PICOOS_BT_ENABLE
+        bt_scan_poll();
+#endif
+
         sys_sleep(10);   /* 10 ms between polls */
     }
 }
@@ -406,7 +691,8 @@ static int cmd_wifi(int argc, char **argv)
     const char *sub = (argc >= 2) ? argv[1] : "status";
 
     if (strcmp(sub, "status") == 0) {
-        shell_print("WiFi state: %s\r\n", state_str(g_state));
+        shell_print("WiFi state: %s%s\r\n", state_str(g_state),
+                    g_cont ? " (continuous scan on)" : "");
         if (g_state == WIFI_STATE_UP) {
             shell_print("IP address: %s\r\n", wifi_get_ip_str());
         }
@@ -449,6 +735,33 @@ static int cmd_wifi(int argc, char **argv)
         return 0;
     }
 
+    if (strcmp(sub, "watch") == 0) {
+        int windows = (argc >= 3) ? atoi(argv[2]) : 5;
+        if (windows < 1) windows = 1;
+        int rc = wifi_scan_start(NULL, NULL);
+        if (rc == WIFI_ERR_BUSY) {
+            shell_print("A scan is already running\r\n");
+            return -1;
+        }
+        if (rc != 0) {
+            shell_print("Scan failed (%d)\r\n", rc);
+            return -1;
+        }
+        for (int w = 0; w < windows; w++) {
+            const wifi_scan_list_t *l;
+            if (wifi_scan_wait(&l) != 0) break;
+            shell_print("-- window %u: %u ms, %d networks, %u dropped\r\n",
+                        (unsigned)l->seq, (unsigned)l->window_ms,
+                        l->count, (unsigned)l->dropped);
+            for (int i = 0; i < l->count; i++) {
+                shell_print("   %-32s  %5d  %2u\r\n", l->items[i].ssid,
+                            (int)l->items[i].rssi, l->items[i].channel);
+            }
+        }
+        wifi_scan_stop();
+        return 0;
+    }
+
     if (strcmp(sub, "connect") == 0) {
         if (argc < 3) {
             shell_print("Usage: wifi connect <ssid> [password]\r\n");
@@ -471,13 +784,13 @@ static int cmd_wifi(int argc, char **argv)
         return 0;
     }
 
-    shell_print("Usage: wifi [status|scan|connect <ssid> [pw]|disconnect]\r\n");
+    shell_print("Usage: wifi [status|scan|watch [n]|connect <ssid> [pw]|disconnect]\r\n");
     return -1;
 }
 
 static const shell_cmd_t wifi_cmd = {
     "wifi",
-    "wifi [status|scan|connect <ssid> [pw]|disconnect]",
+    "wifi [status|scan|watch [n]|connect <ssid> [pw]|disconnect]",
     cmd_wifi
 };
 
@@ -487,6 +800,10 @@ void wifi_init(void)
     static bool initialized = false;
     if (initialized) return;
     initialized = true;
+
+    kmutex_init(&g_cont_lock);
+    event_flags_init(&g_cont_ev);
+    event_flags_set(&g_cont_ev, CONT_EV_STOP);   /* not running yet */
 
     if (cyw43_arch_init() != 0) {
         printf("[wifi] cyw43_arch_init failed\r\n");

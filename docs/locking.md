@@ -169,6 +169,23 @@ Cost: an uncontended acquire adds one stripe acquire/release and a load and stor
 
 A cheap first step that delivers the "slow down rather than crash" goal: make `spinlock_init()` call `spin_lock_claim_unused(false)`, and when it returns -1, fall back to the pooled memory-word lock instead of panicking.
 
+## Continuous scan buffers (WiFi and BT)
+
+`wifi_scan_start()` and `bt_scan_start()` hand scan windows to an app through a triple buffer (`src/kernel/scanbuf.[ch]`): three lists take turns as *fill* (written by the CYW43 async-context IRQ), *ready* (the newest finished window) and *held* (owned by the app until its next `*_scan_wait()`). Roles move and no data is copied.
+
+| Operation | Runs on | Locks taken | Why |
+| --- | --- | --- | --- |
+| IRQ writes `lists[fill]` | async-context IRQ, core 0 | none (it is the IRQ) | Reads only `fill` |
+| `scanbuf_publish()` (fill ↔ ready) | `wifi-poll` thread | `g_cont_lock` (kmutex), then `cyw43_arch_lwip_begin()` | Moves `fill`, so the IRQ must not run mid-swap |
+| `scanbuf_take()` (ready ↔ held) | subscriber thread | `g_cont_lock` only | Never touches `fill`, so the IRQ is not involved |
+| wake the subscriber | `wifi-poll` thread | `event_flags_set()` after both locks are dropped | Scheduler calls stay out of the IRQ |
+
+Both locks are needed because the async-context lock is a recursive mutex owned by a **core**. Two picoOS threads on the same core would both get in through it, so the kmutex orders threads and the async lock keeps the IRQ out. Lock order is always kmutex → async lock. The subscriber reads its held list with no lock at all, since neither the IRQ nor publish can reach it.
+
+Waking up: `*_scan_wait()` waits on `CONT_EV_READY | CONT_EV_STOP`, then, under the kmutex, clears `READY` *before* it calls `take`. A publish that lands after the take sets the flag again, so no window is missed. A wake-up that finds nothing fresh just waits again.
+
+Known hazard: if a subscriber thread is killed while it holds `g_cont_lock` (a few instructions inside `*_scan_wait()`), the mutex is never released and `wifi-poll` blocks on it. This is the general picoOS problem of killing a thread that holds a kernel mutex (see `docs/imperfections.md` §11).
+
 ## Review findings and recommendations
 
 The most serious finding is a probable SMP race in the block/wake path, which is separate from spinlock exhaustion and should be checked first. Between `spinlock_irq_release()` (step 5) and the PendSV switch (step 6), a thread is still running on its core. If the other core calls `sched_unblock()` on it in that window, the thread becomes READY. `sched_next_thread()` (`sched.c:382`) does not check whether a READY thread is still current on the other core, so it can resume the thread from a stale `saved_sp` while the thread is still running. The window is short, but an ISR between release and yield widens it.

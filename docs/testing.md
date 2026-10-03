@@ -296,7 +296,7 @@ python3 tools/scantest.py --raw --log scantest.log
 Close any other console on the port first. Don't run other scans while it runs
 (`wifi scan`, `bt scan`, netmon): readers can't tell another scan's reset from a race.
 
-**What it does.** It runs 5 WiFi scans, then 3 BT scans (about 45 s in all). During
+**What it does.** It runs 5 WiFi scans, then 3 BT scans, then the continuous-mode checks (about 75 s in all). During
 each phase, one reader thread is pinned to each core. Each reader snapshots the results
 in a tight loop and counts:
 
@@ -311,6 +311,17 @@ The coordinator also checks the API contract. A second `wifi_scan()` while one i
 must return `WIFI_ERR_BUSY`, and a second `bt_scan()` must return -1; if either wiped the
 buffer, the readers' `regressed` count goes up. The copy functions must reject a NULL
 buffer or a negative `max` and must truncate to `max`.
+
+**Continuous mode.** In copy mode (not `raw`), a last phase per radio runs
+`wifi_scan_start()` / `bt_scan_start()` for 10 windows. It checks that window numbers
+increase, that every entry is well formed, that no window is longer than
+`WIFI_WINDOW_MAX_MS` / `BT_WINDOW_MS` plus 50 ms, that a second start and a one-shot scan
+are refused, that `*_scan_wait(NULL)` returns ARG and `*_scan_wait()` after stop returns
+STOPPED, and that callback mode delivers windows for 3 s on its own thread. It prints the
+longest window and the average count, which is the number to watch when tuning the WiFi
+dwell times in `wifi.c`. These checks add a `cont:` line to the summary. On `_INJ` images
+they still pass: a slot that is poisoned mid-fill sits in the fill list, which no reader
+can see until it is published.
 
 **Reading the result.** It ends with one line, `[scantest] RESULT: PASS` or `FAIL`.
 A `WARNING: a phase saw no results` line means there were no APs or BT devices in range,

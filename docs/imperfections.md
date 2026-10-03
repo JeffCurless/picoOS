@@ -246,6 +246,33 @@ about 1 KB for BT), which should be `static`.
 
 ---
 
+## 11. One continuous-scan subscriber per radio; killed lock holders
+
+**Current behavior**: `wifi_scan_start()` / `bt_scan_start()` accept one
+subscriber per radio and refuse a second with `*_ERR_BUSY`. Every window is a
+single list handed over by a buffer swap, so there is nothing to share between
+two readers. Separately, a thread killed while it holds a kernel `kmutex_t`
+(including the scan-swap lock, held for a few instructions in
+`*_scan_wait()`) never releases it, and the next thread to lock it blocks
+forever.
+
+**File:line**: `src/kernel/wifi.c` / `src/kernel/bluetooth.c`
+(`*_scan_start`, `*_scan_wait`), `src/kernel/task.c` (`task_kill_process`)
+
+**Better implementation**:
+- Fan-out: give each subscriber its own held list (N+2 lists for N
+  subscribers) and publish a reference-counted ready list that is recycled
+  when the last subscriber swaps it out.
+- Kill safety: have `task_kill_process()` defer the kill of a thread that
+  owns a kernel mutex until it unlocks (a per-TCB "locks held" count), or
+  release such mutexes as part of the kill.
+
+**SRAM impact**: One extra list per subscriber (~700 B WiFi, ~1 KB BT).
+
+**Difficulty**: Medium
+
+---
+
 ## SRAM Impact Summary
 
 None of the fixes above saves SRAM. Thread stacks are already `kmalloc`'d from
