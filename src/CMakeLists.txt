@@ -203,7 +203,7 @@ if(PICOOS_LED_ENABLE)
 endif()
 
 if(PICOOS_HAS_WIFI)
-    list(APPEND PICOOS_SOURCES kernel/wifi.c)
+    list(APPEND PICOOS_SOURCES kernel/wifi.c kernel/scanbuf.c)
     if(PICOOS_INCLUDE_DEMO_APPS)
         list(APPEND PICOOS_SOURCES apps/scantest.c)
     endif()

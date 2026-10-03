@@ -120,3 +120,17 @@ target_include_directories(test_vfs PRIVATE
 )
 target_compile_options(test_vfs PRIVATE ${TEST_FLAGS})
 add_test(NAME vfs COMMAND test_vfs)
+
+# ---------------------------------------------------------------------------
+# Scan triple-buffer tests
+#
+# scanbuf.c is pure index rotation with no locking or SDK dependencies, so
+# it builds on its own.  wifi.c and bluetooth.c supply the locking on target.
+# ---------------------------------------------------------------------------
+add_executable(test_scanbuf
+    scanbuf/test_scanbuf.c
+    ${KERNEL_SRC}/scanbuf.c
+)
+target_include_directories(test_scanbuf PRIVATE ${KERNEL_SRC} ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(test_scanbuf PRIVATE ${TEST_FLAGS})
+add_test(NAME scanbuf COMMAND test_scanbuf)

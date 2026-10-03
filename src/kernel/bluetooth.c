@@ -16,8 +16,12 @@
 
 #include "kernel/arch.h"
 #include "kernel/bluetooth.h"
+#include "kernel/scanbuf.h"
+#include "kernel/sync.h"
+#include "kernel/task.h"
 #include "kernel/syscall.h"
 #include "shell/shell.h"
+#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 
@@ -33,6 +37,90 @@ static volatile bool        g_scan_done    = false;
 static volatile bool        g_classic_done = false;
 
 static btstack_packet_callback_registration_t hci_event_cb_reg;
+
+/* ---- continuous scanning state ------------------------------------------- *
+ * Same scheme as wifi.c: three lists rotate through fill / ready / held
+ * (scanbuf.h).  packet_handler() writes g_lists[g_sb.fill] in IRQ context;
+ * threads move the roles only while holding g_cont_lock, and publish also
+ * holds the async context lock.  The kmutex orders threads (the async lock is
+ * per core), the async lock keeps the IRQ out. */
+#define CONT_EV_READY  (1u << 0)
+#define CONT_EV_STOP   (1u << 1)
+
+static bt_scan_list_t       g_lists[3];
+static scanbuf_t            g_sb;
+static kmutex_t             g_cont_lock;
+static event_flags_t        g_cont_ev;
+static volatile bool        g_cont        = false;  /* continuous mode on   */
+static volatile bool        g_tgt_cont    = false;  /* IRQ target: g_lists   */
+static volatile bool        g_inq_active  = false;  /* Classic inquiry on   */
+static uint64_t             g_window_start_us;
+static uint32_t             g_owner_pid;
+static bt_scan_cb_t         g_cb;
+static void                *g_cb_ctx;
+static uint32_t             g_listen_tid;           /* 0 = no listener      */
+
+/* Name cache, continuous mode only.  Touched only by packet_handler (IRQ)
+ * and by bt_scan_start() under the async context lock.  Addresses are in
+ * the same (reversed) byte order as bt_scan_result_t.addr.  When full, the
+ * oldest slot is reused round-robin. */
+#define BT_NAME_CACHE  BT_MAX_SCAN_RESULTS
+
+typedef enum { NAME_FREE = 0, NAME_PENDING, NAME_KNOWN } bt_name_state_t;
+
+typedef struct {
+    uint8_t addr[BT_ADDR_LEN];
+    uint8_t state;               /* bt_name_state_t */
+    char    name[BT_NAME_LEN];
+} bt_name_ent_t;
+
+static bt_name_ent_t g_names[BT_NAME_CACHE];
+static uint8_t       g_name_next;
+
+static bt_name_ent_t *name_find(const uint8_t addr[BT_ADDR_LEN])
+{
+    for (int i = 0; i < BT_NAME_CACHE; i++) {
+        if (g_names[i].state != NAME_FREE &&
+            memcmp(g_names[i].addr, addr, BT_ADDR_LEN) == 0) return &g_names[i];
+    }
+    return NULL;
+}
+
+static bt_name_ent_t *name_add(const uint8_t addr[BT_ADDR_LEN])
+{
+    bt_name_ent_t *e = NULL;
+    for (int i = 0; i < BT_NAME_CACHE && e == NULL; i++) {
+        if (g_names[i].state == NAME_FREE) e = &g_names[i];
+    }
+    if (e == NULL) {
+        e = &g_names[g_name_next];
+        g_name_next = (uint8_t)((g_name_next + 1u) % BT_NAME_CACHE);
+    }
+    memcpy(e->addr, addr, BT_ADDR_LEN);
+    e->state   = NAME_PENDING;
+    e->name[0] = '\0';
+    return e;
+}
+
+/* Remember a BLE name heard in advertising data. */
+static void name_store(const uint8_t addr[BT_ADDR_LEN], const char *name)
+{
+    bt_name_ent_t *e = name_find(addr);
+    if (e == NULL) e = name_add(addr);
+    memcpy(e->name, name, BT_NAME_LEN);
+    e->state = NAME_KNOWN;
+}
+
+/* Where packet_handler writes: the one-shot buffer, or the fill list. */
+static bt_scan_result_t *tgt_items(void)
+{
+    return g_tgt_cont ? g_lists[g_sb.fill].items : g_scan;
+}
+
+static volatile int *tgt_count(void)
+{
+    return g_tgt_cont ? (volatile int *)&g_lists[g_sb.fill].count : &g_scan_count;
+}
 
 /* ---- Class of Device decoder --------------------------------------------- */
 static bt_devclass_t cod_to_devclass(uint32_t cod)
@@ -54,9 +142,11 @@ static bt_devclass_t cod_to_devclass(uint32_t cod)
 /* Find the slot index whose address matches addr, or -1 if not found. */
 static int find_slot_by_addr(const bd_addr_t addr)
 {
-    for (int i = 0; i < g_scan_count; i++) {
+    bt_scan_result_t *items = tgt_items();
+    int n = *tgt_count();
+    for (int i = 0; i < n; i++) {
         bd_addr_t slot_addr;
-        reverse_bd_addr(g_scan[i].addr, slot_addr);
+        reverse_bd_addr(items[i].addr, slot_addr);
         if (bd_addr_cmp(addr, slot_addr) == 0) return i;
     }
     return -1;
@@ -74,13 +164,15 @@ static int8_t ble_report_rssi(const uint8_t *packet)
 #ifndef PICOOS_SCAN_RACE_INJECT
 static int next_slot(void)
 {
-    return g_scan_count < BT_MAX_SCAN_RESULTS ? g_scan_count : -1;
+    int n = *tgt_count();
+    return n < BT_MAX_SCAN_RESULTS ? n : -1;
 }
 
 static void publish_slot(void)
 {
+    volatile int *cnt = tgt_count();
     __dmb();
-    g_scan_count = g_scan_count + 1;
+    *cnt = *cnt + 1;
 }
 #else
 /* TEST ONLY (PICOOS_SCAN_RACE_INJECT): the old bug, widened.  The slot is
@@ -88,9 +180,10 @@ static void publish_slot(void)
  * type), and held there before the caller fills it. */
 static int next_slot(void)
 {
-    if (g_scan_count >= BT_MAX_SCAN_RESULTS) return -1;
-    int idx = g_scan_count++;
-    memset(&g_scan[idx], 0xFF, sizeof(g_scan[idx]));
+    volatile int *cnt = tgt_count();
+    if (*cnt >= BT_MAX_SCAN_RESULTS) return -1;
+    int idx = (*cnt)++;
+    memset(&tgt_items()[idx], 0xFF, sizeof(bt_scan_result_t));
     busy_wait_us_32(50);
     return idx;
 }
@@ -149,6 +242,18 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
 
     uint8_t event = hci_event_packet_get_type(packet);
 
+    /* The radio is usable only once HCI reports WORKING; until then
+     * bt_scan() and bt_scan_start() refuse instead of being dropped. */
+    if (event == BTSTACK_EVENT_STATE) {
+        if (btstack_event_state_get_state(packet) == HCI_STATE_WORKING &&
+            g_state == BT_STATE_OFF) {
+            g_state = BT_STATE_IDLE;
+        }
+        return;
+    }
+
+    bt_scan_result_t *items = tgt_items();
+
     /* Classic inquiry result — one device per event. */
     if (event == GAP_EVENT_INQUIRY_RESULT) {
         bd_addr_t addr;
@@ -161,32 +266,48 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
          * reading instead of freezing at the first one. */
         int dup = find_slot_by_addr(addr);
         if (dup >= 0) {
-            if (rssi != BT_RSSI_UNKNOWN) g_scan[dup].rssi = rssi;
+            if (rssi != BT_RSSI_UNKNOWN) items[dup].rssi = rssi;
             return;
         }
 
         int idx = next_slot();
         if (idx < 0) return;
 
-        reverse_bd_addr(addr, g_scan[idx].addr);
-        g_scan[idx].name[0]         = '\0';
-        g_scan[idx].type            = BT_DEVTYPE_CLASSIC;
-        g_scan[idx].class_of_device =
+        reverse_bd_addr(addr, items[idx].addr);
+        items[idx].name[0]         = '\0';
+        items[idx].type            = BT_DEVTYPE_CLASSIC;
+        items[idx].class_of_device =
             gap_event_inquiry_result_get_class_of_device(packet);
-        g_scan[idx].dev_class       =
-            cod_to_devclass(g_scan[idx].class_of_device);
-        g_scan[idx].rssi            = rssi;
-        g_scan[idx].tx_power        = BT_TX_POWER_UNKNOWN;
-        g_scan[idx].flags           = BT_FLAGS_NONE;
-        g_scan[idx].company_id      = BT_COMPANY_NONE;
-        g_scan[idx].service_uuid    = BT_SERVICE_NONE;
+        items[idx].dev_class       =
+            cod_to_devclass(items[idx].class_of_device);
+        items[idx].rssi            = rssi;
+        items[idx].tx_power        = BT_TX_POWER_UNKNOWN;
+        items[idx].flags           = BT_FLAGS_NONE;
+        items[idx].company_id      = BT_COMPANY_NONE;
+        items[idx].service_uuid    = BT_SERVICE_NONE;
+
+        /* Continuous mode asks for each name once per session and fills it
+         * in from the cache in later windows. */
+        bool ask = true;
+        if (g_tgt_cont) {
+            bt_name_ent_t *n = name_find(items[idx].addr);
+            if (n != NULL) {
+                if (n->state == NAME_KNOWN)
+                    memcpy(items[idx].name, n->name, BT_NAME_LEN);
+                ask = false;
+            } else {
+                name_add(items[idx].addr);
+            }
+        }
         publish_slot();   /* before the name request: its reply looks us up */
 
-        /* Request the human-readable name asynchronously. */
-        gap_remote_name_request(
-            addr,
-            gap_event_inquiry_result_get_page_scan_repetition_mode(packet),
-            gap_event_inquiry_result_get_clock_offset(packet) | 0x8000u);
+        if (ask) {
+            /* Request the human-readable name asynchronously. */
+            gap_remote_name_request(
+                addr,
+                gap_event_inquiry_result_get_page_scan_repetition_mode(packet),
+                gap_event_inquiry_result_get_clock_offset(packet) | 0x8000u);
+        }
         return;
     }
 
@@ -194,21 +315,44 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
     if (event == HCI_EVENT_REMOTE_NAME_REQUEST_COMPLETE) {
         bd_addr_t addr;
         hci_event_remote_name_request_complete_get_bd_addr(packet, addr);
+        bool ok = hci_event_remote_name_request_complete_get_status(packet) == 0;
+        const uint8_t *name = ok
+            ? hci_event_remote_name_request_complete_get_remote_name(packet)
+            : NULL;
+
+        if (g_tgt_cont) {
+            /* Record the answer even if the device has rotated out of the
+             * fill list.  A failure is cached as an empty name, so a device
+             * that never answers is not paged again every inquiry. */
+            uint8_t raddr[BT_ADDR_LEN];
+            reverse_bd_addr(addr, raddr);
+            bt_name_ent_t *n = name_find(raddr);
+            if (n != NULL) {
+                n->name[0] = '\0';
+                if (name) {
+                    strncpy(n->name, (const char *)name, BT_NAME_LEN - 1);
+                    n->name[BT_NAME_LEN - 1] = '\0';
+                }
+                n->state = NAME_KNOWN;
+            }
+        }
+
         int idx = find_slot_by_addr(addr);
         if (idx < 0) return;
-        const uint8_t *name =
-            hci_event_remote_name_request_complete_get_remote_name(packet);
         if (name) {
-            strncpy(g_scan[idx].name, (const char *)name, BT_NAME_LEN - 1);
-            g_scan[idx].name[BT_NAME_LEN - 1] = '\0';
+            strncpy(items[idx].name, (const char *)name, BT_NAME_LEN - 1);
+            items[idx].name[BT_NAME_LEN - 1] = '\0';
         }
         return;
     }
 
-    /* Classic inquiry complete — signal done.  BLE scan is stopped by cmd_bt
-     * after it reads results, so the HCI disable command doesn't race with
-     * the next gap_inquiry_start() call. */
+    /* Classic inquiry complete.  Continuous mode: bt_scan_poll() starts the
+     * next inquiry.  One-shot: signal done.  The one-shot BLE scan is
+     * stopped by bt_scan_stop() after the results are read, so the HCI
+     * disable command doesn't race with the next gap_inquiry_start() call. */
     if (event == GAP_EVENT_INQUIRY_COMPLETE) {
+        g_inq_active = false;
+        if (g_cont) return;
         g_classic_done = true;
         g_scan_done = true;
         if (g_state == BT_STATE_SCANNING) g_state = BT_STATE_IDLE;
@@ -220,31 +364,49 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
         bd_addr_t addr;
         gap_event_advertising_report_get_address(packet, addr);
         int8_t rssi = ble_report_rssi(packet);
+        uint8_t       ad_len  = gap_event_advertising_report_get_data_length(packet);
+        const uint8_t *ad_data = gap_event_advertising_report_get_data(packet);
 
-        /* Already seen this scan: refresh the RSSI (see Classic above). */
+        /* Already seen this scan: refresh the RSSI (see Classic above).  In
+         * continuous mode the fill list is not visible to readers yet, so
+         * also merge this report's AD fields — a device often spreads its
+         * name and other fields over several packets. */
         int dup = find_slot_by_addr(addr);
         if (dup >= 0) {
-            if (rssi != BT_RSSI_UNKNOWN) g_scan[dup].rssi = rssi;
+            if (rssi != BT_RSSI_UNKNOWN) items[dup].rssi = rssi;
+            if (g_tgt_cont) {
+                bool had_name = items[dup].name[0] != '\0';
+                extract_ble_adv_data(ad_data, ad_len, &items[dup]);
+                if (!had_name && items[dup].name[0] != '\0')
+                    name_store(items[dup].addr, items[dup].name);
+            }
             return;
         }
 
         int idx = next_slot();
         if (idx < 0) return;
 
-        reverse_bd_addr(addr, g_scan[idx].addr);
-        g_scan[idx].name[0]         = '\0';
-        g_scan[idx].type            = BT_DEVTYPE_BLE;
-        g_scan[idx].dev_class       = BT_CLASS_UNKNOWN;
-        g_scan[idx].class_of_device = 0;
-        g_scan[idx].rssi            = rssi;
-        g_scan[idx].tx_power        = BT_TX_POWER_UNKNOWN;
-        g_scan[idx].flags           = BT_FLAGS_NONE;
-        g_scan[idx].company_id      = BT_COMPANY_NONE;
-        g_scan[idx].service_uuid    = BT_SERVICE_NONE;
+        reverse_bd_addr(addr, items[idx].addr);
+        items[idx].name[0]         = '\0';
+        items[idx].type            = BT_DEVTYPE_BLE;
+        items[idx].dev_class       = BT_CLASS_UNKNOWN;
+        items[idx].class_of_device = 0;
+        items[idx].rssi            = rssi;
+        items[idx].tx_power        = BT_TX_POWER_UNKNOWN;
+        items[idx].flags           = BT_FLAGS_NONE;
+        items[idx].company_id      = BT_COMPANY_NONE;
+        items[idx].service_uuid    = BT_SERVICE_NONE;
 
-        uint8_t       ad_len  = gap_event_advertising_report_get_data_length(packet);
-        const uint8_t *ad_data = gap_event_advertising_report_get_data(packet);
-        extract_ble_adv_data(ad_data, ad_len, &g_scan[idx]);
+        extract_ble_adv_data(ad_data, ad_len, &items[idx]);
+        if (g_tgt_cont) {
+            if (items[idx].name[0] != '\0') {
+                name_store(items[idx].addr, items[idx].name);
+            } else {
+                bt_name_ent_t *n = name_find(items[idx].addr);
+                if (n != NULL && n->state == NAME_KNOWN)
+                    memcpy(items[idx].name, n->name, BT_NAME_LEN);
+            }
+        }
         publish_slot();
     }
 }
@@ -262,13 +424,19 @@ int bt_scan(void)
         return -1;
     }
 
+    if (g_cont) {
+        cyw43_arch_lwip_end();
+        return -1;
+    }
+
+    g_tgt_cont     = false;
     g_scan_count   = 0;
     g_scan_done    = false;
     g_classic_done = false;
     g_state        = BT_STATE_SCANNING;
 
     /* Classic inquiry: 5 × 1.28 s ≈ 6.4 s window. */
-    gap_inquiry_start(5);
+    g_inq_active = (gap_inquiry_start(5) == 0);
     /* BLE passive scan: interval 48 slots (30 ms), window 30 slots (18.75 ms). */
     gap_set_scan_parameters(0, 48, 30);
     gap_start_scan();
@@ -299,6 +467,184 @@ int bt_get_scan_results(const bt_scan_result_t **out, int *out_count)
     *out       = g_scan;
     *out_count = (int)g_scan_count;
     return 0;
+}
+
+/* ---- continuous scanning ------------------------------------------------- */
+static bool owner_gone(void)
+{
+    pcb_t *p = task_find_process(g_owner_pid);
+    return p == NULL || !p->alive;
+}
+
+static bool listener_alive(void)
+{
+    if (g_listen_tid == 0u) return false;
+    tcb_t *t = task_find_thread(g_listen_tid);
+    return t != NULL && t->state != THREAD_ZOMBIE;
+}
+
+/* Caller holds g_cont_lock. */
+static void cont_stop_locked(void)
+{
+    cyw43_arch_lwip_begin();
+    if (g_cont) {
+        g_cont = false;
+        gap_stop_scan();
+        gap_inquiry_stop();     /* its INQUIRY_COMPLETE takes the one-shot path */
+        if (g_state == BT_STATE_SCANNING) g_state = BT_STATE_IDLE;
+    }
+    cyw43_arch_lwip_end();
+    event_flags_set(&g_cont_ev, CONT_EV_STOP);
+}
+
+static void bt_listen_thread(void *arg)
+{
+    (void)arg;
+    const bt_scan_list_t *l;
+    while (bt_scan_wait(&l) == 0) {
+        g_cb(l, g_cb_ctx);
+    }
+    kmutex_lock(&g_cont_lock);
+    if (g_listen_tid == CURRENT_TCB->tid) g_listen_tid = 0u;
+    kmutex_unlock(&g_cont_lock);
+}
+
+int bt_scan_start(bt_scan_cb_t cb, void *ctx)
+{
+    uint32_t me = (uint32_t)sys_getpid();
+
+    kmutex_lock(&g_cont_lock);
+    if (g_cont && owner_gone()) cont_stop_locked();   /* reclaim a dead owner */
+    if (g_cont || listener_alive()) {
+        kmutex_unlock(&g_cont_lock);
+        return BT_ERR_BUSY;
+    }
+
+    cyw43_arch_lwip_begin();
+    if (g_state == BT_STATE_OFF || g_state == BT_STATE_ERROR) {
+        cyw43_arch_lwip_end();
+        kmutex_unlock(&g_cont_lock);
+        return BT_ERR_NOTREADY;
+    }
+    if (g_state == BT_STATE_SCANNING) {     /* one-shot bt_scan() running */
+        cyw43_arch_lwip_end();
+        kmutex_unlock(&g_cont_lock);
+        return BT_ERR_BUSY;
+    }
+
+    scanbuf_init(&g_sb);
+    for (int i = 0; i < 3; i++) g_lists[i].count = 0;
+    memset(g_names, 0, sizeof(g_names));
+    g_name_next  = 0u;
+    g_tgt_cont   = true;
+    g_state      = BT_STATE_SCANNING;
+    g_inq_active = (gap_inquiry_start(BT_INQUIRY_LEN) == 0);
+    /* BLE passive scan: interval 48 slots (30 ms), window 30 slots (18.75 ms). */
+    gap_set_scan_parameters(0, 48, 30);
+    gap_start_scan();
+
+    g_window_start_us = time_us_64();
+    g_owner_pid       = me;
+    g_cb              = cb;
+    g_cb_ctx          = ctx;
+    g_cont            = true;
+    event_flags_clear(&g_cont_ev, CONT_EV_READY | CONT_EV_STOP);
+    cyw43_arch_lwip_end();
+
+    if (cb != NULL) {
+        pcb_t *proc = task_find_process(me);
+        tcb_t *t = proc ? task_create_thread(proc, "bt-listen",
+                                             bt_listen_thread, NULL,
+                                             CURRENT_TCB->priority,
+                                             DEFAULT_STACK_SIZE)
+                        : NULL;
+        if (t == NULL) {
+            cont_stop_locked();
+            kmutex_unlock(&g_cont_lock);
+            return BT_ERR_NOMEM;
+        }
+        g_listen_tid = t->tid;
+    }
+    kmutex_unlock(&g_cont_lock);
+    return 0;
+}
+
+void bt_scan_stop(void)
+{
+    kmutex_lock(&g_cont_lock);
+    if (g_cont) {
+        cont_stop_locked();
+    } else {
+        /* One-shot: stop the BLE scan bt_scan() leaves running, and cut the
+         * inquiry short if it is still going. */
+        cyw43_arch_lwip_begin();
+        gap_stop_scan();
+        if (g_state == BT_STATE_SCANNING) {
+            gap_inquiry_stop();
+            g_scan_done = true;
+            g_state     = BT_STATE_IDLE;
+        }
+        cyw43_arch_lwip_end();
+    }
+    kmutex_unlock(&g_cont_lock);
+}
+
+bool bt_scan_running(void) { return g_cont; }
+
+int bt_scan_wait(const bt_scan_list_t **list)
+{
+    if (list == NULL) return BT_ERR_ARG;
+
+    for (;;) {
+        event_flags_wait(&g_cont_ev, CONT_EV_READY | CONT_EV_STOP, false);
+
+        /* Clear before taking; see wifi_scan_wait(). */
+        kmutex_lock(&g_cont_lock);
+        event_flags_clear(&g_cont_ev, CONT_EV_READY);
+        bool running = g_cont;
+        bool took = running && scanbuf_take(&g_sb);
+        uint8_t held = g_sb.held;
+        kmutex_unlock(&g_cont_lock);
+
+        if (!running) return BT_ERR_STOPPED;
+        if (took) {
+            *list = &g_lists[held];
+            return 0;
+        }
+    }
+}
+
+void bt_scan_poll(void)
+{
+    if (!g_cont) return;
+
+    bool published = false;
+    kmutex_lock(&g_cont_lock);
+    if (g_cont && owner_gone()) cont_stop_locked();
+
+    if (g_cont) {
+        uint64_t now = time_us_64();
+        cyw43_arch_lwip_begin();
+        /* Restart Classic inquiry here rather than in packet_handler, so a
+         * refused start (e.g. HCI busy) is simply retried 10 ms later. */
+        if (!g_inq_active && gap_inquiry_start(BT_INQUIRY_LEN) == 0)
+            g_inq_active = true;
+
+        uint32_t ms = (uint32_t)((now - g_window_start_us) / 1000u);
+        if (ms >= BT_WINDOW_MS) {
+            g_lists[g_sb.fill].window_ms = ms;
+            scanbuf_publish(&g_sb);
+            g_lists[g_sb.ready].seq     = g_sb.seq;
+            g_lists[g_sb.ready].dropped = g_sb.dropped;
+            g_lists[g_sb.fill].count    = 0;
+            g_window_start_us = now;
+            published = true;
+        }
+        cyw43_arch_lwip_end();
+    }
+    kmutex_unlock(&g_cont_lock);
+
+    if (published) event_flags_set(&g_cont_ev, CONT_EV_READY);
 }
 
 const char *bt_devclass_str(bt_devclass_t cls)
@@ -341,13 +687,14 @@ static int cmd_bt(int argc, char **argv)
     const char *sub = (argc >= 2) ? argv[1] : "status";
 
     if (strcmp(sub, "status") == 0) {
-        shell_print("Bluetooth state: %s\r\n", state_str(g_state));
+        shell_print("Bluetooth state: %s%s\r\n", state_str(g_state),
+                    g_cont ? " (continuous scan on)" : "");
         return 0;
     }
 
     if (strcmp(sub, "scan") == 0) {
         if (g_state == BT_STATE_OFF) {
-            shell_print("Bluetooth not initialized\r\n");
+            shell_print("Bluetooth not ready\r\n");
             return -1;
         }
         shell_print("Scanning (~7 s)...\r\n");
@@ -357,11 +704,9 @@ static int cmd_bt(int argc, char **argv)
         }
         for (int t = 0; !g_scan_done && t < 120; t++)
             sys_sleep(100);
-        cyw43_arch_lwip_begin();
-        gap_stop_scan();
-        cyw43_arch_lwip_end();
-        if (!g_scan_done) {
-            g_state = BT_STATE_IDLE;
+        bool done = g_scan_done;
+        bt_scan_stop();
+        if (!done) {
             shell_print("Scan timed out\r\n");
             return -1;
         }
@@ -391,13 +736,44 @@ static int cmd_bt(int argc, char **argv)
         return 0;
     }
 
-    shell_print("Usage: bt [status|scan]\r\n");
+    if (strcmp(sub, "watch") == 0) {
+        int windows = (argc >= 3) ? atoi(argv[2]) : 5;
+        if (windows < 1) windows = 1;
+        int rc = bt_scan_start(NULL, NULL);
+        if (rc == BT_ERR_BUSY) {
+            shell_print("A scan is already running\r\n");
+            return -1;
+        }
+        if (rc != 0) {
+            shell_print("Bluetooth not ready (%d)\r\n", rc);
+            return -1;
+        }
+        for (int w = 0; w < windows; w++) {
+            const bt_scan_list_t *l;
+            if (bt_scan_wait(&l) != 0) break;
+            shell_print("-- window %u: %u ms, %d devices, %u dropped\r\n",
+                        (unsigned)l->seq, (unsigned)l->window_ms,
+                        l->count, (unsigned)l->dropped);
+            for (int i = 0; i < l->count; i++) {
+                const bt_scan_result_t *r = &l->items[i];
+                shell_print("   ");
+                print_addr(r->addr);
+                shell_print("  %4d  %-7s  %s\r\n", (int)r->rssi,
+                            r->type == BT_DEVTYPE_CLASSIC ? "Classic" : "BLE",
+                            r->name[0] ? r->name : "(unknown)");
+            }
+        }
+        bt_scan_stop();
+        return 0;
+    }
+
+    shell_print("Usage: bt [status|scan|watch [n]]\r\n");
     return -1;
 }
 
 static const shell_cmd_t bt_cmd = {
     "bt",
-    "bt [status|scan]",
+    "bt [status|scan|watch [n]]",
     cmd_bt
 };
 
@@ -407,6 +783,10 @@ void bt_init(void)
     static bool initialized = false;
     if (initialized) return;
     initialized = true;
+
+    kmutex_init(&g_cont_lock);
+    event_flags_init(&g_cont_ev);
+    event_flags_set(&g_cont_ev, CONT_EV_STOP);   /* not running yet */
 
     /* btstack_cyw43_init() hooks BTstack into the async context that was
      * already created by cyw43_arch_init() (called from wifi_init()).
@@ -420,10 +800,10 @@ void bt_init(void)
     hci_event_cb_reg.callback = packet_handler;
     hci_add_event_handler(&hci_event_cb_reg);
 
-    /* Power on the BT radio asynchronously.  The HCI init sequence completes
-     * once the wifi-poll thread starts calling cyw43_arch_poll(). */
+    /* Power on the BT radio asynchronously.  The HCI init sequence runs in
+     * the async context; packet_handler moves g_state from OFF to IDLE when
+     * BTstack reports HCI_STATE_WORKING. */
     hci_power_control(HCI_POWER_ON);
-    g_state = BT_STATE_IDLE;
 
     shell_register_cmd(&bt_cmd);
     printf("[bt] BTstack initialized (scan mode)\r\n");

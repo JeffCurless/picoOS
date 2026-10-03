@@ -17,10 +17,11 @@
 
 #ifdef PICOOS_BT_ENABLE
 
+#include <stdbool.h>
 #include <stdint.h>
 
 typedef enum {
-    BT_STATE_OFF      = 0,  /* BT radio not yet powered on              */
+    BT_STATE_OFF      = 0,  /* BT radio not yet powered on (HCI not up) */
     BT_STATE_IDLE     = 1,  /* radio up, no active scan                 */
     BT_STATE_SCANNING = 2,  /* classic inquiry + BLE scan in progress   */
     BT_STATE_ERROR    = 3,  /* initialization or scan failed            */
@@ -83,6 +84,64 @@ int           bt_copy_scan_results(bt_scan_result_t *buf, int max);
 int           bt_get_scan_results(const bt_scan_result_t **out, int *out_count);
 const char   *bt_devclass_str(bt_devclass_t cls);
 
+/* --- Continuous scanning --------------------------------------------------
+ *
+ * bt_scan_start() keeps BLE passive scanning on and restarts Classic inquiry
+ * (BT_INQUIRY_LEN x 1.28 s) back to back until bt_scan_stop().  Every
+ * BT_WINDOW_MS the list of every device heard in that window is handed to the
+ * subscriber by swapping buffers (see kernel/scanbuf.h), not by copying.
+ * Radio activity is not tied to the window: a Classic device answers at most
+ * once per inquiry, so it can be missing from a window that falls between two
+ * of its answers.
+ *
+ * Names: Classic names come from a remote name request, sent once per device
+ * per session; BLE names come from advertising data.  Both are kept in a
+ * small kernel cache, so a device keeps its name in later windows.  A failed
+ * name request is not retried until the next bt_scan_start().
+ *
+ * Receiving windows works exactly like wifi_scan_start() (see wifi.h):
+ * bt_scan_start(NULL, NULL) + bt_scan_wait() in your own thread, or
+ * bt_scan_start(cb, ctx) and a "bt-listen" thread in your process calls
+ * cb(list, ctx) once per window.  One subscriber at a time; continuous mode
+ * and one-shot bt_scan() exclude each other; if the subscriber's process
+ * exits, scanning stops on its own.
+ * ------------------------------------------------------------------------- */
+#define BT_WINDOW_MS     1000u
+#define BT_INQUIRY_LEN   1u      /* Classic inquiry length, 1.28 s units */
+
+/* Error codes for the continuous-scan API (bt_scan() and
+ * bt_copy_scan_results() keep returning -1). */
+#define BT_ERR_ARG       (-1)   /* bad argument                           */
+#define BT_ERR_BUSY      (-2)   /* a scan or subscriber is already active */
+#define BT_ERR_NOTREADY  (-3)   /* radio off or HCI not up yet            */
+#define BT_ERR_NOMEM     (-4)   /* could not create the listener thread   */
+#define BT_ERR_STOPPED   (-5)   /* continuous scanning is not running     */
+
+typedef struct {
+    uint32_t         seq;        /* window number, 1, 2, 3, ...          */
+    uint32_t         dropped;    /* total windows lost to a slow reader  */
+    uint32_t         window_ms;  /* how long this window lasted          */
+    int              count;      /* valid entries in items[]             */
+    bt_scan_result_t items[BT_MAX_SCAN_RESULTS];  /* one per address     */
+} bt_scan_list_t;
+
+typedef void (*bt_scan_cb_t)(const bt_scan_list_t *list, void *ctx);
+
+/* 0, BT_ERR_BUSY, BT_ERR_NOTREADY or BT_ERR_NOMEM. */
+int           bt_scan_start(bt_scan_cb_t cb, void *ctx);
+/* Stop scanning: ends continuous mode and wakes the subscriber, or cuts a
+ * one-shot bt_scan() short (and turns off the BLE scan it leaves running).
+ * Safe to call when nothing is running. */
+void          bt_scan_stop(void);
+/* Block until the next window and point *list at it.  The list is yours
+ * until your next bt_scan_wait().  0, BT_ERR_STOPPED or BT_ERR_ARG. */
+int           bt_scan_wait(const bt_scan_list_t **list);
+bool          bt_scan_running(void);
+
+/* Kernel internal: called by the wifi-poll thread every 10 ms to publish
+ * windows and restart inquiry.  Apps do not call this. */
+void          bt_scan_poll(void);
+
 /* --- Host / LSP stubs ---------------------------------------------------- */
 #ifndef __arm__
 
@@ -97,7 +156,7 @@ typedef struct { uint8_t *data; uint8_t len; uint8_t pos; } ad_context_t;
 static inline bool btstack_cyw43_init(void *ctx)   { (void)ctx; return true; }
 static inline int  hci_power_control(int m)        { (void)m; return 0; }
 static inline void hci_add_event_handler(btstack_packet_callback_registration_t *r) { (void)r; }
-static inline void gap_inquiry_start(uint8_t d)    { (void)d; }
+static inline int  gap_inquiry_start(uint8_t d)    { (void)d; return 0; }
 static inline int  gap_inquiry_stop(void)          { return 0; }
 static inline void gap_set_scan_parameters(uint8_t t, uint16_t i, uint16_t w)
     { (void)t; (void)i; (void)w; }
@@ -108,6 +167,8 @@ static inline int  gap_remote_name_request(const bd_addr_t a, uint8_t m, uint16_
 
 /* HCI / GAP event codes used in bluetooth.c */
 #define HCI_POWER_ON                             1
+#define HCI_STATE_WORKING                        2
+#define BTSTACK_EVENT_STATE                      0x60
 #define HCI_EVENT_INQUIRY_COMPLETE               0x01
 #define HCI_EVENT_REMOTE_NAME_REQUEST_COMPLETE   0x07
 #define GAP_EVENT_INQUIRY_RESULT                 0xF2
@@ -129,6 +190,8 @@ static inline uint16_t gap_event_inquiry_result_get_clock_offset(const uint8_t *
 static inline void hci_event_remote_name_request_complete_get_bd_addr(const uint8_t *p, bd_addr_t a)
     { (void)p; (void)a; }
 static inline const uint8_t *hci_event_remote_name_request_complete_get_remote_name(const uint8_t *p) { (void)p; return (const uint8_t *)""; }
+static inline uint8_t hci_event_remote_name_request_complete_get_status(const uint8_t *p) { (void)p; return 0; }
+static inline uint8_t btstack_event_state_get_state(const uint8_t *p) { (void)p; return 0; }
 static inline void gap_event_advertising_report_get_address(const uint8_t *p, bd_addr_t a)
     { (void)p; (void)a; }
 static inline int8_t gap_event_advertising_report_get_rssi(const uint8_t *p) { (void)p; return 0; }

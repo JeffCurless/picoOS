@@ -346,8 +346,9 @@ static void parse_config(const char *buf,
 }
 
 /* -------------------------------------------------------------------------
- * mcast_recv_cb — called on the wifi-poll thread (see wifi_mcast_open())
- * when a UDP datagram arrives on MCAST_PORT.
+ * mcast_recv_cb — called when a UDP datagram arrives on MCAST_PORT.  It runs
+ * in the CYW43 async context, a low-priority IRQ on core 0, not on a thread
+ * (see wifi_mcast_open()).
  *
  * Expected message format: "<nodeid>:<color_hex>"
  *   e.g.  "2:E0"   — node 2, color 0xE0 (bright red in RGB332)
