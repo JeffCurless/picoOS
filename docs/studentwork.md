@@ -104,7 +104,7 @@ make -j$(nproc) -C build_pico
 CMake automatically reads `pico_sdk_import.cmake` at the project root, locates the ARM cross-compiler via `arm-none-eabi-gcc` in `PATH`, and sets `CMAKE_SYSTEM_PROCESSOR=arm` — no extra toolchain flags needed.
 
 A successful build produces these files in `build_pico/src/`, named after the board,
-display variant, and version (e.g. `picoos_D-v0.3.5.*` for a pico + Display Pack build):
+display variant, and version (e.g. `picoos_D-v0.3.6.*` for a pico + Display Pack build):
 
 | File | Purpose |
 |---|---|
@@ -149,7 +149,7 @@ make -j$(nproc) -C build_pico
 3. Copy the UF2:
 
    ```bash
-   cp build_pico/src/picoos_D-v0.3.5.uf2 /run/media/$USER/RPI-RP2/
+   cp build_pico/src/picoos_D-v0.3.6.uf2 /run/media/$USER/RPI-RP2/
    sync
    ```
 
@@ -160,7 +160,7 @@ make -j$(nproc) -C build_pico
 With the Pico in BOOTSEL mode:
 
 ```bash
-picotool load build_pico/src/picoos_D-v0.3.5.uf2 --force
+picotool load build_pico/src/picoos_D-v0.3.6.uf2 --force
 picotool reboot
 ```
 

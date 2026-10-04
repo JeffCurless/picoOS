@@ -100,9 +100,12 @@ const char   *bt_devclass_str(bt_devclass_t cls);
  * was last heard (a BLE device: a window or two).
  *
  * Names: Classic names come from a remote name request, sent once per device
- * per session; BLE names come from advertising data.  Both are kept in a
- * small kernel cache, so a device keeps its name in later windows.  A failed
- * name request is not retried until the next bt_scan_start().
+ * per session.  The controller answers one request at a time, so devices
+ * found while one is outstanding are queued and asked in turn.  BLE scanning
+ * is active, so BLE names come from advertising data or the scan response.
+ * Both are kept in a small kernel cache, so a device keeps its name in later
+ * windows.  A name request that fails is not retried until the next
+ * bt_scan_start().
  *
  * Receiving windows works exactly like wifi_scan_start() (see wifi.h):
  * bt_scan_start(NULL, NULL) + bt_scan_wait() in your own thread, or
@@ -203,6 +206,7 @@ static inline uint8_t btstack_event_state_get_state(const uint8_t *p) { (void)p;
 static inline void gap_event_advertising_report_get_address(const uint8_t *p, bd_addr_t a)
     { (void)p; (void)a; }
 static inline int8_t gap_event_advertising_report_get_rssi(const uint8_t *p) { (void)p; return 0; }
+static inline uint8_t gap_event_advertising_report_get_advertising_event_type(const uint8_t *p) { (void)p; return 0; }
 static inline uint8_t gap_event_advertising_report_get_data_length(const uint8_t *p) { (void)p; return 0; }
 static inline const uint8_t *gap_event_advertising_report_get_data(const uint8_t *p) { (void)p; return NULL; }
 

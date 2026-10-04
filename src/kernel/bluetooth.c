@@ -64,19 +64,32 @@ static uint32_t             g_listen_tid;           /* 0 = no listener      */
 /* Name cache, continuous mode only.  Touched only by packet_handler (IRQ)
  * and by bt_scan_start() under the async context lock.  Addresses are in
  * the same (reversed) byte order as bt_scan_result_t.addr.  When full, the
- * oldest slot is reused round-robin. */
-#define BT_NAME_CACHE  BT_MAX_SCAN_RESULTS
+ * oldest slot is reused round-robin.  Larger than one window's list because
+ * Classic devices still waiting for a name share it with BLE names. */
+#define BT_NAME_CACHE  32
 
 typedef enum { NAME_FREE = 0, NAME_PENDING, NAME_KNOWN } bt_name_state_t;
 
 typedef struct {
-    uint8_t addr[BT_ADDR_LEN];
-    uint8_t state;               /* bt_name_state_t */
-    char    name[BT_NAME_LEN];
+    uint8_t  addr[BT_ADDR_LEN];
+    uint8_t  state;              /* bt_name_state_t */
+    uint8_t  psrm;               /* Classic: page scan repetition mode  */
+    uint16_t clock_offset;       /* Classic: clock offset | 0x8000      */
+    char     name[BT_NAME_LEN];
 } bt_name_ent_t;
 
 static bt_name_ent_t g_names[BT_NAME_CACHE];
 static uint8_t       g_name_next;
+
+/* BTstack runs one remote name request at a time and refuses a second
+ * while one is outstanding, so requests are sent one by one: a Classic
+ * device that arrives while one is busy waits as NAME_PENDING and is asked
+ * when the busy one completes.  g_name_busy_us lets a request whose
+ * completion never arrives stop blocking the queue. */
+#define BT_NAME_REQ_TIMEOUT_US  (10u * 1000u * 1000u)
+
+static bool     g_name_busy;
+static uint64_t g_name_busy_us;
 
 static bt_name_ent_t *name_find(const uint8_t addr[BT_ADDR_LEN])
 {
@@ -110,6 +123,34 @@ static void name_store(const uint8_t addr[BT_ADDR_LEN], const char *name)
     if (e == NULL) e = name_add(addr);
     memcpy(e->name, name, BT_NAME_LEN);
     e->state = NAME_KNOWN;
+}
+
+/* Send a remote name request unless one is outstanding.  Returns true if
+ * it was sent. */
+static bool name_request(const uint8_t raddr[BT_ADDR_LEN], uint8_t psrm,
+                         uint16_t clock_offset)
+{
+    if (g_name_busy &&
+        time_us_64() - g_name_busy_us < BT_NAME_REQ_TIMEOUT_US) return false;
+
+    bd_addr_t addr;
+    reverse_bd_addr(raddr, addr);
+    if (gap_remote_name_request(addr, psrm, clock_offset) != 0) return false;
+    g_name_busy    = true;
+    g_name_busy_us = time_us_64();
+    return true;
+}
+
+/* Ask for the next Classic name still waiting in the cache, if any. */
+static void name_request_next(void)
+{
+    for (int i = 0; i < BT_NAME_CACHE; i++) {
+        bt_name_ent_t *e = &g_names[i];
+        if (e->state == NAME_PENDING) {
+            name_request(e->addr, e->psrm, e->clock_offset);
+            return;
+        }
+    }
 }
 
 /* Where packet_handler writes: the one-shot buffer, or the fill list. */
@@ -193,8 +234,11 @@ static void publish_slot(void) {}
 #endif
 
 /* ---- BLE AD data parser: extracts name, flags, TX power, company ID ------- */
+/* `rsp` is true for a scan response.  Some devices send a different
+ * company ID there than in their advertisement; the advertisement's wins
+ * so the field does not flip between the two from packet to packet. */
 static void extract_ble_adv_data(const uint8_t *ad_data, uint8_t ad_len,
-                                  bt_scan_result_t *dev)
+                                  bool rsp, bt_scan_result_t *dev)
 {
     ad_context_t ctx;
     ad_iterator_init(&ctx, ad_len, ad_data);
@@ -224,7 +268,7 @@ static void extract_ble_adv_data(const uint8_t *ad_data, uint8_t ad_len,
             dev->tx_power = (int8_t)d[0];
             break;
         case 0xFFu: /* Manufacturer Specific Data — first 2 bytes are company ID (LE) */
-            if (dlen >= 2)
+            if (dlen >= 2 && (!rsp || dev->company_id == BT_COMPANY_NONE))
                 dev->company_id = (uint16_t)((uint16_t)d[1] << 8 | d[0]);
             break;
         default:
@@ -287,28 +331,31 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
         items[idx].company_id      = BT_COMPANY_NONE;
         items[idx].service_uuid    = BT_SERVICE_NONE;
 
+        uint8_t  psrm =
+            gap_event_inquiry_result_get_page_scan_repetition_mode(packet);
+        uint16_t clk  =
+            gap_event_inquiry_result_get_clock_offset(packet) | 0x8000u;
+
         /* Continuous mode asks for each name once per session and fills it
-         * in from the cache in later windows. */
+         * in from the cache in later windows.  A device whose request has
+         * not been sent yet stays NAME_PENDING with fresh paging info. */
         bool ask = true;
         if (g_tgt_cont) {
             bt_name_ent_t *n = name_find(items[idx].addr);
-            if (n != NULL) {
-                if (n->state == NAME_KNOWN)
-                    memcpy(items[idx].name, n->name, BT_NAME_LEN);
+            if (n == NULL) n = name_add(items[idx].addr);
+            if (n->state == NAME_KNOWN) {
+                memcpy(items[idx].name, n->name, BT_NAME_LEN);
                 ask = false;
             } else {
-                name_add(items[idx].addr);
+                n->psrm         = psrm;
+                n->clock_offset = clk;
             }
         }
         publish_slot();   /* before the name request: its reply looks us up */
 
-        if (ask) {
-            /* Request the human-readable name asynchronously. */
-            gap_remote_name_request(
-                addr,
-                gap_event_inquiry_result_get_page_scan_repetition_mode(packet),
-                gap_event_inquiry_result_get_clock_offset(packet) | 0x8000u);
-        }
+        /* Request the human-readable name asynchronously.  If another
+         * request is outstanding this one is sent when it completes. */
+        if (ask) name_request(items[idx].addr, psrm, clk);
         return;
     }
 
@@ -320,6 +367,7 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
         const uint8_t *name = ok
             ? hci_event_remote_name_request_complete_get_remote_name(packet)
             : NULL;
+        g_name_busy = false;
 
         if (g_tgt_cont) {
             /* Record the answer even if the device has rotated out of the
@@ -336,6 +384,7 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
                 }
                 n->state = NAME_KNOWN;
             }
+            name_request_next();
         }
 
         int idx = find_slot_by_addr(addr);
@@ -367,6 +416,8 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
         int8_t rssi = ble_report_rssi(packet);
         uint8_t       ad_len  = gap_event_advertising_report_get_data_length(packet);
         const uint8_t *ad_data = gap_event_advertising_report_get_data(packet);
+        bool          rsp     =
+            gap_event_advertising_report_get_advertising_event_type(packet) == 4u;
 
         /* Already seen this scan: refresh the RSSI (see Classic above).  In
          * continuous mode the fill list is not visible to readers yet, so
@@ -375,10 +426,10 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
         int dup = find_slot_by_addr(addr);
         if (dup >= 0) {
             if (rssi != BT_RSSI_UNKNOWN) items[dup].rssi = rssi;
-            if (g_tgt_cont) {
-                bool had_name = items[dup].name[0] != '\0';
-                extract_ble_adv_data(ad_data, ad_len, &items[dup]);
-                if (!had_name && items[dup].name[0] != '\0')
+            bool had_name = items[dup].name[0] != '\0';
+            if (g_tgt_cont || !had_name) {
+                extract_ble_adv_data(ad_data, ad_len, rsp, &items[dup]);
+                if (g_tgt_cont && !had_name && items[dup].name[0] != '\0')
                     name_store(items[dup].addr, items[dup].name);
             }
             return;
@@ -398,7 +449,7 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
         items[idx].company_id      = BT_COMPANY_NONE;
         items[idx].service_uuid    = BT_SERVICE_NONE;
 
-        extract_ble_adv_data(ad_data, ad_len, &items[idx]);
+        extract_ble_adv_data(ad_data, ad_len, rsp, &items[idx]);
         if (g_tgt_cont) {
             if (items[idx].name[0] != '\0') {
                 name_store(items[idx].addr, items[idx].name);
@@ -434,12 +485,14 @@ int bt_scan(void)
     g_scan_count   = 0;
     g_scan_done    = false;
     g_classic_done = false;
+    g_name_busy    = false;
     g_state        = BT_STATE_SCANNING;
 
     /* Classic inquiry: 5 × 1.28 s ≈ 6.4 s window. */
     g_inq_active = (gap_inquiry_start(5) == 0);
-    /* BLE passive scan: interval 48 slots (30 ms), window 30 slots (18.75 ms). */
-    gap_set_scan_parameters(0, 48, 30);
+    /* BLE active scan, so devices that put their name only in the scan
+     * response get one: interval 48 slots (30 ms), window 30 (18.75 ms). */
+    gap_set_scan_parameters(1, 48, 30);
     gap_start_scan();
     cyw43_arch_lwip_end();
 
@@ -537,14 +590,16 @@ int bt_scan_start(bt_scan_cb_t cb, void *ctx)
     for (int i = 0; i < 3; i++) g_lists[i].count = 0;
     memset(g_names, 0, sizeof(g_names));
     g_name_next  = 0u;
+    g_name_busy  = false;
     g_tgt_cont   = true;
     g_state      = BT_STATE_SCANNING;
     g_inq_active   = (gap_inquiry_start(BT_INQUIRY_LEN) == 0);
     g_inq_start_us = time_us_64();
-    /* BLE passive scan, window == interval (48 slots, 30 ms): listen all the
-     * time the controller is not busy with inquiry.  Report every packet,
-     * not just the first per device, so RSSI keeps updating. */
-    gap_set_scan_parameters(0, 48, 48);
+    /* BLE active scan, window == interval (48 slots, 30 ms): listen all the
+     * time the controller is not busy with inquiry.  Active, so devices that
+     * put their name only in the scan response get one.  Report every
+     * packet, not just the first per device, so RSSI keeps updating. */
+    gap_set_scan_parameters(1, 48, 48);
     gap_set_scan_duplicate_filter(false);
     gap_start_scan();
 
