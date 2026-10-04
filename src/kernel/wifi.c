@@ -24,6 +24,7 @@
 #ifdef PICOOS_BT_ENABLE
 #include "kernel/bluetooth.h"   /* bt_scan_poll() */
 #endif
+#include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -71,6 +72,87 @@ static wifi_scan_cb_t   g_cb;
 static void            *g_cb_ctx;
 static uint32_t         g_listen_tid;            /* 0 = no listener thread */
 
+/* ---- firmware BSS record -------------------------------------------------- *
+ * cyw43_ev_scan_result_t is a view onto the raw scan event: 12 bytes of event
+ * header, then the firmware's bss_info record.  The driver names only a few of
+ * its fields, so this mirrors the fixed part (cyw43_scan_result_internal_t in
+ * cyw43_ll.c) to read the rest.  The asserts tie it to the SDK's view, so a
+ * driver whose layout differs fails to build instead of returning garbage. */
+typedef struct {
+    uint32_t version;
+    uint32_t length;          /* bytes in the record, IEs included */
+    uint8_t  bssid[6];
+    uint16_t beacon_period;   /* TU */
+    uint16_t capability;
+    uint8_t  ssid_len;
+    uint8_t  ssid[32];
+    uint32_t rateset_count;
+    uint8_t  rateset_rates[16];
+    uint16_t chanspec;
+    uint16_t atim_window;
+    uint8_t  dtim_period;     /* overwritten by the driver with auth_mode */
+    int16_t  rssi;
+    int8_t   phy_noise;
+    uint8_t  n_cap;
+    uint32_t nbss_cap;
+    uint8_t  ctl_ch;
+    uint32_t reserved32[1];
+    uint8_t  flags;
+    uint8_t  reserved[3];
+    uint8_t  basic_mcs[16];
+    uint16_t ie_offset;
+    uint32_t ie_length;
+    int16_t  snr;
+} wifi_bss_info_t;
+
+#define BSS_INFO_OFS    12u   /* buflen, version, sync_id, bss_count */
+#define BSS_HT_CAP_40MHZ 0x0002u
+
+#ifdef __arm__
+#define BSS_ASSERT_AT(f, g) \
+    _Static_assert(BSS_INFO_OFS + offsetof(wifi_bss_info_t, f) == \
+                   offsetof(cyw43_ev_scan_result_t, g), \
+                   "CYW43 bss_info layout changed: " #f)
+BSS_ASSERT_AT(bssid,       bssid);
+BSS_ASSERT_AT(ssid_len,    ssid_len);
+BSS_ASSERT_AT(ssid,        ssid);
+BSS_ASSERT_AT(chanspec,    channel);
+BSS_ASSERT_AT(dtim_period, auth_mode);
+BSS_ASSERT_AT(rssi,        rssi);
+#endif
+
+/* Copy the fields cyw43_ev_scan_result_t does not name.  Records too short to
+ * hold them (none seen in practice) leave the fields at 0, "unknown". */
+static void fill_extra(wifi_scan_result_t *e, const cyw43_ev_scan_result_t *r)
+{
+    const wifi_bss_info_t *bss =
+        (const wifi_bss_info_t *)((const uint8_t *)r + BSS_INFO_OFS);
+
+    e->beacon_tu  = bss->beacon_period;
+    e->capability = bss->capability;
+
+    uint8_t max = 0;
+    uint32_t n = bss->rateset_count < 16u ? bss->rateset_count : 16u;
+    for (uint32_t i = 0; i < n; i++) {
+        uint8_t rate = bss->rateset_rates[i] & 0x7fu;   /* bit 7 = basic */
+        if (rate > max) max = rate;
+    }
+    e->max_rate = max;
+    e->phy      = max > 22u ? WIFI_PHY_OFDM : 0u;       /* above 11 Mb/s */
+
+    if (bss->length < offsetof(wifi_bss_info_t, snr) + sizeof(bss->snr)) {
+        e->noise = 0;
+        e->snr   = 0;
+        return;
+    }
+    e->noise = bss->phy_noise;
+    e->snr   = (int8_t)(bss->snr > 127 ? 127 : bss->snr < 0 ? 0 : bss->snr);
+    if (bss->n_cap) {
+        e->phy |= WIFI_PHY_HT;
+        if (bss->nbss_cap & BSS_HT_CAP_40MHZ) e->phy |= WIFI_PHY_HT40;
+    }
+}
+
 /* ---- scan callback (called from cyw43 poll context) ---------------------- */
 static int scan_result_cb(void *env, const cyw43_ev_scan_result_t *r)
 {
@@ -93,7 +175,10 @@ static int scan_result_cb(void *env, const cyw43_ev_scan_result_t *r)
      * rssi >= 0 is a bogus reading the firmware sometimes sends; skip it. */
     for (int k = 0; k < i; k++) {
         if (memcmp(buf[k].bssid, r->bssid, 6) == 0) {
-            if (r->rssi < 0) buf[k].rssi = r->rssi;
+            if (r->rssi < 0) {
+                buf[k].rssi = r->rssi;
+                fill_extra(&buf[k], r);
+            }
             return 0;
         }
     }
@@ -116,6 +201,7 @@ static int scan_result_cb(void *env, const cyw43_ev_scan_result_t *r)
     e->rssi      = r->rssi;
     e->channel   = r->channel;
     e->auth_mode = (uint8_t)r->auth_mode;
+    fill_extra(e, r);
 #ifndef PICOOS_SCAN_RACE_INJECT
     __dmb();
     *cnt = i + 1;
@@ -725,11 +811,15 @@ static int cmd_wifi(int argc, char **argv)
         if (n <= 0) {
             shell_print("No networks found\r\n");
         } else {
-            shell_print("%-32s  %5s  Ch  Auth\r\n", "SSID", "RSSI");
+            shell_print("%-32s  %5s  %5s  %3s  Ch  Auth  Phy  Bcn  Rate\r\n",
+                        "SSID", "RSSI", "Noise", "SNR");
             for (int i = 0; i < n; i++) {
-                shell_print("%-32s  %5d  %2u  %u\r\n",
-                    res[i].ssid, (int)res[i].rssi,
-                    res[i].channel, res[i].auth_mode);
+                shell_print("%-32s  %5d  %5d  %3d  %2u  %4u  %3s  %3u  %4u\r\n",
+                    res[i].ssid, (int)res[i].rssi, (int)res[i].noise,
+                    (int)res[i].snr, res[i].channel, res[i].auth_mode,
+                    (res[i].phy & WIFI_PHY_HT)   ? "n" :
+                    (res[i].phy & WIFI_PHY_OFDM) ? "g" : "b",
+                    res[i].beacon_tu, (unsigned)(res[i].max_rate / 2u));
             }
         }
         return 0;

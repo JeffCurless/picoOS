@@ -127,7 +127,7 @@ cmake -B build_pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico
 make -j$(nproc) -C build_pico
 ```
 
-A successful build produces these files in `build_pico/src/`, named after the board, display variant and version (`<name>` below is e.g. `picoos_D-v0.3.6`):
+A successful build produces these files in `build_pico/src/`, named after the board, display variant and version (`<name>` below is e.g. `picoos_D-v0.3.7`):
 
 | File | Purpose |
 |------|---------|
@@ -138,7 +138,7 @@ A successful build produces these files in `build_pico/src/`, named after the bo
 | `<name>.dis` | Disassembly listing |
 | `<name>.elf.map` | Linker map (used by `mem_report.py`) |
 
-The display suffix is `_D` for Display Pack, `_D2` for Display Pack 2 and nothing without a display; test images built with `PICOOS_SCAN_RACE_INJECT` add `_INJ`.  For example, a `pico` + Display Pack build at v0.3.6 produces `picoos_D-v0.3.6.uf2`, and a `picow` build without a display produces `picowos-v0.3.6.uf2`.  Use a separate build directory per board, as the `build` script does: the board is stored in the CMake cache when the directory is first configured.
+The display suffix is `_D` for Display Pack, `_D2` for Display Pack 2 and nothing without a display; test images built with `PICOOS_SCAN_RACE_INJECT` add `_INJ`.  For example, a `pico` + Display Pack build at v0.3.7 produces `picoos_D-v0.3.7.uf2`, and a `picow` build without a display produces `picowos-v0.3.7.uf2`.  Use a separate build directory per board, as the `build` script does: the board is stored in the CMake cache when the directory is first configured.
 
 ### Build options (optional)
 
@@ -254,8 +254,8 @@ See **[docs/testing.md](testing.md)** for a full description of each test case a
 4. Copy the `.uf2` file to the drive (substitute the actual filename for your board):
 
 ```bash
-cp build_pico/src/picoos_D-v0.3.6.uf2 /media/$USER/RPI-RP2/
-# macOS: cp build_pico/src/picoos_D-v0.3.6.uf2 /Volumes/RPI-RP2/
+cp build_pico/src/picoos_D-v0.3.7.uf2 /media/$USER/RPI-RP2/
+# macOS: cp build_pico/src/picoos_D-v0.3.7.uf2 /Volumes/RPI-RP2/
 ```
 
 5. The Pico unmounts and reboots into picoOS automatically.
@@ -272,7 +272,7 @@ sudo apt install picotool
 With the Pico in BOOTSEL mode:
 
 ```bash
-picotool load build_pico/src/picoos_D-v0.3.6.uf2 --force
+picotool load build_pico/src/picoos_D-v0.3.7.uf2 --force
 picotool reboot
 ```
 
@@ -340,7 +340,7 @@ After flashing, the console should show something like:
 
 ```
 =======================================================
-picoOS  v0.3.6
+picoOS  v0.3.7
 
   Platform : RP2040, dual ARM Cortex-M0+ (133 MHz max)
   Options  : DISPLAY_PACK
@@ -407,7 +407,7 @@ openocd -f interface/cmsis-dap.cfg -f target/rp2350.cfg
 In another terminal, launch GDB (substitute the actual ELF name for your board):
 
 ```bash
-arm-none-eabi-gdb build_pico/src/picoos_D-v0.3.6.elf
+arm-none-eabi-gdb build_pico/src/picoos_D-v0.3.7.elf
 (gdb) target remote :3333
 (gdb) monitor reset init
 (gdb) continue

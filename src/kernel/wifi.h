@@ -30,12 +30,30 @@ typedef enum {
 
 #define WIFI_MAX_SCAN_RESULTS 16
 
+/* auth_mode bits.  The CYW43 driver builds these from the beacon's IEs; they
+ * are not the CYW43_AUTH_* values wifi_connect() takes.  RSN covers WPA2 and
+ * WPA3 alike, and APs that use WPA or RSN also set WEP (the privacy bit). */
+#define WIFI_AUTH_WEP   0x01u   /* capability privacy bit   */
+#define WIFI_AUTH_WPA   0x02u   /* WPA vendor IE            */
+#define WIFI_AUTH_RSN   0x04u   /* RSN IE (WPA2 / WPA3)     */
+
+/* phy bits */
+#define WIFI_PHY_OFDM   0x01u   /* OFDM rates (802.11g)     */
+#define WIFI_PHY_HT     0x02u   /* 802.11n                  */
+#define WIFI_PHY_HT40   0x04u   /* 40 MHz channel allowed   */
+
 typedef struct {
-    char    ssid[33];
-    uint8_t bssid[6];
-    int16_t rssi;
-    uint8_t channel;
-    uint8_t auth_mode;
+    char     ssid[33];
+    uint8_t  bssid[6];
+    int16_t  rssi;
+    uint8_t  channel;
+    uint8_t  auth_mode;   /* WIFI_AUTH_* bits                       */
+    int8_t   noise;       /* dBm, 0 = unknown                       */
+    int8_t   snr;         /* dB,  0 = unknown                       */
+    uint16_t beacon_tu;   /* beacon interval in TU (1.024 ms)       */
+    uint16_t capability;  /* 802.11 capability field                */
+    uint8_t  max_rate;    /* highest legacy rate, 500 kb/s units    */
+    uint8_t  phy;         /* WIFI_PHY_* bits                        */
 } wifi_scan_result_t;
 
 void         wifi_init(void);
