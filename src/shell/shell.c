@@ -32,9 +32,9 @@
 /* -------------------------------------------------------------------------
  * Version — defined by CMakeLists.txt via target_compile_definitions
  * ------------------------------------------------------------------------- */
+#include "../kernel/dev.h"   /* dev_console_poll; DEV_DISPLAY, IOCTL_DISP_* */
 #ifdef PICOOS_DISPLAY_ENABLE
 #include "../drivers/display.h"
-#include "../kernel/dev.h"   /* DEV_DISPLAY, IOCTL_DISP_GET_BTNS, DISP_BTN_* */
 #endif
 
 /* -------------------------------------------------------------------------
@@ -199,13 +199,16 @@ static int cmd_kill(int argc, char **argv)
         shell_print("kill: thread %u not found\r\n", tid);
         return -1;
     }
-    t->state = THREAD_ZOMBIE;
-    if (t != (tcb_t *)CURRENT_TCB) {
-        sched_remove_thread(t);
-        task_free_thread(t);
+    /* Copy the name first: the TCB may be freed (and zeroed) right away. */
+    char name[sizeof(t->name)];
+    memcpy(name, t->name, sizeof(name));
+    bool self = (t == (tcb_t *)CURRENT_TCB);
+
+    task_kill_thread(t);
+    shell_print("kill: thread %u (%s) killed\r\n", tid, name);
+    if (self) {
+        sched_yield();   /* reaped by the scheduler; does not return */
     }
-    /* else: self-kill — scheduler reaps on next yield */
-    shell_print("kill: thread %u (%s) killed\r\n", tid, t->name);
     return 0;
 }
 
@@ -224,6 +227,9 @@ static int cmd_killproc(int argc, char **argv)
     }
     shell_print("killproc: killing process %u (%s)\r\n", pid, p->name);
     task_kill_process(p);
+    if (CURRENT_TCB->state == THREAD_ZOMBIE) {
+        sched_yield();   /* killed our own process: reaped, does not return */
+    }
     return 0;
 }
 
@@ -909,13 +915,10 @@ int shell_readline(char *buf, uint32_t size)
                 /* Explicitly service the USB stack so tud_cdc_available()
                  * is updated before the next poll.  The SDK's background
                  * IRQ mechanism handles this on RP2040; on RP2350 the IRQ
-                 * chain may not fire reliably, so we call it directly here.
-                 * tud_task() is safe to call from thread context — on a
-                 * single core any concurrent IRQ-driven call preempts and
-                 * completes before this resumes. */
-#if defined(__arm__) || defined(__thumb__)
-                tud_task();
-#endif
+                 * chain may not fire reliably, so we poll here too.  The
+                 * shell may run on either core, so go through
+                 * dev_console_poll(), which serialises with the SDK. */
+                dev_console_poll();
                 sys_sleep(1);
             }
         }
@@ -948,7 +951,7 @@ void shell_run(void)
      * otherwise stdio_usb_out_chars() silently discards the output. */
 #if defined(__arm__) || defined(__thumb__)
     while (!stdio_usb_connected()) {
-        tud_task();
+        dev_console_poll();
         sys_sleep(5);
     }
 #endif
@@ -972,9 +975,7 @@ void shell_run(void)
             while (ch == PICO_ERROR_TIMEOUT) {
                 ch = getchar_timeout_us(0);
                 if (ch == PICO_ERROR_TIMEOUT) {
-#if defined(__arm__) || defined(__thumb__)
-                    tud_task();
-#endif
+                    dev_console_poll();
                     sys_sleep(1);
                 }
             }

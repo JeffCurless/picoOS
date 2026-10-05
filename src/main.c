@@ -62,13 +62,13 @@ static void idle_thread(void *arg)
         /* Service the USB stack after every wakeup interrupt.  The SDK's
          * background IRQ mechanism calls tud_task() on RP2040 via the
          * shared USBCTRL_IRQ handler, but on RP2350 that chain may not
-         * fire reliably.  Calling it here ensures CDC input is processed
+         * fire reliably.  Polling here ensures CDC input is processed
          * at least as often as interrupts wake the idle thread (~1 ms). */
-        tud_task();
+        dev_console_poll();
     }
 }
 
-/* Core 1 idle thread — same __wfi() loop but no tud_task() (USB is Core 0). */
+/* Core 1 idle thread — same __wfi() loop but no USB polling (USB is Core 0). */
 static void idle1_thread(void *arg)
 {
     (void)arg;

@@ -95,7 +95,7 @@ only, for as long as it is held:
 
 **Practical split:**
 
-* **Core 0** — USB (`tud_task()` in the idle thread), SysTick sleep/wake scan, deadlock
+* **Core 0** — USB (`dev_console_poll()` in the idle thread), SysTick sleep/wake scan, deadlock
   scanner, the CYW43 WiFi/BT interrupt on pico_w / pico2_w, filesystem writes (flash
   erase/program via the SDK's `flash_safe_execute()`, which pauses Core 1).
 * **Core 1** — registers as a multicore lockout victim so flash writes on Core 0 can

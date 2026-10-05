@@ -154,6 +154,7 @@ tcb_t *task_create_thread(pcb_t      *proc,
     t->priority   = priority;
     t->affinity   = THREAD_AFFINITY_ANY; /* run on any core */
     t->state      = THREAD_READY;
+    t->kill_pending = false;
     t->wake_time_us = 0;
     t->cpu_time_us  = 0;
     t->next       = NULL;
@@ -407,26 +408,38 @@ void task_free_process(pcb_t *p)
 }
 
 /* -------------------------------------------------------------------------
+ * task_kill_thread
+ *
+ * sched_kill() decides, under the scheduler lock, whether t can be freed
+ * now.  A thread that is running (here or on the other core) or waiting on
+ * a sync primitive cannot: freeing it would pull the stack out from under
+ * a running CPU, or leave a dangling pointer in a waiter list.  Those are
+ * freed later by sched_next_thread() or sched_unblock().
+ * ------------------------------------------------------------------------- */
+void task_kill_thread(tcb_t *t)
+{
+    if (t != NULL && sched_kill(t)) {
+        task_free_thread(t);   /* also frees the PCB when last thread gone */
+    }
+}
+
+/* -------------------------------------------------------------------------
  * task_kill_process
  *
- * Kill every thread in proc, then free the PCB.
+ * Kill every thread in proc.  The PCB is freed with its last thread, which
+ * may be later than this call (see task_kill_thread), so mark it not alive
+ * now: owners of WiFi/BT continuous scans are reclaimed on that.
  *
- * Strategy: snapshot the thread array first, because task_free_thread()
- * compacts proc->threads[] as it goes and would corrupt a live iteration.
- * For each thread:
- *   - non-self: ZOMBIE → sched_remove_thread → task_free_thread (immediate)
- *   - self:     ZOMBIE only; sched_next_thread reaps on the next yield, and
- *               that reap will call task_free_thread which auto-frees the PCB
- *               when thread_count reaches zero.
+ * Snapshot the thread array first, because task_free_thread() compacts
+ * proc->threads[] as it goes and would corrupt a live iteration.
  * ------------------------------------------------------------------------- */
 void task_kill_process(pcb_t *proc)
 {
     if (proc == NULL) {
         return;
     }
+    proc->alive = false;
 
-    /* Snapshot: task_free_thread compacts proc->threads[], so we must not
-     * iterate it directly. */
     uint32_t count = proc->thread_count;
     tcb_t *snapshot[MAX_THREADS];
     for (uint32_t i = 0; i < count; i++) {
@@ -434,31 +447,7 @@ void task_kill_process(pcb_t *proc)
     }
 
     for (uint32_t i = 0; i < count; i++) {
-        tcb_t *t = snapshot[i];
-        if (t == NULL) {
-            continue;
-        }
-
-        thread_state_t old_state = t->state;
-        t->state = THREAD_ZOMBIE;
-
-        if (t != (tcb_t *)CURRENT_TCB) {
-            /* sched_remove_thread is a no-op for BLOCKED/SLEEPING threads —
-             * they were already removed from ready_queues when they blocked. */
-            sched_remove_thread(t);
-
-            if (old_state == THREAD_BLOCKED) {
-                /* Thread is sitting in a sync primitive's waiter list (semaphore,
-                 * mutex, mqueue).  Freeing the TCB here would leave a dangling
-                 * pointer in that list.  Leave it alive as ZOMBIE; the primitive's
-                 * signal/unlock path calls sched_unblock(), which detects ZOMBIE
-                 * and does the deferred task_free_thread() there. */
-            } else {
-                task_free_thread(t);   /* also frees PCB when last thread gone */
-            }
-        }
-        /* Self-kill: scheduler reaps on next yield via sched_next_thread;
-         * task_free_thread called there will free the PCB automatically. */
+        task_kill_thread(snapshot[i]);
     }
 }
 

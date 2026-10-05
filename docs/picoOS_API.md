@@ -207,9 +207,25 @@ THREAD_NEW → THREAD_READY → THREAD_RUNNING → THREAD_BLOCKED
 // Kill a single thread by TID (frees its stack and TCB)
 syscall_dispatch(SYS_KILL, tid, 0, 0, 0);
 
-// Kill all threads in a process and free the PCB
+// Same, from kernel code that already has the TCB
+void task_kill_thread(tcb_t *t);
+
+// Kill all threads in a process; the PCB is freed with its last thread
 task_kill_process(pcb_t *proc);
 ```
+
+A killed thread is freed only once nothing can still be using it:
+
+| Thread is… | Freed |
+|------------|-------|
+| READY, SLEEPING | at once |
+| BLOCKED on a mutex, semaphore, queue or event flags | when the primitive wakes it; the wake-up passes to the next waiter |
+| running on the other core | when it next switches out (within one 10 ms time slice) |
+| the caller | at its next yield — `SYS_KILL` and the shell yield for you |
+
+`task_kill_process()` marks the process not alive at once, so a WiFi/BT
+continuous scan it owned is reclaimed even while a thread is still waiting to
+be freed.
 
 ### 3.7 Additional Task API
 

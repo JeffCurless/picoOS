@@ -283,11 +283,10 @@ int32_t syscall_dispatch(uint32_t num,
     /* ------------------------------------------------------------------
      * SYS_KILL — kill a thread by TID.
      *
-     * Non-self kill: set ZOMBIE, remove from the ready queue, and free the
-     * TCB + stack immediately.  task_free_thread also frees the owning PCB
-     * if this was the last thread in the process.
-     * Self-kill: set ZOMBIE and yield; sched_next_thread reaps on the next
-     * PendSV (cannot free our own stack while running on it).
+     * task_kill_thread frees the TCB + stack (and the PCB with its last
+     * thread) now, or — for a thread that is running or blocked — as soon
+     * as that is safe.  Self-kill: yield; sched_next_thread reaps us on
+     * the next PendSV (cannot free our own stack while running on it).
      *
      * a0 = uint32_t tid
      * ------------------------------------------------------------------ */
@@ -297,12 +296,11 @@ int32_t syscall_dispatch(uint32_t num,
         if (t == NULL) {
             return -1;
         }
-        t->state = THREAD_ZOMBIE;
-        if (t != (tcb_t *)CURRENT_TCB) {
-            sched_remove_thread(t);
-            task_free_thread(t);
+        bool self = (t == (tcb_t *)CURRENT_TCB);
+        task_kill_thread(t);
+        if (self) {
+            sched_yield();   /* does not return */
         }
-        /* else: self-kill — scheduler reaps on next yield */
         return 0;
     }
 

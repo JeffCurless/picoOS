@@ -199,10 +199,10 @@ void sched_block(tcb_t *t)
 /* -------------------------------------------------------------------------
  * sched_unblock
  * ------------------------------------------------------------------------- */
-void sched_unblock(tcb_t *t)
+bool sched_unblock(tcb_t *t)
 {
     if (t == NULL) {
-        return;
+        return false;
     }
     uint32_t save = spinlock_irq_acquire(&sched_lock);
 
@@ -213,12 +213,58 @@ void sched_unblock(tcb_t *t)
          * spinlocks across task_free_thread's heap operations. */
         spinlock_irq_release(&sched_lock, save);
         task_free_thread(t);
-        return;
+        return false;
     }
 
     t->state = THREAD_READY;
     sched_add_thread_raw(t);
     spinlock_irq_release(&sched_lock, save);
+    return true;
+}
+
+/* -------------------------------------------------------------------------
+ * sched_kill
+ *
+ * Decide, under sched_lock, how a killed thread is freed.  The lock makes
+ * the answer stick: sched_next_thread() records current_tcb[] under it, so
+ * a thread that is not current on either core here cannot start running
+ * before we are done, and a BLOCKED one has really switched out.
+ *
+ *   the caller itself     ZOMBIE; reaped by sched_next_thread() at its
+ *                         next yield
+ *   current on the other  kill_pending; that core's sched_next_thread()
+ *   core                  reaps it (or defers, if it just blocked) when it
+ *                         switches out — at most one time slice away
+ *   BLOCKED               ZOMBIE; still in a primitive's waiter list, so
+ *                         sched_unblock() frees it when it is dequeued
+ *   already ZOMBIE        nothing — someone else is freeing it
+ *   READY / SLEEPING /    ZOMBIE, removed from the ready queue; the caller
+ *   NEW                   frees it (returns true)
+ * ------------------------------------------------------------------------- */
+bool sched_kill(tcb_t *t)
+{
+    if (t == NULL) {
+        return false;
+    }
+    uint32_t core = get_core_num();
+    bool     free_now = false;
+
+    uint32_t save = spinlock_irq_acquire(&sched_lock);
+    if (t == current_tcb[core]) {
+        t->state = THREAD_ZOMBIE;
+    } else if (t == current_tcb[core ^ 1u]) {
+        t->kill_pending = true;
+    } else if (t->state == THREAD_BLOCKED) {
+        t->state = THREAD_ZOMBIE;
+    } else if (t->state != THREAD_ZOMBIE) {
+        /* ZOMBIE before the free, so the SysTick wake loop (which reads
+         * state without this lock) never re-queues a SLEEPING thread. */
+        sched_remove_thread_raw(t);
+        t->state = THREAD_ZOMBIE;
+        free_now = true;
+    }
+    spinlock_irq_release(&sched_lock, save);
+    return free_now;
 }
 
 /* -------------------------------------------------------------------------
@@ -336,15 +382,26 @@ tcb_t *sched_next_thread(void)
         }
     }
 
+    /* Killed from the other core while it ran here (sched_kill).  If it
+     * has just blocked it is in a primitive's waiter list: make it a ZOMBIE
+     * for sched_unblock() to free, but do not reap it here. */
+    bool kill_deferred = false;
+    if (cur != NULL && cur->kill_pending) {
+        cur->kill_pending = false;
+        kill_deferred     = (cur->state == THREAD_BLOCKED);
+        cur->state        = THREAD_ZOMBIE;
+    }
+
     /* Mark outgoing thread READY so the rotation below can move it to tail. */
     if (cur != NULL && cur->state == THREAD_RUNNING) {
         cur->state = THREAD_READY;
     }
 
-    /* Reap zombie: the thread set itself ZOMBIE and yielded; assembly has
-     * already saved its context, so freeing the stack here is safe. */
+    /* Reap zombie: the thread set itself ZOMBIE and yielded, or was killed
+     * above; assembly has already saved its context, so freeing the stack
+     * here is safe. */
     bool zombie_reaped = false;
-    if (cur != NULL && cur->state == THREAD_ZOMBIE) {
+    if (cur != NULL && cur->state == THREAD_ZOMBIE && !kill_deferred) {
         sched_remove_thread_raw(cur);
         task_free_thread(cur);   /* frees stack + TCB slot; may acquire heap_lock */
         zombie_reaped = true;
@@ -379,9 +436,18 @@ tcb_t *sched_next_thread(void)
             }
         }
 
-        /* Pick the first READY thread whose affinity matches this core. */
+        /* Pick the first READY thread whose affinity matches this core.
+         *
+         * Skip a thread that is still current on the other core.  It can be
+         * READY there: it blocked or went to sleep and was woken before its
+         * own core's PendSV saved its context and switched away.  Running
+         * it here would resume it from a stale saved_sp while it is still
+         * executing.  current_tcb[] is written under sched_lock (below), so
+         * this check is exact; that core picks something else at its next
+         * switch, and then the thread is free to run anywhere. */
         for (tcb_t *t = ready_queues[prio]; t != NULL; t = t->next) {
             if (t->state == THREAD_READY &&
+                t != current_tcb[core ^ 1u] &&
                 (t->affinity == THREAD_AFFINITY_ANY ||
                  t->affinity == (int8_t)core)) {
                 selected = t;
@@ -400,6 +466,10 @@ tcb_t *sched_next_thread(void)
 
     selected->state = THREAD_RUNNING;
     current_slice_remaining[core] = TIME_SLICE_MS;
+
+    /* sched_asm.S stores this again after we return; setting it here, under
+     * the lock, is what lets sched_kill() trust current_tcb[]. */
+    current_tcb[core] = selected;
 
     spinlock_irq_release(&sched_lock, lock_save);
     return selected;
@@ -438,8 +508,11 @@ void isr_systick(void)
 
     tick_count++;
 
-    /* Wake any sleeping threads whose alarm has expired. */
+    /* Wake any sleeping threads whose alarm has expired.  Check and
+     * re-queue under sched_lock, so a thread that core 1 kills (sched_kill)
+     * or that is still mid-switch cannot change state between the two. */
     uint64_t now = time_us_64();
+    uint32_t save = spinlock_irq_acquire(&sched_lock);
     for (int i = 0; i < MAX_THREADS; i++) {
         tcb_t *t = task_get_thread_slot(i);
         if (t == NULL) {
@@ -447,9 +520,10 @@ void isr_systick(void)
         }
         if (t->state == THREAD_SLEEPING && t->wake_time_us <= now) {
             t->state = THREAD_READY;
-            sched_add_thread(t);
+            sched_add_thread_raw(t);
         }
     }
+    spinlock_irq_release(&sched_lock, save);
 
 #ifdef PICOOS_LOCK_DEBUG
     /* Deadlock scanner: find BLOCKED threads that have been waiting longer
@@ -633,7 +707,10 @@ void sched_init_core1(void)
  * ------------------------------------------------------------------------- */
 void sched_start_core1(void)
 {
-    /* Find the first Core-1-eligible READY thread. */
+    /* Find the first Core-1-eligible READY thread.  Core 0 is already
+     * scheduling, so pick and claim it under sched_lock: otherwise both
+     * cores could start the same THREAD_AFFINITY_ANY thread. */
+    uint32_t save = spinlock_irq_acquire(&sched_lock);
     tcb_t *first = NULL;
     for (uint8_t p = 0; p < NUM_PRIORITIES && first == NULL; p++) {
         for (tcb_t *t = ready_queues[p]; t != NULL; t = t->next) {
@@ -646,13 +723,16 @@ void sched_start_core1(void)
         }
     }
 
+    if (first != NULL) {
+        first->state   = THREAD_RUNNING;
+        current_tcb[1] = first;
+    }
+    spinlock_irq_release(&sched_lock, save);
+
     if (first == NULL) {
         printf("\r\nPANIC: sched_start_core1 — no ready thread for Core 1\r\n");
         for (;;) { __wfi(); }
     }
-
-    first->state   = THREAD_RUNNING;
-    current_tcb[1] = first;
 
     /* Read entry/arg from the initial exception frame before PSP switch
      * (same reasoning as sched_start — see comment there). */

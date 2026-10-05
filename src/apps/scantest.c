@@ -26,7 +26,8 @@
  *   - every entry is well formed (strings terminated, fields in range)
  *   - within one scan the count never goes down
  *   - within one scan an entry never changes once seen, except that RSSI is
- *     refreshed by repeat reports and a BT name may go from empty to set, once
+ *     refreshed by repeat reports and a BT name or other AD field (TX power,
+ *     flags, company ID, service UUID) may go from unknown to set, once
  *
  * A torn read breaks one of those rules.  The coordinator brackets every
  * scan start with a generation counter (odd while a reset is in progress)
@@ -158,18 +159,23 @@ static bool bt_entry_ok(const bt_scan_result_t *e)
     return true;
 }
 
-/* Same device, same fields — except RSSI (refreshed by repeat reports) and a
- * name, which may appear once (empty → set). */
+/* Same device, same fields — except RSSI (refreshed by repeat reports).  A
+ * BLE device spreads its AD fields over several packets, so the name, TX
+ * power, flags, company ID and service UUID may each appear once
+ * (unknown → set); once set they must not change. */
+#define FILLED_ONCE(o, c, none)  ((o) == (c) || (o) == (none))
+
 static bool bt_entry_same(const bt_scan_result_t *old, const bt_scan_result_t *cur)
 {
     if (memcmp(old->addr, cur->addr, BT_ADDR_LEN) != 0) return false;
     if (old->type            != cur->type            ||
         old->dev_class       != cur->dev_class       ||
-        old->class_of_device != cur->class_of_device ||
-        old->tx_power        != cur->tx_power        ||
-        old->flags           != cur->flags           ||
-        old->company_id      != cur->company_id      ||
-        old->service_uuid    != cur->service_uuid)   return false;
+        old->class_of_device != cur->class_of_device) return false;
+    if (!FILLED_ONCE(old->tx_power,     cur->tx_power,     BT_TX_POWER_UNKNOWN) ||
+        !FILLED_ONCE(old->flags,        cur->flags,        BT_FLAGS_NONE)       ||
+        !FILLED_ONCE(old->company_id,   cur->company_id,   BT_COMPANY_NONE)     ||
+        !FILLED_ONCE(old->service_uuid, cur->service_uuid, BT_SERVICE_NONE))
+        return false;
     if (old->name[0] != '\0' && strcmp(old->name, cur->name) != 0) return false;
     return true;
 }

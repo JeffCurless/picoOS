@@ -84,9 +84,21 @@ void sched_block(tcb_t *t);
 
 /*
  * sched_unblock — move thread t from BLOCKED back to READY and add it
- *                 to the appropriate priority queue.
+ *                 to the appropriate priority queue.  A thread that was
+ *                 killed while blocked (ZOMBIE) is freed instead.  Returns
+ *                 true if t was woken, false if it was freed — a primitive
+ *                 handing out one wake-up should then wake the next waiter.
  */
-void sched_unblock(tcb_t *t);
+bool sched_unblock(tcb_t *t);
+
+/*
+ * sched_kill — mark t killed, under the scheduler lock.  Returns true if
+ *              t is off-CPU and out of every queue, so the caller must
+ *              task_free_thread() it now; false if it is freed later (it
+ *              is the caller, is running on the other core, or is waiting
+ *              on a primitive).  Use task_kill_thread() rather than this.
+ */
+bool sched_kill(tcb_t *t);
 
 /*
  * sched_sleep — put the current thread to sleep for (at least) ms

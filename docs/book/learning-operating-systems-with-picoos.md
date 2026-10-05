@@ -184,7 +184,7 @@ Keep a Pico plugged in and a terminal open while you read. An operating system i
 - `$ ./build pico` — a command typed on your computer.
 - **RP2040** means the original Pico and Pico W; **RP2350** means the Pico 2 and Pico 2 W.
 
-This edition describes picoOS v0.3.7.
+This edition describes picoOS v0.3.8.
 
 <a id="ch-1"></a>
 ## Chapter 1 — Getting Started
@@ -237,7 +237,7 @@ From the picoOS directory:
 ./build             # builds all 12 variants
 ```
 
-`build` is a script, not a folder. Never delete it. Each board is compiled in its own `build_<board>_<variant>/` directory, and the finished images are copied to `kits/`. A file name such as `picoos_D-v0.3.7.uf2` means: pico board, Display Pack build (`_D`), version 0.3.7. `_D2` means Display Pack 2; no suffix means no display.
+`build` is a script, not a folder. Never delete it. Each board is compiled in its own `build_<board>_<variant>/` directory, and the finished images are copied to `kits/`. A file name such as `picoos_D-v0.3.8.uf2` means: pico board, Display Pack build (`_D`), version 0.3.8. `_D2` means Display Pack 2; no suffix means no display.
 
 <a id="s-1-4"></a>
 ### 1.4 Flash
@@ -260,7 +260,7 @@ The script finds the Pico by its USB ID. You should see a banner like this:
 
 ```
 =======================================================
-picoOS  v0.3.7
+picoOS  v0.3.8
 
   Platform : RP2040, dual ARM Cortex-M0+ (133 MHz max)
   Options  : DISPLAY_PACK
@@ -547,6 +547,8 @@ A thread runs only after the scheduler picks it from READY; blocking, sleeping a
 
 A thread cannot free its own stack while it is still standing on it. So a finished thread only marks itself ZOMBIE and yields. The next time the scheduler runs, on a different stack, it frees the zombie's memory. This is called **reaping**.
 
+`kill` follows the same rule. A thread that is READY or SLEEPING is freed at once. A thread running on the other core is only marked, and is reaped when that core next switches away from it. A thread waiting on a lock stays in the lock's waiter list as a ZOMBIE until the lock wakes it (Chapter 8).
+
 <a id="s-4-6"></a>
 ### 4.6 Try this
 
@@ -598,7 +600,7 @@ Apps choose their own priority in `app_table[]`.
 3. If it was a ZOMBIE, free it.
 4. For priority 0, then 1, then 2 … up to 7:
    1. If the outgoing thread is at the head of this queue, move it to the tail. This is the **round-robin** step: equals take turns.
-   2. Walk the queue and take the first READY thread whose affinity allows this core.
+   2. Walk the queue and take the first READY thread whose affinity allows this core and that is not still running on the other core. Chapter 8 explains why a READY thread can still be running.
 5. Mark the chosen thread RUNNING and give it a fresh 10 ms slice.
 
 Because idle threads are always READY at priority 7, step 4 always finds something.
@@ -608,7 +610,7 @@ This is **strict priority**: a priority-3 thread never runs while a priority-2 t
 <a id="s-5-4"></a>
 ### 5.4 Why idle threads exist
 
-The CPU cannot "run nothing". It must always be executing some instruction. The idle thread gives it something harmless to do: execute `__wfi()` (wait for interrupt), which stops the core until the next interrupt arrives, saving power. Core 0's idle thread also calls `tud_task()` after each wake-up, as a backstop for USB. On the RP2040 the SDK's USB interrupt does that work anyway; on the RP2350 the idle call matters more. So if the shell or an app hogs core 0 at a higher priority, the idle thread never runs and USB depends on the SDK's interrupt alone — the answer to Chapter 3's question.
+The CPU cannot "run nothing". It must always be executing some instruction. The idle thread gives it something harmless to do: execute `__wfi()` (wait for interrupt), which stops the core until the next interrupt arrives, saving power. Core 0's idle thread also services USB after each wake-up, as a backstop: `dev_console_poll()` runs TinyUSB's `tud_task()` when it has work waiting. It goes through the SDK's USB lock, because the shell and every `printf` also service USB, from either core, and TinyUSB must never run on both cores at once. On the RP2040 the SDK's USB interrupt does that work anyway; on the RP2350 the idle call matters more. So if the shell or an app hogs core 0 at a higher priority, the idle thread never runs and USB depends on the SDK's interrupt alone — the answer to Chapter 3's question.
 
 <a id="s-5-5"></a>
 ### 5.5 The context switch
@@ -685,7 +687,7 @@ Some work happens only on core 0:
 
 | Job | Why core 0 |
 | --- | --- |
-| USB (`tud_task()` in `idle`) | the USB interrupt is wired to core 0 |
+| USB (`dev_console_poll()` in `idle`) | the USB interrupt is wired to core 0 |
 | the global tick count and waking sleepers | doing it on both cores would wake every sleeper twice |
 | WiFi and Bluetooth callbacks | the radio's interrupt runs on core 0 |
 | writing flash | core 0 pauses core 1 while it erases (Chapter 12) |
@@ -868,7 +870,7 @@ Both cores call `kmalloc()`. If both walked and split the same free block at the
 - `pico> mem`, then `run producer`, `run consumer`, `run sensor`, and `mem` again. How much did each thread cost?
 - Kill one in the middle (`kill <tid>`), start a different one, and look at "Largest free".
 - Run the host tests with `./build tests`. Read `tests/mem/` to see a fragmentation test that needs no hardware.
-- Run `python3 tools/mem_report.py build_pico_D/src/picoos_D-v0.3.7.elf.map` and find the 64 KB heap array.
+- Run `python3 tools/mem_report.py build_pico_D/src/picoos_D-v0.3.8.elf.map` and find the 64 KB heap array.
 
 <a id="s-7-10"></a>
 ### 7.10 Think about it
@@ -1037,7 +1039,8 @@ picoOS's mutex is simple on purpose. Each of these is a deliberate teaching poin
 - **Not recursive.** If a thread locks a mutex it already holds, it waits for itself forever.
 - **No owner check on unlock.** Any thread can unlock any mutex.
 - **Killing a lock holder.** `kill` removes a thread even if it holds a mutex. Nobody will ever unlock it, and every waiter blocks forever.
-- **An open question for you.** Between `spinlock_irq_release()` and the context switch in `kmutex_lock()`, the thread is still running on its core. If the other core wakes it in that tiny window, could the scheduler start it on the second core while it is still on the first? `docs/locking.md` records this as a suspected race, not yet confirmed on hardware. Designing a test that proves or disproves it is excellent practice.
+- **Killing a waiter.** A thread killed while it waits stays in the waiter list as a ZOMBIE. The lock frees it instead of waking it, and passes the wake-up on to the next waiter. If the lock is never released again, the zombie's memory is never freed.
+- **A race that was real.** Between `spinlock_irq_release()` and the context switch in `kmutex_lock()`, the thread is still running on its core. If the other core woke it in that tiny window, the scheduler could start it on the second core while it was still on the first: two cores on one stack. `docs/locking.md` listed this as a suspected race, and it is now fixed. The scheduler records each core's running thread under `sched_lock`, and `sched_next_thread()` skips a READY thread that is still current on the other core. Note what the bug was: every step held the right lock, but READY did not mean "not running". A test that hammers one mutex from both cores is still worth writing.
 
 <a id="s-8-12"></a>
 ### 8.12 Try this
@@ -1607,13 +1610,13 @@ The app sleeps in `wifi_scan_wait()` on event flags (`CONT_EV_READY | CONT_EV_ST
 <a id="s-15-5"></a>
 ### 15.5 Testing a race on purpose
 
-Races are hard to test because they rarely happen. picoOS includes a test that makes one happen. `./build wifi` builds two extra `_INJ` images with `PICOOS_SCAN_RACE_INJECT`, which deliberately reopens the race. `run scantest` hammers the buffers and reports PASS on a normal build and FAIL on the injected one. A test that has never been seen to fail proves little; this one is checked both ways.
+Races are hard to test because they rarely happen. picoOS includes a test that makes one happen. `./build wifi` builds two extra `_INJ` images with `PICOOS_SCAN_RACE_INJECT`, which deliberately reopens the race. `run scantest raw` hammers the buffers through the deprecated pointer getters and reports PASS on a normal build and FAIL on the injected one. `run scantest`, which copies under the lock, passes on both. A test that has never been seen to fail proves little; this one is checked both ways.
 
 <a id="s-15-6"></a>
 ### 15.6 Try this (W boards)
 
 - `pico> wifi scan`, then `pico> wifi watch` for continuous windows. `pico> bt scan` and `pico> bt watch` do the same for Bluetooth.
-- Run `python3 tools/scantest.py` on a normal image, then on an `_INJ` image.
+- Run `python3 tools/scantest.py --raw` on a normal image, then on an `_INJ` image. Then run it without `--raw` on the `_INJ` image.
 
 <a id="s-15-7"></a>
 ### 15.7 Think about it
@@ -1646,7 +1649,7 @@ Every shortcut you met in this book is a project waiting to be done. Each one be
 | Sorted sleep queue instead of scanning 16 TCBs every millisecond | `sched.c` | 5 | Medium |
 | Priority bitmap for an O(1) pick of the next ready queue | `sched.c` | 5 | Medium |
 | Priority inheritance for `kmutex_t` | `sync.c`, `sched.c` | 8 | Medium |
-| Prove or disprove the suspected block/wake race between cores | `sync.c`, `sched.c` | 8 | Medium |
+| Free a thread killed while it waits at once: record what it is blocked on and unlink it | `task.c`, `sync.c` | 4, 8 | Medium |
 | Wake the other core at once with an inter-processor interrupt | `sched.c` | 6 | Medium |
 | Buffered, asynchronous console output | `shell.c`, `dev.c` | 13 | Medium |
 | Release a killed thread's mutexes, or refuse to kill a lock holder | `task.c`, `sync.c` | 4, 8 | Medium |
@@ -1762,7 +1765,7 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 
 - back-pressure — [9.1](#s-9-1)
 - banner, boot — [1.5](#s-1-5), [1.6](#s-1-6), [1.7](#s-1-7), [3.2](#s-3-2), [3.5](#s-3-5)
-- BLOCKED state — [4.5](#s-4-5), [8.5](#s-8-5), [8.9](#s-8-9), [9.1](#s-9-1), [9.2](#s-9-2)
+- BLOCKED state — [4.5](#s-4-5), [8.5](#s-8-5), [8.9](#s-8-9), [9.1](#s-9-1), [9.2](#s-9-2), [16.2](#s-16-2)
 - Bluetooth — [1.1](#s-1-1), [2.2](#s-2-2), [6.2](#s-6-2), [13.2](#s-13-2), [15](#ch-15), [15.1](#s-15-1), [15.6](#s-15-6)
 - boot sequence — [3](#ch-3), [3.1](#s-3-1), [3.2](#s-3-2), [3.4](#s-3-4)
 - BOOTSEL — [1.4](#s-1-4), [13.3](#s-13-3)
@@ -1791,6 +1794,7 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 **D**
 
 - deadlock — [8.9](#s-8-9)
+- `dev_console_poll()` — [5.4](#s-5-4), [6.2](#s-6-2)
 - `device_t` — [11.1](#s-11-1)
 - `dev_ioctl()` — [8.12](#s-8-12), [10.4](#s-10-4), [11.2](#s-11-2), [14.1](#s-14-1), [14.2](#s-14-2)
 - Dijkstra, Edsger — [8.6](#s-8-6)
@@ -1840,7 +1844,7 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 
 - kernel process (PID 1) — [3.2](#s-3-2), [4.2](#s-4-2), [15.1](#s-15-1)
 - `kfree()` — [7.5](#s-7-5), [7.8](#s-7-8), [14.1](#s-14-1), [14.2](#s-14-2), [16.2](#s-16-2), [A.3](#s-a-3)
-- `kill`, `killproc` — [4.2](#s-4-2), [4.6](#s-4-6), [4.7](#s-4-7), [7.9](#s-7-9), [8.11](#s-8-11), [13.3](#s-13-3), [16.2](#s-16-2)
+- `kill`, `killproc` — [4.2](#s-4-2), [4.5](#s-4-5), [4.6](#s-4-6), [4.7](#s-4-7), [7.9](#s-7-9), [8.11](#s-8-11), [13.3](#s-13-3), [16.2](#s-16-2)
 - `kmalloc()` — [P.4](#s-p-4), [3.2](#s-3-2), [7.3](#s-7-3), [7.5](#s-7-5), [7.8](#s-7-8), [14.1](#s-14-1), [14.5](#s-14-5), [A.3](#s-a-3)
 - `kmutex_t`, `kmutex_lock()` — [8.5](#s-8-5), [8.11](#s-8-11), [8.12](#s-8-12), [8.13](#s-8-13), [10.4](#s-10-4), [12.6](#s-12-6), [15.4](#s-15-4), [16.2](#s-16-2), [A.3](#s-a-3)
 
@@ -1883,7 +1887,7 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 
 **R**
 
-- race condition — [8](#ch-8), [8.1](#s-8-1), [8.11](#s-8-11), [15.5](#s-15-5), [16.2](#s-16-2)
+- race condition — [8](#ch-8), [8.1](#s-8-1), [8.11](#s-8-11), [15.5](#s-15-5)
 - ready queues — [4.5](#s-4-5), [5.2](#s-5-2), [5.6](#s-5-6), [6](#ch-6), [6.1](#s-6-1), [6.4](#s-6-4), [8.4](#s-8-4), [8.5](#s-8-5), [16.2](#s-16-2)
 - reaping — [4.5](#s-4-5)
 - ring buffer — [9.1](#s-9-1)
@@ -1896,8 +1900,8 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 
 - `scanbuf.c` — [15.3](#s-15-3)
 - scantest — [15.5](#s-15-5), [15.6](#s-15-6)
-- `sched_lock` — [6.4](#s-6-4), [8.4](#s-8-4), [8.9](#s-8-9)
-- `sched_next_thread()` — [5.3](#s-5-3), [5.5](#s-5-5), [6.1](#s-6-1), [A.3](#s-a-3)
+- `sched_lock` — [6.4](#s-6-4), [8.4](#s-8-4), [8.9](#s-8-9), [8.11](#s-8-11)
+- `sched_next_thread()` — [5.3](#s-5-3), [5.5](#s-5-5), [6.1](#s-6-1), [8.11](#s-8-11), [A.3](#s-a-3)
 - `sched_start()` — [3](#ch-3), [3.2](#s-3-2), [3.4](#s-3-4)
 - `sched_yield()` — [5.5](#s-5-5), [8.5](#s-8-5)
 - semaphore — [4.5](#s-4-5), [8.5](#s-8-5), [8.6](#s-8-6), [8.7](#s-8-7), [8.13](#s-8-13), [9.2](#s-9-2), [9.5](#s-9-5)
@@ -1931,7 +1935,7 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 - time slice — [5](#ch-5), [5.1](#s-5-1), [5.3](#s-5-3), [5.6](#s-5-6), [5.7](#s-5-7), [6.1](#s-6-1), [6.4](#s-6-4), [8.4](#s-8-4), [A.2](#s-a-2)
 - torn read — [15.2](#s-15-2)
 - triple buffer — [15](#ch-15), [15.3](#s-15-3), [15.7](#s-15-7)
-- `tud_task()` — [5.4](#s-5-4), [6.2](#s-6-2)
+- `tud_task()` — [5.4](#s-5-4)
 
 **U**
 
@@ -1952,4 +1956,4 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 
 **Z**
 
-- ZOMBIE state — [4.5](#s-4-5), [5.3](#s-5-3)
+- ZOMBIE state — [4.5](#s-4-5), [5.3](#s-5-3), [8.11](#s-8-11)

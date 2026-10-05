@@ -162,6 +162,7 @@ INDEX_TERMS = [
     ("torn read", r"torn read", None),
     ("triple buffer", r"triple buffer", None),
     ("`tud_task()`", r"tud_task", None),
+    ("`dev_console_poll()`", r"dev_console_poll", None),
     ("UF2 file", r"\.uf2|\bUF2\b", None),
     ("`update` command", r"`update`", None),
     ("VFS (virtual file system)", None, ["2.2", "11", "11.3"]),

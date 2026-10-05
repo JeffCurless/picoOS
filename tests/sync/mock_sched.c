@@ -70,7 +70,7 @@ void (*mock_yield_hook)(void) = NULL;
  * ========================================================================= */
 
 void sched_block(tcb_t *t)  { if (t) t->state = THREAD_BLOCKED; }
-void sched_unblock(tcb_t *t){ if (t) t->state = THREAD_READY;   }
+bool sched_unblock(tcb_t *t){ if (t) t->state = THREAD_READY; return t != NULL; }
 
 void sched_yield(void)
 {

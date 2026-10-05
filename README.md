@@ -4,7 +4,7 @@ An educational operating system for the **Raspberry Pi Pico family (RP2040 / RP2
 
 ```
 =======================================================
-picoOS  v0.3.7
+picoOS  v0.3.8
 
   Platform : RP2040, dual ARM Cortex-M0+ (133 MHz max)
   Options  : DISPLAY_PACK
@@ -96,7 +96,7 @@ cmake -B build_pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico
 make -j$(nproc) -C build_pico
 
 # 4. Flash (hold BOOTSEL on Pico, then plug in USB)
-cp build_pico/src/picoos_D-v0.3.7.uf2 /media/$USER/RPI-RP2/
+cp build_pico/src/picoos_D-v0.3.8.uf2 /media/$USER/RPI-RP2/
 
 # 5. Open the console
 pip install pyserial
@@ -116,10 +116,10 @@ Pass `-DPICO_BOARD=<name>` to CMake.  picoOS accepts the underscore-free aliases
 
 | `-DPICO_BOARD=` | Board | Chip | WiFi + BT | Output files (Display Pack example) |
 |----------------|-------|------|-----------|--------------------------------------|
-| `pico` | Raspberry Pi Pico | RP2040 | No | `picoos_D-v0.3.7.*` |
-| `pico2` | Raspberry Pi Pico 2 | RP2350 | No | `pico2os_D-v0.3.7.*` |
-| `picow` | Raspberry Pi Pico W | RP2040 | Yes | `picowos_D-v0.3.7.*` |
-| `pico2w` | Raspberry Pi Pico 2 W | RP2350 | Yes | `pico2wos_D-v0.3.7.*` |
+| `pico` | Raspberry Pi Pico | RP2040 | No | `picoos_D-v0.3.8.*` |
+| `pico2` | Raspberry Pi Pico 2 | RP2350 | No | `pico2os_D-v0.3.8.*` |
+| `picow` | Raspberry Pi Pico W | RP2040 | Yes | `picowos_D-v0.3.8.*` |
+| `pico2w` | Raspberry Pi Pico 2 W | RP2350 | Yes | `pico2wos_D-v0.3.8.*` |
 
 The output files (`.uf2`, `.bin`, `.elf`, `.elf.map`, `.dis`) are named after the board and include the version number, so builds for different boards can share the same output directory without conflict.
 
@@ -347,13 +347,13 @@ The `tools/mem_report.py` script derives live numbers from the linker map after 
 
 ```bash
 # Pass the board-named map file as a positional argument
-python3 tools/mem_report.py build_pico/src/picoos_D-v0.3.7.elf.map
+python3 tools/mem_report.py build_pico/src/picoos_D-v0.3.8.elf.map
 
 # Or use the --map option
-python3 tools/mem_report.py --map build_pico2w/src/pico2wos_D-v0.3.7.elf.map
+python3 tools/mem_report.py --map build_pico2w/src/pico2wos_D-v0.3.8.elf.map
 
 # One-line summary
-python3 tools/mem_report.py build_pico/src/picoos_D-v0.3.7.elf.map --brief
+python3 tools/mem_report.py build_pico/src/picoos_D-v0.3.8.elf.map --brief
 ```
 
 RP2040 breakdown for `picoos_D-v0.3.4` (Pico with Display Pack, no WiFi):
@@ -390,11 +390,11 @@ python3 tools/console.py --help
 
 ### `tools/mem_report.py`
 
-Parses the linker map produced by every build and prints an SRAM usage breakdown by subsystem.  The map file is named after the board, display variant, and version (e.g. `build_pico/src/picoos_D-v0.3.7.elf.map`).
+Parses the linker map produced by every build and prints an SRAM usage breakdown by subsystem.  The map file is named after the board, display variant, and version (e.g. `build_pico/src/picoos_D-v0.3.8.elf.map`).
 
 ```bash
-python3 tools/mem_report.py build_pico/src/picoos_D-v0.3.7.elf.map        # positional path
-python3 tools/mem_report.py --map build_pico/src/picoos_D-v0.3.7.elf.map  # named option
+python3 tools/mem_report.py build_pico/src/picoos_D-v0.3.8.elf.map        # positional path
+python3 tools/mem_report.py --map build_pico/src/picoos_D-v0.3.8.elf.map  # named option
 python3 tools/mem_report.py --brief                             # one-line summary (uses default path)
 ```
 

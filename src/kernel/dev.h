@@ -105,4 +105,10 @@ int       dev_write(dev_id_t id, const uint8_t *buf, uint32_t len);
 int       dev_ioctl(dev_id_t id, uint32_t cmd, void *arg);
 void      dev_close(dev_id_t id);
 
+/* dev_console_poll — service the USB stack (TinyUSB) from a thread, on
+ * either core.  Use this, never tud_task() directly: it runs tud_task()
+ * under the SDK's stdio_usb mutex, the lock the SDK's own USB IRQ and
+ * printf take, so TinyUSB is never entered from both cores at once. */
+void      dev_console_poll(void);
+
 #endif /* KERNEL_DEV_H */

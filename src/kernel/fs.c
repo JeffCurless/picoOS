@@ -83,8 +83,23 @@ static inline void fs_give_lock(void)
     if (CURRENT_TCB != NULL) { kmutex_unlock(&fs_mutex); }
 }
 
-/* In-RAM mirror of the on-flash superblock for fast metadata access. */
-static fs_superblock_t superblock_ram;
+/* In-RAM mirror of the on-flash superblock for fast metadata access.
+ *
+ * flash_range_program() writes whole 256-byte pages from RAM, so the mirror
+ * is padded to a page multiple and programmed straight from here.  It never
+ * goes through fs_buffer, which may hold another file's unsaved data. */
+#define SUPERBLOCK_PROG_SIZE \
+    ((sizeof(fs_superblock_t) + FLASH_PAGE_SIZE - 1u) / FLASH_PAGE_SIZE * FLASH_PAGE_SIZE)
+
+_Static_assert(SUPERBLOCK_PROG_SIZE <= FS_BLOCK_SIZE,
+               "superblock must fit in one sector (FS_MAX_FILES too large)");
+
+static union {
+    fs_superblock_t sb;
+    uint8_t         pages[SUPERBLOCK_PROG_SIZE];   /* tail is don't-care */
+} superblock_store;
+
+static fs_superblock_t *const superblock_ram = &superblock_store.sb;
 
 /* Single shared write-accumulation buffer.
  *
@@ -103,7 +118,7 @@ static int scratch_owner = -1;   /* file_idx of the writing file, or -1 */
 typedef struct {
     bool     used;
     bool     dirty;      /* true: fs_buffer holds uncommitted data      */
-    uint32_t file_idx;   /* index into superblock_ram.files[]             */
+    uint32_t file_idx;   /* index into superblock_ram->files[]             */
     uint32_t pos;        /* current read/write position in bytes          */
     int      mode;
 } fs_open_fd_t;
@@ -137,7 +152,7 @@ static fs_open_fd_t open_fds[FS_MAX_OPEN_FDS];
  * ========================================================================= */
 
 typedef struct { uint32_t offset; }                         fs_erase_cb_t;
-typedef struct { uint32_t offset; const uint8_t *src; }     fs_program_cb_t;
+typedef struct { uint32_t offset; const uint8_t *src; uint32_t len; } fs_program_cb_t;
 
 static void do_flash_erase(void *param)
 {
@@ -148,7 +163,7 @@ static void do_flash_erase(void *param)
 static void do_flash_program(void *param)
 {
     const fs_program_cb_t *a = (const fs_program_cb_t *)param;
-    flash_range_program(a->offset, a->src, FS_BLOCK_SIZE);
+    flash_range_program(a->offset, a->src, a->len);
 }
 
 /* Run fn(param) through flash_safe_execute() on Core 0.  Returns PICO_OK
@@ -186,36 +201,20 @@ static int flash_erase_sector(uint32_t flash_offset)
 
 static int flash_program_sector(uint32_t flash_offset, const uint8_t *src)
 {
-    fs_program_cb_t args = { flash_offset, src };
+    fs_program_cb_t args = { flash_offset, src, FS_BLOCK_SIZE };
     return fs_flash_safe(do_flash_program, &args);
 }
 
-/* Write superblock_ram to the superblock flash sector.
- * Uses fs_buffer as the write staging area; call only when fs_buffer is
- * not in use by an open write fd (i.e. after the file data has been committed
- * and scratch_owner has been cleared). */
-/* superblock_flush — write superblock_ram to the superblock flash sector.
- *
- * Must only be called when fs_buffer is free (scratch_owner == -1).
- * Procedure:
- *   1. Pre-fill fs_buffer with 0xFF so unused bytes match the erased state
- *      and do not require extra program pulses.
- *   2. Copy superblock_ram into the start of fs_buffer.
- *   3. Erase the superblock sector (SUPERBLOCK_FLASH_OFFSET).
- *   4. Program the sector from fs_buffer.
- *
- * After this call fs_buffer contains the serialised superblock padded with
- * 0xFF.  Callers that need fs_buffer for file data must overwrite it
- * afterwards (e.g. TRUNC zeros it, non-TRUNC copies from XIP). */
+/* superblock_flush — write superblock_ram to the superblock flash sector:
+ * erase the sector, then program the page-padded mirror directly.  Safe at
+ * any time — it does not touch fs_buffer, so a file open for writing keeps
+ * its unsaved data while another file is created or deleted. */
 static int superblock_flush(void)
 {
-    /* Flash erase sets all bytes to 0xFF.  Pre-fill with 0xFF so unused
-     * bytes in the sector match the erased state. */
-    memset(fs_buffer, 0xFF, FS_BLOCK_SIZE);
-    memcpy(fs_buffer, &superblock_ram, sizeof(superblock_ram));
-
     if (flash_erase_sector(SUPERBLOCK_FLASH_OFFSET) != 0) return -1;
-    return flash_program_sector(SUPERBLOCK_FLASH_OFFSET, fs_buffer) != 0 ? -1 : 0;
+    fs_program_cb_t args = { SUPERBLOCK_FLASH_OFFSET, superblock_store.pages,
+                             SUPERBLOCK_PROG_SIZE };
+    return fs_flash_safe(do_flash_program, &args) != 0 ? -1 : 0;
 }
 
 /* =========================================================================
@@ -229,21 +228,21 @@ static int superblock_flush(void)
 static int find_file(const char *name)
 {
     for (uint32_t i = 0u; i < FS_MAX_FILES; i++) {
-        if (superblock_ram.files[i].used &&
-            strncmp(superblock_ram.files[i].name, name, FS_NAME_MAX) == 0) {
+        if (superblock_ram->files[i].used &&
+            strncmp(superblock_ram->files[i].name, name, FS_NAME_MAX) == 0) {
             return (int)i;
         }
     }
     return -1;
 }
 
-/* alloc_file_entry — find the first unused slot in superblock_ram.files[].
+/* alloc_file_entry — find the first unused slot in superblock_ram->files[].
  * Returns the slot index on success, or -1 if the directory is full
  * (FS_MAX_FILES files already exist). */
 static int alloc_file_entry(void)
 {
     for (uint32_t i = 0u; i < FS_MAX_FILES; i++) {
-        if (!superblock_ram.files[i].used) {
+        if (!superblock_ram->files[i].used) {
             return (int)i;
         }
     }
@@ -285,9 +284,9 @@ void fs_init(void)
     if (flash_sb->magic == FS_SUPERBLOCK_MAGIC &&
         flash_sb->version == 1u) {
         /* Valid filesystem found — load the metadata into RAM. */
-        memcpy(&superblock_ram, flash_sb, sizeof(superblock_ram));
+        memcpy(superblock_ram, flash_sb, sizeof(*superblock_ram));
         printf("[fs] mounted: %u file(s) found\r\n",
-               superblock_ram.file_count);
+               superblock_ram->file_count);
     } else {
         /* No valid filesystem — create a fresh one. */
         printf("[fs] no valid FS found, formatting flash...\r\n");
@@ -316,10 +315,10 @@ void fs_format(void)
     }
 
     /* Initialise and write a fresh superblock. */
-    memset(&superblock_ram, 0, sizeof(superblock_ram));
-    superblock_ram.magic      = FS_SUPERBLOCK_MAGIC;
-    superblock_ram.version    = 1u;
-    superblock_ram.file_count = 0u;
+    memset(superblock_ram, 0, sizeof(*superblock_ram));
+    superblock_ram->magic      = FS_SUPERBLOCK_MAGIC;
+    superblock_ram->version    = 1u;
+    superblock_ram->file_count = 0u;
 
     superblock_flush();
 
@@ -357,7 +356,7 @@ int fs_open(const char *name, int mode)
             goto out;   /* directory full */
         }
 
-        fs_entry_t *entry  = &superblock_ram.files[file_idx];
+        fs_entry_t *entry  = &superblock_ram->files[file_idx];
         entry->used        = true;
         entry->size        = 0u;
         entry->start_block = (uint32_t)file_idx;   /* 1:1 index→block mapping */
@@ -366,7 +365,7 @@ int fs_open(const char *name, int mode)
         strncpy(entry->name, name, FS_NAME_MAX - 1u);
         entry->name[FS_NAME_MAX - 1u] = '\0';
 
-        superblock_ram.file_count++;
+        superblock_ram->file_count++;
 
         /* Persist the new superblock entry immediately so that even if the
          * caller never writes any data, the file shows up after a reboot. */
@@ -389,7 +388,7 @@ int fs_open(const char *name, int mode)
         if (mode & VFS_O_TRUNC) {
             /* Truncate: start with a blank buffer. */
             memset(fs_buffer, 0, FS_BLOCK_SIZE);
-            superblock_ram.files[file_idx].size = 0u;
+            superblock_ram->files[file_idx].size = 0u;
         } else {
             /* Preserve existing content so append/overwrite works. */
             memcpy(fs_buffer,
@@ -410,7 +409,7 @@ int fs_open(const char *name, int mode)
      * new data is placed after existing content rather than overwriting it. */
     uint32_t initial_pos = 0u;
     if (writing && (mode & VFS_O_APPEND)) {
-        initial_pos = superblock_ram.files[file_idx].size;
+        initial_pos = superblock_ram->files[file_idx].size;
     }
 
     open_fds[fd].used     = true;
@@ -445,7 +444,7 @@ int fs_read(int fd, uint8_t *buf, uint32_t n)
     fs_take_lock();
 
     fs_open_fd_t *ofd   = &open_fds[fd];
-    fs_entry_t   *entry = &superblock_ram.files[ofd->file_idx];
+    fs_entry_t   *entry = &superblock_ram->files[ofd->file_idx];
 
     uint32_t available = entry->size > ofd->pos ? entry->size - ofd->pos : 0u;
     uint32_t to_read   = n < available ? n : available;
@@ -486,7 +485,7 @@ int fs_write(int fd, const uint8_t *buf, uint32_t n)
     fs_take_lock();
 
     fs_open_fd_t *ofd   = &open_fds[fd];
-    fs_entry_t   *entry = &superblock_ram.files[ofd->file_idx];
+    fs_entry_t   *entry = &superblock_ram->files[ofd->file_idx];
 
     int result = -1;
 
@@ -541,7 +540,7 @@ int fs_close(int fd)
             rc = -1;
         }
 
-        /* Step 3: fs_buffer is now free — use it to flush the superblock. */
+        /* Step 3: flush the superblock (the file size may have changed). */
         scratch_owner = -1;
         if (rc == 0 && superblock_flush() != 0) {
             rc = -1;
@@ -591,9 +590,9 @@ int fs_delete(const char *name)
     }
 
     /* Remove the metadata entry. */
-    memset(&superblock_ram.files[idx], 0, sizeof(fs_entry_t));
-    if (superblock_ram.file_count > 0u) {
-        superblock_ram.file_count--;
+    memset(&superblock_ram->files[idx], 0, sizeof(fs_entry_t));
+    if (superblock_ram->file_count > 0u) {
+        superblock_ram->file_count--;
     }
 
     /* Erase the file's data sector so the storage is genuinely freed, then
@@ -620,8 +619,8 @@ void fs_list(int (*callback)(const fs_entry_t *entry))
     fs_take_lock();
 
     for (uint32_t i = 0u; i < FS_MAX_FILES; i++) {
-        if (superblock_ram.files[i].used) {
-            int rc = callback(&superblock_ram.files[i]);
+        if (superblock_ram->files[i].used) {
+            int rc = callback(&superblock_ram->files[i]);
             if (rc != 0) {
                 break;
             }

@@ -165,7 +165,7 @@ These tests verify the instrumentation added to `sync.c` when `PICOOS_LOCK_DEBUG
 
 ---
 
-### 3 — `test_fs` (17 tests) — flash filesystem
+### 3 — `test_fs` (18 tests) — flash filesystem
 
 **Source**: `tests/fs/test_fs.c`  
 **Module under test**: `src/kernel/fs.c`  
@@ -199,6 +199,7 @@ Each test calls `fs_reset()` (helper in the test file) which calls `mock_flash_i
 | `write_to_rdonly_fd_fails` | `fs_write` on a read-only fd returns -1 |
 | `scratch_owner_single_writer_enforcement` | A second write-mode open while the first is still open returns -1; after the first is closed (with data written so dirty=true) the next write open succeeds |
 | `reopen_resets_position_to_zero` | Closing and reopening a file for read starts at byte 0 regardless of how far the previous fd read |
+| `metadata_change_keeps_pending_write` | While one file is open for writing, creating another file and deleting a third (both rewrite the superblock) must not disturb its unsaved data |
 
 > **Note on single-writer behaviour**: `fs.c` uses a single 4 KB scratch buffer for all writes.  The scratch buffer is released on `fs_close()` only when `dirty == true` (i.e. at least one `fs_write` was called on that fd).  Opening a file for write and closing it without writing any data does not release the buffer — this is a documented teaching imperfection.  Tests that verify write-open lifecycle therefore write at least one byte before closing.
 

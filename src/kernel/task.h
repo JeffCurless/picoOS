@@ -100,6 +100,8 @@ typedef struct tcb {
     uint8_t         priority;       /* Scheduling priority: 0 = highest      */
     int8_t          affinity;       /* 0 = core 0, 1 = core 1, -1 = any     */
     thread_state_t  state;          /* Current lifecycle state               */
+    bool            kill_pending;   /* Killed while running on the other core:
+                                     * reaped when it next switches out      */
     uint64_t        wake_time_us;   /* Absolute wake time (us) when sleeping */
     uint64_t        cpu_time_us;    /* Accumulated CPU time in microseconds  */
     char            name[16];       /* Human-readable name (NUL-terminated)  */
@@ -175,11 +177,22 @@ void     task_free_thread(tcb_t *t);
 void     task_free_process(pcb_t *p);
 
 /*
- * task_kill_process — kill every thread owned by proc and free the PCB.
- *                     Threads other than the caller are removed from the
- *                     scheduler and freed immediately.  If the calling thread
- *                     belongs to proc (self-kill), it is marked ZOMBIE and
- *                     the scheduler reaps it on the next yield.
+ * task_kill_thread — kill one thread.  When and how it is freed depends on
+ *                    where it is (see sched_kill()):
+ *                      READY / SLEEPING           freed now
+ *                      BLOCKED                    freed when its primitive
+ *                                                 wakes it (sched_unblock)
+ *                      running on the other core  freed when it switches out
+ *                      the caller itself          freed at the next yield;
+ *                                                 the caller must yield
+ */
+void     task_kill_thread(tcb_t *t);
+
+/*
+ * task_kill_process — kill every thread owned by proc (task_kill_thread)
+ *                     and mark it not alive.  The PCB is freed with its last
+ *                     thread.  If the calling thread belongs to proc
+ *                     (self-kill), it must yield afterwards.
  */
 void     task_kill_process(pcb_t *p);
 

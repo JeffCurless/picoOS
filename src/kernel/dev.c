@@ -84,6 +84,18 @@ static int console_ioctl(uint32_t cmd, void *arg)
     return -1;
 }
 
+/* dev_console_poll — see dev.h.  stdio_flush() is the SDK's public way to
+ * run tud_task() under stdio_usb_mutex.  The event check comes first so a
+ * low-priority caller (the idle thread) takes the mutex only when there is
+ * USB work: a thread preempted while holding it makes any printf on that
+ * core wait for it (up to PICO_STDIO_DEADLOCK_TIMEOUT_MS). */
+void dev_console_poll(void)
+{
+    if (tud_task_event_ready()) {
+        stdio_flush();
+    }
+}
+
 /* console_close — no-op; the USB CDC port remains open for the lifetime of
  * the firmware. */
 static void console_close(void)

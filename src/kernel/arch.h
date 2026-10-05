@@ -179,6 +179,7 @@ static inline bool     spin_lock_is_claimed(unsigned int lock_num)
 #define PICO_SPINLOCK_ID_CLAIM_FREE_LAST   31
 
 /* Pico SDK flash ---------------------------------------------------------- */
+#define FLASH_PAGE_SIZE (1u << 8)    /* flash_range_program() unit, as in the SDK */
 #ifdef HOST_TEST
 /* In host test builds the flash functions and XIP base are provided by the
  * test-suite mock (tests/fs/mock_flash.c) so that fs.c can be compiled and
@@ -205,6 +206,7 @@ static inline void pico_get_unique_board_id(pico_unique_board_id_t *uid)
 
 /* TinyUSB stub ------------------------------------------------------------ */
 static inline void tud_task(void) {}
+static inline bool tud_task_event_ready(void) { return false; }
 
 /* Pico SDK stdio helpers -------------------------------------------------- */
 static inline bool stdio_usb_connected(void) { return false; }

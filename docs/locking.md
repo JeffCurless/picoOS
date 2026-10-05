@@ -188,11 +188,11 @@ Known hazard: if a subscriber thread is killed while it holds `g_cont_lock` (a f
 
 ## Review findings and recommendations
 
-The most serious finding is a probable SMP race in the block/wake path, which is separate from spinlock exhaustion and should be checked first. Between `spinlock_irq_release()` (step 5) and the PendSV switch (step 6), a thread is still running on its core. If the other core calls `sched_unblock()` on it in that window, the thread becomes READY. `sched_next_thread()` (`sched.c:382`) does not check whether a READY thread is still current on the other core, so it can resume the thread from a stale `saved_sp` while the thread is still running. The window is short, but an ISR between release and yield widens it.
+The most serious finding was an SMP race in the block/wake path (fixed 2026-10-05). Between `spinlock_irq_release()` (step 5) and the PendSV switch (step 6), a thread is still running on its core. If the other core called `sched_unblock()` on it in that window, the thread became READY, and `sched_next_thread()` could resume it from a stale `saved_sp` while it was still running. The same happened when the SysTick wake loop woke a thread that had just gone to sleep. Now `sched_next_thread()` records `current_tcb[core]` under `sched_lock` and never picks a thread that is still current on the other core; that core switches away at its next PendSV, and then the thread can run anywhere. The wake loop and `sched_start_core1()` also run under `sched_lock`.
 
 | # | Finding | Location | Severity | Suggested fix |
 | --- | --- | --- | --- | --- |
-| 1 | Woken thread can be scheduled on the other core before it has switched out | `sync.c` wait loops, `sched.c:382` | High (needs confirming on hardware) | Skip `t` when `t == current_tcb[other core]`, or add an `on_cpu` flag cleared in PendSV after the context save |
+| 1 | ~~Woken thread can be scheduled on the other core before it has switched out~~ | `sync.c` wait loops, `sched_next_thread()` | Fixed 2026-10-05 | `sched_next_thread()` skips `t == current_tcb[other core]`; `current_tcb[]` is set under `sched_lock` |
 | 2 | `event_waiter_alloc()` return value ignored; if the pool is full the waiter has mask 0 and is never woken | `sync.c:668` | Medium | Check for -1 and fail or panic with a message |
 | 3 | Nesting two primitives that share a stripe deadlocks with IRQs off | `prim_pool_assign`, `sync.c:117` | Medium (latent) | The memory-word design above, or a debug-build check that the stripe is not already held by this core |
 | 4 | `spinlock_init()` still panics when IDs 24–31 are gone | `sync.c:192` | Medium | Claim with `false` and fall back to a pooled memory-word lock |
@@ -203,7 +203,7 @@ The most serious finding is a probable SMP race in the block/wake path, which is
 
 Suggested order of work:
 
-- [ ] Confirm or rule out finding 1 with a stress test: two cores, one mutex, many lock/unlock cycles, `PICOOS_LOCK_DEBUG` on
+- [x] Fix finding 1 (2026-10-05); a stress test (two cores, one mutex, many lock/unlock cycles, `PICOOS_LOCK_DEBUG` on) is still worth running on hardware
 - [ ] Make `spinlock_init()` fall back instead of panicking (finding 4)
 - [ ] Add `aspinlock_t` with the owner word inside the object and expose it to applications
 - [ ] Fix the ignored `event_waiter_alloc()` result (finding 2)

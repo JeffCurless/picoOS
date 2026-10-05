@@ -233,12 +233,30 @@ static int next_slot(void)
 static void publish_slot(void) {}
 #endif
 
+/* Set an empty name on a slot readers may already see.  The tail and the
+ * terminator go in first and name[0] last, so a lock-free reader sees
+ * either "" or the whole name, never part of it. */
+static void set_name(bt_scan_result_t *dev, const uint8_t *src, size_t len)
+{
+    if (len > BT_NAME_LEN - 1u) len = BT_NAME_LEN - 1u;
+    if (len == 0u) return;
+    if (len > 1u) memcpy(&dev->name[1], &src[1], len - 1u);
+    dev->name[len] = '\0';
+    __dmb();
+    dev->name[0] = (char)src[0];
+}
+
 /* ---- BLE AD data parser: extracts name, flags, TX power, company ID ------- */
 /* `rsp` is true for a scan response.  Some devices send a different
  * company ID there than in their advertisement; the advertisement's wins
- * so the field does not flip between the two from packet to packet. */
+ * so the field does not flip between the two from packet to packet.
+ *
+ * `fill_only` is for a one-shot slot that is already published: a field
+ * that is set is never changed, so each field goes from unknown to known
+ * at most once while readers watch (the rule scantest checks). */
 static void extract_ble_adv_data(const uint8_t *ad_data, uint8_t ad_len,
-                                  bool rsp, bt_scan_result_t *dev)
+                                  bool rsp, bool fill_only,
+                                  bt_scan_result_t *dev)
 {
     ad_context_t ctx;
     ad_iterator_init(&ctx, ad_len, ad_data);
@@ -255,20 +273,19 @@ static void extract_ble_adv_data(const uint8_t *ad_data, uint8_t ad_len,
             break;
         case 0x08u: /* Shortened Local Name */
         case 0x09u: /* Complete Local Name */
-            if (dev->name[0] == '\0') {
-                int copy = (dlen < (uint8_t)(BT_NAME_LEN - 1)) ? dlen : (BT_NAME_LEN - 1);
-                memcpy(dev->name, d, (size_t)copy);
-                dev->name[copy] = '\0';
-            }
+            if (dev->name[0] == '\0') set_name(dev, d, dlen);
             break;
         case 0x01u: /* Flags */
-            dev->flags = d[0];
+            if (!fill_only || dev->flags == BT_FLAGS_NONE)
+                dev->flags = d[0];
             break;
         case 0x0Au: /* TX Power Level */
-            dev->tx_power = (int8_t)d[0];
+            if (!fill_only || dev->tx_power == BT_TX_POWER_UNKNOWN)
+                dev->tx_power = (int8_t)d[0];
             break;
         case 0xFFu: /* Manufacturer Specific Data — first 2 bytes are company ID (LE) */
-            if (dlen >= 2 && (!rsp || dev->company_id == BT_COMPANY_NONE))
+            if (dlen >= 2 && (dev->company_id == BT_COMPANY_NONE ||
+                              (!rsp && !fill_only)))
                 dev->company_id = (uint16_t)((uint16_t)d[1] << 8 | d[0]);
             break;
         default:
@@ -389,10 +406,8 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
 
         int idx = find_slot_by_addr(addr);
         if (idx < 0) return;
-        if (name) {
-            strncpy(items[idx].name, (const char *)name, BT_NAME_LEN - 1);
-            items[idx].name[BT_NAME_LEN - 1] = '\0';
-        }
+        if (name && items[idx].name[0] == '\0')
+            set_name(&items[idx], name, strnlen((const char *)name, BT_NAME_LEN - 1));
         return;
     }
 
@@ -419,16 +434,19 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
         bool          rsp     =
             gap_event_advertising_report_get_advertising_event_type(packet) == 4u;
 
-        /* Already seen this scan: refresh the RSSI (see Classic above).  In
-         * continuous mode the fill list is not visible to readers yet, so
-         * also merge this report's AD fields — a device often spreads its
-         * name and other fields over several packets. */
+        /* Already seen this scan: refresh the RSSI (see Classic above) and
+         * merge this report's AD fields — a device often spreads its name
+         * and other fields over several packets.  In continuous mode the
+         * fill list is not visible to readers yet, so fields may change.
+         * A one-shot slot is already published: until the device has a
+         * name, only fill fields that are still unknown. */
         int dup = find_slot_by_addr(addr);
         if (dup >= 0) {
             if (rssi != BT_RSSI_UNKNOWN) items[dup].rssi = rssi;
             bool had_name = items[dup].name[0] != '\0';
             if (g_tgt_cont || !had_name) {
-                extract_ble_adv_data(ad_data, ad_len, rsp, &items[dup]);
+                extract_ble_adv_data(ad_data, ad_len, rsp, !g_tgt_cont,
+                                     &items[dup]);
                 if (g_tgt_cont && !had_name && items[dup].name[0] != '\0')
                     name_store(items[dup].addr, items[dup].name);
             }
@@ -449,7 +467,7 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
         items[idx].company_id      = BT_COMPANY_NONE;
         items[idx].service_uuid    = BT_SERVICE_NONE;
 
-        extract_ble_adv_data(ad_data, ad_len, rsp, &items[idx]);
+        extract_ble_adv_data(ad_data, ad_len, rsp, false, &items[idx]);
         if (g_tgt_cont) {
             if (items[idx].name[0] != '\0') {
                 name_store(items[idx].addr, items[idx].name);

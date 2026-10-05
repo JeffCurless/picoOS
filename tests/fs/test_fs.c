@@ -505,6 +505,47 @@ static void test_scratch_owner_enforces_single_writer(void)
 }
 
 /* -------------------------------------------------------------------------
+ * test_metadata_change_keeps_pending_write
+ * Creating and deleting files rewrites the superblock.  That must not touch
+ * the write buffer of a file that is still open for writing.
+ * ------------------------------------------------------------------------- */
+static void test_metadata_change_keeps_pending_write(void)
+{
+    BEGIN_TEST(metadata_change_keeps_pending_write);
+    fs_reset();
+
+    int old = fs_open("old.txt", VFS_O_CREAT | VFS_O_WRONLY | VFS_O_TRUNC);
+    uint8_t x = 0x11;
+    fs_write(old, &x, 1u);
+    fs_close(old);
+
+    const uint8_t payload[8] = { 'p','e','n','d','i','n','g','!' };
+    int wfd = fs_open("w.txt", VFS_O_CREAT | VFS_O_WRONLY | VFS_O_TRUNC);
+    CHECK(wfd >= 0, "write open must succeed");
+    CHECK(fs_write(wfd, payload, 8u) == 8, "write must report 8 bytes");
+
+    /* Create a new file (read-only open) and delete another while w.txt
+     * still holds the write buffer. */
+    int nfd = fs_open("new.txt", VFS_O_CREAT | VFS_O_RDONLY);
+    CHECK(nfd >= 0, "creating another file must succeed");
+    fs_close(nfd);
+    CHECK(fs_delete("old.txt") == 0, "deleting another file must succeed");
+
+    CHECK(fs_close(wfd) == 0, "close must commit");
+
+    int rfd = fs_open("w.txt", VFS_O_RDONLY);
+    uint8_t buf[8] = {0};
+    CHECK(fs_read(rfd, buf, 8u) == 8, "read must return 8 bytes");
+    CHECK(memcmp(buf, payload, 8) == 0,
+          "pending data must survive superblock rewrites");
+    fs_close(rfd);
+
+    CHECK(fs_open("new.txt", VFS_O_RDONLY) >= 0, "new.txt must exist");
+
+    END_TEST();
+}
+
+/* -------------------------------------------------------------------------
  * test_reopen_after_close_starts_at_zero
  * After closing a file, reopening it for read must start at position 0.
  * ------------------------------------------------------------------------- */
@@ -563,6 +604,7 @@ int main(void)
     test_open_rdonly_write_fails();
     test_scratch_owner_enforces_single_writer();
     test_reopen_after_close_starts_at_zero();
+    test_metadata_change_keeps_pending_write();
 
     mock_flash_teardown();
     SUMMARY();

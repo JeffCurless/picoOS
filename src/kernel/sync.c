@@ -345,6 +345,18 @@ static tcb_t *waiter_dequeue(tcb_t **head)
     return t;
 }
 
+/* wake_one — hand one wake-up to the first live waiter on the list.  A
+ * waiter that was killed while blocked is freed by sched_unblock() instead
+ * of woken; pass the wake-up on to the next one, or the live waiters behind
+ * it would stay blocked on a free mutex, a counted semaphore, or a queue
+ * with room/data.  Must be called with the owning spinlock already held. */
+static void wake_one(tcb_t **head)
+{
+    tcb_t *t;
+    while ((t = waiter_dequeue(head)) != NULL && !sched_unblock(t)) {
+    }
+}
+
 /* =========================================================================
  * Mutex
  * ========================================================================= */
@@ -398,10 +410,7 @@ void kmutex_unlock(kmutex_t *m)
 #endif
 
     /* Wake the first waiting thread (FIFO policy). */
-    tcb_t *next = waiter_dequeue(&m->waiters);
-    if (next != NULL) {
-        sched_unblock(next);
-    }
+    wake_one(&m->waiters);
 
     spinlock_irq_release(&m->spin, irq_save);
 }
@@ -483,10 +492,7 @@ void ksemaphore_signal(ksemaphore_t *s)
     s->count++;
 
     /* Always try to wake a waiter; count > 0 ensures it will succeed. */
-    tcb_t *t = waiter_dequeue(&s->waiters);
-    if (t != NULL) {
-        sched_unblock(t);
-    }
+    wake_one(&s->waiters);
 
     spinlock_irq_release(&s->spin, irq_save);
 }
@@ -743,10 +749,7 @@ void mqueue_send(mqueue_t *q, const void *msg)
             q->count++;
 
             /* Wake a waiting receiver if any. */
-            tcb_t *receiver = waiter_dequeue(&q->recv_waiters);
-            if (receiver != NULL) {
-                sched_unblock(receiver);
-            }
+            wake_one(&q->recv_waiters);
 
             spinlock_irq_release(&q->spin, irq_save);
             return;
@@ -773,10 +776,7 @@ void mqueue_recv(mqueue_t *q, void *msg_out)
             q->count--;
 
             /* Wake a waiting sender if any. */
-            tcb_t *sender = waiter_dequeue(&q->send_waiters);
-            if (sender != NULL) {
-                sched_unblock(sender);
-            }
+            wake_one(&q->send_waiters);
 
             spinlock_irq_release(&q->spin, irq_save);
             return;
@@ -804,10 +804,7 @@ bool mqueue_try_send(mqueue_t *q, const void *msg)
     q->tail = (q->tail + 1u) % MQ_MAX_MSG;
     q->count++;
 
-    tcb_t *receiver = waiter_dequeue(&q->recv_waiters);
-    if (receiver != NULL) {
-        sched_unblock(receiver);
-    }
+    wake_one(&q->recv_waiters);
 
     spinlock_irq_release(&q->spin, irq_save);
     return true;
@@ -826,10 +823,7 @@ bool mqueue_try_recv(mqueue_t *q, void *msg_out)
     q->head = (q->head + 1u) % MQ_MAX_MSG;
     q->count--;
 
-    tcb_t *sender = waiter_dequeue(&q->send_waiters);
-    if (sender != NULL) {
-        sched_unblock(sender);
-    }
+    wake_one(&q->send_waiters);
 
     spinlock_irq_release(&q->spin, irq_save);
     return true;
@@ -846,10 +840,7 @@ void mqueue_send_dbg(mqueue_t *q, const void *msg, const char *file, int line)
             q->tail = (q->tail + 1u) % MQ_MAX_MSG;
             q->count++;
 
-            tcb_t *receiver = waiter_dequeue(&q->recv_waiters);
-            if (receiver != NULL) {
-                sched_unblock(receiver);
-            }
+            wake_one(&q->recv_waiters);
 
             spinlock_irq_release(&q->spin, irq_save);
             return;
@@ -882,10 +873,7 @@ void mqueue_recv_dbg(mqueue_t *q, void *msg_out, const char *file, int line)
             q->head = (q->head + 1u) % MQ_MAX_MSG;
             q->count--;
 
-            tcb_t *sender = waiter_dequeue(&q->send_waiters);
-            if (sender != NULL) {
-                sched_unblock(sender);
-            }
+            wake_one(&q->send_waiters);
 
             spinlock_irq_release(&q->spin, irq_save);
             return;
