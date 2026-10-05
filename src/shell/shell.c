@@ -38,11 +38,6 @@
 #endif
 
 /* -------------------------------------------------------------------------
- * trace_enabled — defined in main.c
- * ------------------------------------------------------------------------- */
-extern volatile bool trace_enabled;
-
-/* -------------------------------------------------------------------------
  * Command table
  * ------------------------------------------------------------------------- */
 static shell_cmd_t cmd_table[SHELL_MAX_CMDS];
@@ -468,21 +463,111 @@ static int cmd_update(int argc, char **argv)
     return 0;
 }
 
-/* --- trace --------------------------------------------------------------- */
+/* --- trace ---------------------------------------------------------------
+ * The scheduler records events into a ring under its own lock (sched.c);
+ * this command starts and stops it and prints the ring from thread context.
+ * ------------------------------------------------------------------------- */
+
+/* Why a thread left the CPU: its state when the switch was recorded. */
+static const char *trace_why(uint8_t state)
+{
+    switch (state) {
+    case THREAD_RUNNING:  return "preempt/yield";
+    case THREAD_SLEEPING: return "sleep";
+    case THREAD_BLOCKED:  return "block";
+    case THREAD_ZOMBIE:   return "exit";
+    default:              return "?";
+    }
+}
+
+/* trace_show — print the newest want events (0 = all kept), oldest first,
+ * timed in ms from the first one printed.  Recording is paused while
+ * printing, so the shell's own output does not push out what it shows. */
+static void trace_show(uint32_t want)
+{
+    uint32_t first, end;
+    bool was_on = sched_trace_info(NULL, NULL, NULL);
+    sched_trace_pause(true);
+    sched_trace_info(&first, &end, NULL);
+    if (want != 0u && end - first > want) {
+        first = end - want;
+    }
+    if (first == end) {
+        shell_println("trace: no events (start with: trace on [name])");
+    } else {
+        shell_println("      ms  core  event");
+    }
+
+    uint32_t t0 = 0u;
+    bool     have_t0 = false;
+    for (uint32_t seq = first; seq < end; seq++) {
+        trace_event_t e;
+        if (!sched_trace_get(seq, &e)) {
+            continue;
+        }
+        if (!have_t0) {
+            t0      = e.time_us;
+            have_t0 = true;
+        }
+        uint32_t dt = e.time_us - t0;   /* unsigned: correct across wrap */
+        shell_print("%4lu.%03lu  c%u   ", (unsigned long)(dt / 1000u),
+                    (unsigned long)(dt % 1000u), (unsigned)e.core);
+        switch (e.type) {
+        case TRACE_SWITCH:
+            shell_print("%s(%lu) -> %s(%lu)  %s\r\n",
+                        e.name[0] ? e.name : "-", (unsigned long)e.tid,
+                        e.to_name, (unsigned long)e.to_tid,
+                        trace_why(e.state));
+            break;
+        case TRACE_WAKE:
+            shell_print("wake     %s(%lu)\r\n", e.name, (unsigned long)e.tid);
+            break;
+        case TRACE_UNBLOCK:
+            shell_print("unblock  %s(%lu)\r\n", e.name, (unsigned long)e.tid);
+            break;
+        case TRACE_KILL:
+            shell_print("kill     %s(%lu)\r\n", e.name, (unsigned long)e.tid);
+            break;
+        default:
+            shell_print("event %u\r\n", (unsigned)e.type);
+            break;
+        }
+    }
+
+    if (was_on) {
+        sched_trace_pause(false);
+    }
+}
+
 static int cmd_trace(int argc, char **argv)
 {
     if (argc < 2) {
-        shell_print("trace: %s\r\n", trace_enabled ? "on" : "off");
+        uint32_t    first, end;
+        const char *filter;
+        bool on = sched_trace_info(&first, &end, &filter);
+        shell_print("trace: %s, %lu events recorded, %lu kept",
+                    on ? "on" : "off", (unsigned long)end,
+                    (unsigned long)(end - first));
+        if (filter[0] != '\0') {
+            shell_print(", threads named %s*", filter);
+        }
+        shell_print("\r\n");
         return 0;
     }
     if (strcmp(argv[1], "on") == 0) {
-        trace_enabled = true;
-        shell_println("Tracing enabled.");
+        sched_trace_start(argc > 2 ? argv[2] : NULL);
+        if (argc > 2) {
+            shell_print("Tracing threads named %s*.\r\n", argv[2]);
+        } else {
+            shell_println("Tracing all threads.");
+        }
     } else if (strcmp(argv[1], "off") == 0) {
-        trace_enabled = false;
-        shell_println("Tracing disabled.");
+        sched_trace_pause(true);
+        shell_println("Tracing stopped; 'trace show' prints the events.");
+    } else if (strcmp(argv[1], "show") == 0) {
+        trace_show(argc > 2 ? (uint32_t)strtoul(argv[2], NULL, 10) : 0u);
     } else {
-        shell_println("Usage: trace <on|off>");
+        shell_println("Usage: trace [on [name] | off | show [n]]");
         return -1;
     }
     return 0;
@@ -597,7 +682,7 @@ static const shell_cmd_t builtin_cmds[] = {
     { "fs",      "fs <write|append|format>  — filesystem ops", cmd_fs      },
     { "reboot",  "Reboot the system",                          cmd_reboot  },
     { "update",  "Reboot into USB BOOTSEL mode",               cmd_update  },
-    { "trace",   "trace <on|off>  — toggle scheduler tracing", cmd_trace   },
+    { "trace",   "trace [on [name]|off|show [n]] — record scheduler events", cmd_trace   },
     { "run",     "run <appname>  — spawn an app thread",       cmd_run     },
 };
 

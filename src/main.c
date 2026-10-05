@@ -31,15 +31,6 @@
 #include "kernel/bluetooth.h"
 #endif
 
-/* -------------------------------------------------------------------------
- * trace_enabled
- *
- * When true the scheduler (and any other subsystem that checks this flag)
- * may emit extra diagnostic output.  Toggled by the shell 'trace' command.
- * Declared volatile because the SysTick ISR reads it.
- * ------------------------------------------------------------------------- */
-volatile bool trace_enabled = false;
-
 /* Set to true by core1_entry() after multicore_lockout_victim_init() completes.
  * Core 0 spins on this flag before calling fs_init() so that any flash
  * erase/program operation (which calls multicore_lockout_start_blocking()) is

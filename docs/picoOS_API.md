@@ -261,6 +261,35 @@ any core) as TID 1, so `idle`, `idle1` and `shell` become TIDs 2–4.
 After the scheduler starts, the shell may add an AUTORUN app and, on display builds
 with button bindings, a `btn-mon` thread (priority 3).
 
+### 3.9 Scheduler Trace
+
+A flight recorder of scheduling events, behind the shell `trace` command.
+While recording, the scheduler copies each event into a ring of the last
+`TRACE_EVENTS` (128) events, overwriting the oldest. Events are recorded in
+PendSV, SysTick, `sched_unblock()` and `sched_kill()`, all under the scheduler
+lock, and nothing is printed there; read the ring from a thread.
+
+```c
+void sched_trace_start(const char *filter);  // empty the ring, start recording;
+                                             // filter = thread-name prefix (NULL/"" = all)
+void sched_trace_pause(bool pause);          // stop / resume, keeping the ring
+bool sched_trace_info(uint32_t *first, uint32_t *end, const char **filter);
+                                             // kept events are [first, end); true while recording
+bool sched_trace_get(uint32_t seq, trace_event_t *out);
+                                             // false if overwritten or not yet recorded
+```
+
+| `trace_event_t.type` | Meaning | Fields |
+|---|---|---|
+| `TRACE_SWITCH` | core switched threads | `tid`/`name` outgoing, `to_tid`/`to_name` incoming, `state` = outgoing state (RUNNING: preempted or yielded; SLEEPING; BLOCKED; ZOMBIE: exited) |
+| `TRACE_WAKE` | SysTick woke a sleeper | `tid`, `name` |
+| `TRACE_UNBLOCK` | a sync primitive woke a waiter | `tid`, `name` |
+| `TRACE_KILL` | a thread was killed | `tid`, `name`, `state` before the kill |
+
+Every event also has `time_us` (low 32 bits of the µs timer) and `core`.
+Names are copied (11 chars max) because a thread may exit before the ring is read.
+The ring costs 5 KB of static RAM.
+
 ---
 
 ## 4. Synchronization Primitives

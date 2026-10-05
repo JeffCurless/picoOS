@@ -211,7 +211,7 @@ Built-in commands:
 * `fs format` — erase and reinitialise the filesystem
 * `rm <file>` — delete a file
 * `run <name> [arg]` — launch a registered built-in app; optional arg is passed to the entry function
-* `trace on|off` — enable/disable scheduler trace output
+* `trace [on [name]|off|show [n]]` — record scheduler events (switches, wake-ups, kills) into a 128-event ring under the scheduler lock; `show` prints them from the shell thread
 * `reboot` — hard reboot
 * `update` — reboot into USB BOOTSEL mode for reflashing
 

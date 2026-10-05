@@ -127,6 +127,64 @@ void sched_add_thread(tcb_t *t);
 void sched_remove_thread(tcb_t *t);
 
 /* -------------------------------------------------------------------------
+ * Scheduler trace — a flight recorder of scheduling events (shell `trace`)
+ *
+ * While recording, the scheduler logs each event into a ring of the last
+ * TRACE_EVENTS events, overwriting the oldest.  Nothing is printed from
+ * interrupt context: a thread reads the ring later with sched_trace_get().
+ * The ring is guarded by the scheduler lock, which every writer (PendSV,
+ * SysTick, sched_unblock, sched_kill) already holds, so tracing claims no
+ * hardware spinlock of its own.
+ * ------------------------------------------------------------------------- */
+#define TRACE_EVENTS    128u
+#define TRACE_NAME_LEN  12u   /* thread names are copied, truncated to 11 chars */
+
+typedef enum {
+    TRACE_SWITCH  = 0,   /* core switched from tid to to_tid; state says why */
+    TRACE_WAKE    = 1,   /* sleeping thread tid woke (SysTick, core 0)        */
+    TRACE_UNBLOCK = 2,   /* blocked thread tid woken by a sync primitive      */
+    TRACE_KILL    = 3,   /* thread tid killed                                 */
+} trace_type_t;
+
+typedef struct {
+    uint32_t time_us;                 /* low 32 bits of the µs timer        */
+    uint8_t  type;                    /* trace_type_t                       */
+    uint8_t  core;                    /* core that recorded the event       */
+    uint8_t  state;                   /* SWITCH: outgoing thread's state    */
+    uint8_t  _pad;
+    uint32_t tid;                     /* subject (SWITCH: outgoing) thread  */
+    uint32_t to_tid;                  /* SWITCH: incoming thread            */
+    char     name[TRACE_NAME_LEN];    /* names are copied: the threads may  */
+    char     to_name[TRACE_NAME_LEN]; /* have exited before the dump        */
+} trace_event_t;
+
+/*
+ * sched_trace_start — empty the ring and start recording.  filter, if not
+ *                     NULL or "", keeps only events naming a thread whose
+ *                     name starts with it ("pi" keeps the pi workers).
+ */
+void sched_trace_start(const char *filter);
+
+/*
+ * sched_trace_pause — stop (true) or resume (false) recording without
+ *                     emptying the ring.
+ */
+void sched_trace_pause(bool pause);
+
+/*
+ * sched_trace_info — the sequence numbers of the oldest kept event (*first)
+ *                    and one past the newest (*end); the active filter
+ *                    ("" for none).  Returns true while recording.
+ */
+bool sched_trace_info(uint32_t *first, uint32_t *end, const char **filter);
+
+/*
+ * sched_trace_get — copy event number seq into *out.  Returns false if it
+ *                   was overwritten or not yet recorded.
+ */
+bool sched_trace_get(uint32_t seq, trace_event_t *out);
+
+/* -------------------------------------------------------------------------
  * Deadlock panic — defined in sched.c, callable from sync.c (spinlock
  * timeouts) and from sched_next_thread() (BLOCKED-thread scanner).
  *

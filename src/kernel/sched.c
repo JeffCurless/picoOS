@@ -97,13 +97,47 @@ static uint32_t current_slice_remaining[2];
 static spinlock_t sched_lock = {0};
 
 /* -------------------------------------------------------------------------
- * trace_enabled — defined in main.c; toggled by the shell 'trace' command.
- * The SysTick ISR checks this flag but does not yet emit output (async
- * printing from an ISR requires a ring-buffer TX path — not yet implemented).
- * The flag is available for future use by any subsystem that wants to gate
- * diagnostic output.
+ * Scheduler trace ring (see sched.h)
+ *
+ * Every field below is read and written only under sched_lock.  Writers
+ * run in PendSV, SysTick or with the lock taken by sched_unblock/sched_kill,
+ * so recording costs one copy and never prints: printing from an interrupt
+ * would stall the core on USB.  The shell's `trace show` reads the ring
+ * one event at a time with sched_trace_get(), which takes the lock briefly.
  * ------------------------------------------------------------------------- */
-extern volatile bool trace_enabled;
+static trace_event_t trace_ring[TRACE_EVENTS];
+static uint32_t      trace_seq;                    /* events recorded      */
+static bool          trace_on;
+static char          trace_filter[TRACE_NAME_LEN]; /* "" = every thread    */
+
+static bool trace_match(const char *name)
+{
+    size_t n = strlen(trace_filter);
+    return n == 0u || (name != NULL && strncmp(name, trace_filter, n) == 0);
+}
+
+/* trace_record — append one event.  Caller holds sched_lock and has
+ * checked trace_on.  to_name is NULL for every event but a switch. */
+static void trace_record(trace_type_t type, uint8_t state,
+                         uint32_t tid, const char *name,
+                         uint32_t to_tid, const char *to_name)
+{
+    if (!trace_match(name) && !(to_name != NULL && trace_match(to_name))) {
+        return;
+    }
+    trace_event_t *e = &trace_ring[trace_seq % TRACE_EVENTS];
+    e->time_us = time_us_32();
+    e->type    = (uint8_t)type;
+    e->core    = (uint8_t)get_core_num();
+    e->state   = state;
+    e->tid     = tid;
+    e->to_tid  = to_tid;
+    strncpy(e->name, name != NULL ? name : "", TRACE_NAME_LEN - 1u);
+    e->name[TRACE_NAME_LEN - 1u] = '\0';
+    strncpy(e->to_name, to_name != NULL ? to_name : "", TRACE_NAME_LEN - 1u);
+    e->to_name[TRACE_NAME_LEN - 1u] = '\0';
+    trace_seq++;
+}
 
 /* -------------------------------------------------------------------------
  * sched_add_thread_raw / sched_remove_thread_raw
@@ -218,6 +252,9 @@ bool sched_unblock(tcb_t *t)
 
     t->state = THREAD_READY;
     sched_add_thread_raw(t);
+    if (trace_on) {
+        trace_record(TRACE_UNBLOCK, 0u, t->tid, t->name, 0u, NULL);
+    }
     spinlock_irq_release(&sched_lock, save);
     return true;
 }
@@ -250,6 +287,9 @@ bool sched_kill(tcb_t *t)
     bool     free_now = false;
 
     uint32_t save = spinlock_irq_acquire(&sched_lock);
+    if (trace_on && t->state != THREAD_ZOMBIE) {
+        trace_record(TRACE_KILL, t->state, t->tid, t->name, 0u, NULL);
+    }
     if (t == current_tcb[core]) {
         t->state = THREAD_ZOMBIE;
     } else if (t == current_tcb[core ^ 1u]) {
@@ -392,6 +432,21 @@ tcb_t *sched_next_thread(void)
         cur->state        = THREAD_ZOMBIE;
     }
 
+    /* Trace: note the outgoing thread now, before a zombie is freed below.
+     * Its state says why it is leaving: RUNNING (preempted or yielded),
+     * SLEEPING, BLOCKED or ZOMBIE (exited or killed). */
+    tcb_t   *prev      = cur;
+    uint32_t out_tid   = 0u;
+    uint8_t  out_state = 0u;
+    char     out_name[TRACE_NAME_LEN];
+    out_name[0] = '\0';
+    if (trace_on && cur != NULL) {
+        out_tid   = cur->tid;
+        out_state = (uint8_t)cur->state;
+        strncpy(out_name, cur->name, TRACE_NAME_LEN - 1u);
+        out_name[TRACE_NAME_LEN - 1u] = '\0';
+    }
+
     /* Mark outgoing thread READY so the rotation below can move it to tail. */
     if (cur != NULL && cur->state == THREAD_RUNNING) {
         cur->state = THREAD_READY;
@@ -471,6 +526,13 @@ tcb_t *sched_next_thread(void)
      * the lock, is what lets sched_kill() trust current_tcb[]. */
     current_tcb[core] = selected;
 
+    /* Every slice ends here, so record only real switches.  prev is only
+     * compared: a reaped TCB is never in a ready queue to be selected. */
+    if (trace_on && selected != prev) {
+        trace_record(TRACE_SWITCH, out_state, out_tid, out_name,
+                     selected->tid, selected->name);
+    }
+
     spinlock_irq_release(&sched_lock, lock_save);
     return selected;
 }
@@ -521,6 +583,9 @@ void isr_systick(void)
         if (t->state == THREAD_SLEEPING && t->wake_time_us <= now) {
             t->state = THREAD_READY;
             sched_add_thread_raw(t);
+            if (trace_on) {
+                trace_record(TRACE_WAKE, 0u, t->tid, t->name, 0u, NULL);
+            }
         }
     }
     spinlock_irq_release(&sched_lock, save);
@@ -555,6 +620,51 @@ void isr_systick(void)
 void sched_tick(void)
 {
     isr_systick();
+}
+
+/* -------------------------------------------------------------------------
+ * Scheduler trace — public API (see sched.h)
+ * ------------------------------------------------------------------------- */
+void sched_trace_start(const char *filter)
+{
+    uint32_t save = spinlock_irq_acquire(&sched_lock);
+    strncpy(trace_filter, filter != NULL ? filter : "", TRACE_NAME_LEN - 1u);
+    trace_filter[TRACE_NAME_LEN - 1u] = '\0';
+    trace_seq = 0u;
+    trace_on  = true;
+    spinlock_irq_release(&sched_lock, save);
+}
+
+void sched_trace_pause(bool pause)
+{
+    uint32_t save = spinlock_irq_acquire(&sched_lock);
+    trace_on = !pause;
+    spinlock_irq_release(&sched_lock, save);
+}
+
+bool sched_trace_info(uint32_t *first, uint32_t *end, const char **filter)
+{
+    uint32_t save = spinlock_irq_acquire(&sched_lock);
+    uint32_t e  = trace_seq;
+    bool     on = trace_on;
+    spinlock_irq_release(&sched_lock, save);
+
+    if (first != NULL)  { *first  = (e > TRACE_EVENTS) ? e - TRACE_EVENTS : 0u; }
+    if (end != NULL)    { *end    = e; }
+    if (filter != NULL) { *filter = trace_filter; }   /* changed only by the shell */
+    return on;
+}
+
+bool sched_trace_get(uint32_t seq, trace_event_t *out)
+{
+    bool ok = false;
+    uint32_t save = spinlock_irq_acquire(&sched_lock);
+    if (seq < trace_seq && trace_seq - seq <= TRACE_EVENTS) {
+        *out = trace_ring[seq % TRACE_EVENTS];
+        ok   = true;
+    }
+    spinlock_irq_release(&sched_lock, save);
+    return ok;
 }
 
 /* -------------------------------------------------------------------------

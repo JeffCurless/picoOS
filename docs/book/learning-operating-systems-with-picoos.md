@@ -49,8 +49,9 @@ Jeff Curless · October 2026 · local copy of the [online edition](https://claud
     - [5.4 Why idle threads exist](#s-5-4)
     - [5.5 The context switch](#s-5-5)
     - [5.6 Sleeping](#s-5-6)
-    - [5.7 Try this](#s-5-7)
-    - [5.8 Think about it](#s-5-8)
+    - [5.7 Watching the scheduler](#s-5-7)
+    - [5.8 Try this](#s-5-8)
+    - [5.9 Think about it](#s-5-9)
 - [Chapter 6 — Two Cores: Symmetric Multiprocessing](#ch-6)
     - [6.1 One scheduler, two cores](#s-6-1)
     - [6.2 Not quite symmetric](#s-6-2)
@@ -184,7 +185,7 @@ Keep a Pico plugged in and a terminal open while you read. An operating system i
 - `$ ./build pico` — a command typed on your computer.
 - **RP2040** means the original Pico and Pico W; **RP2350** means the Pico 2 and Pico 2 W.
 
-This edition describes picoOS v0.3.8.
+This edition describes picoOS v0.3.9.
 
 <a id="ch-1"></a>
 ## Chapter 1 — Getting Started
@@ -237,7 +238,7 @@ From the picoOS directory:
 ./build             # builds all 12 variants
 ```
 
-`build` is a script, not a folder. Never delete it. Each board is compiled in its own `build_<board>_<variant>/` directory, and the finished images are copied to `kits/`. A file name such as `picoos_D-v0.3.8.uf2` means: pico board, Display Pack build (`_D`), version 0.3.8. `_D2` means Display Pack 2; no suffix means no display.
+`build` is a script, not a folder. Never delete it. Each board is compiled in its own `build_<board>_<variant>/` directory, and the finished images are copied to `kits/`. A file name such as `picoos_D-v0.3.9.uf2` means: pico board, Display Pack build (`_D`), version 0.3.9. `_D2` means Display Pack 2; no suffix means no display.
 
 <a id="s-1-4"></a>
 ### 1.4 Flash
@@ -260,7 +261,7 @@ The script finds the Pico by its USB ID. You should see a banner like this:
 
 ```
 =======================================================
-picoOS  v0.3.8
+picoOS  v0.3.9
 
   Platform : RP2040, dual ARM Cortex-M0+ (133 MHz max)
   Options  : DISPLAY_PACK
@@ -649,17 +650,43 @@ The M33 has a floating-point unit. A thread that has used it gets a 26-word hard
 One subtlety: a woken thread does not run immediately. It waits for the next switch, which may be up to 10 ms away unless it outranks the running thread. A sleep of 1 ms can therefore last longer than 1 ms. All general-purpose operating systems share this: a sleep means "at least this long".
 
 <a id="s-5-7"></a>
-### 5.7 Try this
+### 5.7 Watching the scheduler
+
+The `trace` command records what the scheduler does. `trace on` starts recording, and `trace show` prints the events, oldest first, timed from the first one. A name after `trace on` keeps only threads whose names start with it. The output looks like this (times and TIDs vary):
+
+```
+pico> trace on pi
+Tracing threads named pi*.
+pico> run pi
+  ...
+pico> trace show 4
+      ms  core  event
+   0.000  c0   pi-worker(6) -> pi-worker(8)  preempt/yield
+   0.003  c1   pi-worker(7) -> pi-worker(9)  preempt/yield
+  10.001  c0   pi-worker(8) -> pi-worker(6)  preempt/yield
+  10.004  c1   pi-worker(9) -> pi-worker(7)  preempt/yield
+```
+
+A switch line says why the outgoing thread left the CPU: `preempt/yield` (it could still run: its slice ended or it yielded), `sleep`, `block` or `exit`. The other events are `wake` (SysTick woke a sleeper), `unblock` (a mutex, semaphore or queue woke a waiter) and `kill`.
+
+The recorder is a **ring buffer** of the last 128 events, like an aircraft's flight recorder: when it is full, each new event overwrites the oldest. The scheduler records an event inside PendSV or SysTick, so it must not print there. Printing waits on USB, and an interrupt handler that waits stalls its core. It only copies the event into the ring, and the shell prints it later from an ordinary thread. The ring is guarded by the scheduler lock, which every writer already holds, so tracing needs no hardware lock of its own. Each event keeps a copy of the thread names, because a thread may have exited before you print.
+
+Without a name filter the ring fills fast. The shell checks for a key press every millisecond, and each check adds a wake and two switches, so 128 events cover only about 40 ms.
+
+<a id="s-5-8"></a>
+### 5.8 Try this
 
 - `pico> run pi` and watch `threads`. The `Time` column shows CPU time per thread; `CORE` shows where each one is.
 - Change `TIME_SLICE_MS` in `sched.c` from 10 to 1 and to 100. Run `pi` again and compare how responsive the shell feels.
 - Write an app at priority 1 that loops forever without sleeping. What happens to the shell? To USB?
+- `pico> trace on shell`, type a few characters, then `trace show`. Find the shell's one-millisecond sleep, and the switch to `idle` that follows each one.
 
-<a id="s-5-8"></a>
-### 5.8 Think about it
+<a id="s-5-9"></a>
+### 5.9 Think about it
 
 1. The sleep scan looks at every TCB every millisecond, even if nobody is asleep. Design a sorted sleep list that only looks at the first entry.
 2. Finding the highest non-empty queue means checking up to 8 lists. Many kernels keep an 8-bit mask with one bit per non-empty queue. How would you find the highest set bit in one instruction?
+3. `trace` keeps only the last 128 events and prints them afterwards. How would you stream events to the console as they happen, without printing from an interrupt? What happens when events arrive faster than USB can send them?
 
 <a id="ch-6"></a>
 ## Chapter 6 — Two Cores: Symmetric Multiprocessing
@@ -870,7 +897,7 @@ Both cores call `kmalloc()`. If both walked and split the same free block at the
 - `pico> mem`, then `run producer`, `run consumer`, `run sensor`, and `mem` again. How much did each thread cost?
 - Kill one in the middle (`kill <tid>`), start a different one, and look at "Largest free".
 - Run the host tests with `./build tests`. Read `tests/mem/` to see a fragmentation test that needs no hardware.
-- Run `python3 tools/mem_report.py build_pico_D/src/picoos_D-v0.3.8.elf.map` and find the 64 KB heap array.
+- Run `python3 tools/mem_report.py build_pico_D/src/picoos_D-v0.3.9.elf.map` and find the 64 KB heap array.
 
 <a id="s-7-10"></a>
 ### 7.10 Think about it
@@ -1426,7 +1453,7 @@ The built-in commands are a table of these. Other modules add their own at start
 | `mem` | heap used, free, largest free block; stack canaries | 7 |
 | `ls`, `cat`, `rm`, `fs write/append/format` | the filesystem | 12 |
 | `run <app> [arg]` | start a built-in app as a new process | 14 |
-| `trace on/off` | a flag for extra diagnostics | — |
+| `trace on [name]`, `off`, `show [n]` | record scheduler events; print them | 5 |
 | `reboot`, `update` | restart; restart into BOOTSEL for flashing | 1 |
 | `wifi …`, `bt …` | radio status and scans (W boards) | 15 |
 | `display …`, `led …` | the Display Pack (display builds) | 11 |
@@ -1825,7 +1852,7 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 
 **H**
 
-- hardware spinlocks — [1.6](#s-1-6), [7.1](#s-7-1), [7.8](#s-7-8), [8](#ch-8), [8.3](#s-8-3), [8.4](#s-8-4), [8.8](#s-8-8), [13.3](#s-13-3)
+- hardware spinlocks — [1.6](#s-1-6), [5.7](#s-5-7), [7.1](#s-7-1), [7.8](#s-7-8), [8](#ch-8), [8.3](#s-8-3), [8.4](#s-8-4), [8.8](#s-8-8), [13.3](#s-13-3)
 - heap — [7.3](#s-7-3), [7.5](#s-7-5), [7.6](#s-7-6), [7.7](#s-7-7), [7.8](#s-7-8)
 - `heap_lock` — [7.8](#s-7-8), [8.4](#s-8-4), [8.9](#s-8-9)
 
@@ -1844,7 +1871,7 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 
 - kernel process (PID 1) — [3.2](#s-3-2), [4.2](#s-4-2), [15.1](#s-15-1)
 - `kfree()` — [7.5](#s-7-5), [7.8](#s-7-8), [14.1](#s-14-1), [14.2](#s-14-2), [16.2](#s-16-2), [A.3](#s-a-3)
-- `kill`, `killproc` — [4.2](#s-4-2), [4.5](#s-4-5), [4.6](#s-4-6), [4.7](#s-4-7), [7.9](#s-7-9), [8.11](#s-8-11), [13.3](#s-13-3), [16.2](#s-16-2)
+- `kill`, `killproc` — [4.2](#s-4-2), [4.5](#s-4-5), [4.6](#s-4-6), [4.7](#s-4-7), [5.7](#s-5-7), [7.9](#s-7-9), [8.11](#s-8-11), [13.3](#s-13-3), [16.2](#s-16-2)
 - `kmalloc()` — [P.4](#s-p-4), [3.2](#s-3-2), [7.3](#s-7-3), [7.5](#s-7-5), [7.8](#s-7-8), [14.1](#s-14-1), [14.5](#s-14-5), [A.3](#s-a-3)
 - `kmutex_t`, `kmutex_lock()` — [8.5](#s-8-5), [8.11](#s-8-11), [8.12](#s-8-12), [8.13](#s-8-13), [10.4](#s-10-4), [12.6](#s-12-6), [15.4](#s-15-4), [16.2](#s-16-2), [A.3](#s-a-3)
 
@@ -1870,13 +1897,13 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 **P**
 
 - PCB (process control block) — [4.2](#s-4-2), [6.1](#s-6-1), [7.3](#s-7-3), [7.7](#s-7-7), [14.2](#s-14-2)
-- PendSV — [5.5](#s-5-5), [6.1](#s-6-1), [8.2](#s-8-2), [A.3](#s-a-3)
-- `pi` app — [1.6](#s-1-6), [5.7](#s-5-7), [6.3](#s-6-3), [6.5](#s-6-5)
+- PendSV — [5.5](#s-5-5), [5.7](#s-5-7), [6.1](#s-6-1), [8.2](#s-8-2), [A.3](#s-a-3)
+- `pi` app — [1.6](#s-1-6), [5.7](#s-5-7), [5.8](#s-5-8), [6.3](#s-6-3), [6.5](#s-6-5)
 - Pico SDK — [1.2](#s-1-2), [2.4](#s-2-4), [7.3](#s-7-3), [10.4](#s-10-4), [14.1](#s-14-1)
 - picoOS API — [10.4](#s-10-4), [14.1](#s-14-1), [14.6](#s-14-6), [A.3](#s-a-3)
 - PID ranges — [4.2](#s-4-2), [13.4](#s-13-4)
 - power loss — [12.7](#s-12-7), [12.9](#s-12-9)
-- preemption — [5](#ch-5), [5.1](#s-5-1), [8.4](#s-8-4), [8.9](#s-8-9)
+- preemption — [5](#ch-5), [5.1](#s-5-1), [5.7](#s-5-7), [8.4](#s-8-4), [8.9](#s-8-9)
 - `prim_pool` (stripe pool) — [8.8](#s-8-8), [8.9](#s-8-9)
 - priorities — [5](#ch-5), [5.2](#s-5-2), [5.3](#s-5-3), [8.10](#s-8-10), [14.3](#s-14-3)
 - priority inheritance — [8.10](#s-8-10), [8.13](#s-8-13), [16.2](#s-16-2)
@@ -1890,7 +1917,7 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 - race condition — [8](#ch-8), [8.1](#s-8-1), [8.11](#s-8-11), [15.5](#s-15-5)
 - ready queues — [4.5](#s-4-5), [5.2](#s-5-2), [5.6](#s-5-6), [6](#ch-6), [6.1](#s-6-1), [6.4](#s-6-4), [8.4](#s-8-4), [8.5](#s-8-5), [16.2](#s-16-2)
 - reaping — [4.5](#s-4-5)
-- ring buffer — [9.1](#s-9-1)
+- ring buffer — [5.7](#s-5-7), [9.1](#s-9-1)
 - round-robin — [5](#ch-5), [5.3](#s-5-3)
 - RP2040 — [1.1](#s-1-1), [5.5](#s-5-5), [7.1](#s-7-1), [8.3](#s-8-3), [8.8](#s-8-8), [12.2](#s-12-2)
 - RP2350 — [1.1](#s-1-1), [2.3](#s-2-3), [5.5](#s-5-5), [10.3](#s-10-3), [12.2](#s-12-2)
@@ -1904,13 +1931,13 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 - `sched_next_thread()` — [5.3](#s-5-3), [5.5](#s-5-5), [6.1](#s-6-1), [8.11](#s-8-11), [A.3](#s-a-3)
 - `sched_start()` — [3](#ch-3), [3.2](#s-3-2), [3.4](#s-3-4)
 - `sched_yield()` — [5.5](#s-5-5), [8.5](#s-8-5)
-- semaphore — [4.5](#s-4-5), [8.5](#s-8-5), [8.6](#s-8-6), [8.7](#s-8-7), [8.13](#s-8-13), [9.2](#s-9-2), [9.5](#s-9-5)
+- semaphore — [4.5](#s-4-5), [5.7](#s-5-7), [8.5](#s-8-5), [8.6](#s-8-6), [8.7](#s-8-7), [8.13](#s-8-13), [9.2](#s-9-2), [9.5](#s-9-5)
 - shell — [13](#ch-13), [13.1](#s-13-1), [13.2](#s-13-2), [13.3](#s-13-3), [13.4](#s-13-4)
 - `shell_print()` — [2.4](#s-2-4), [14.1](#s-14-1), [14.2](#s-14-2)
 - `shell_register_cmd()` — [13.2](#s-13-2)
 - SIO block — [7.1](#s-7-1), [8.3](#s-8-3)
 - slab allocator — [7.7](#s-7-7), [16.2](#s-16-2)
-- SLEEPING state — [4.5](#s-4-5), [5.6](#s-5-6), [5.7](#s-5-7), [8.6](#s-8-6), [13.1](#s-13-1)
+- SLEEPING state — [4.5](#s-4-5), [5.6](#s-5-6), [5.8](#s-5-8), [8.6](#s-8-6), [13.1](#s-13-1)
 - SMP (symmetric multiprocessing) — [6](#ch-6), [6.2](#s-6-2)
 - `spinlock_irq_acquire()` — [8.4](#s-8-4), [8.5](#s-8-5)
 - `spinlock_t` — [8.4](#s-8-4), [9.1](#s-9-1)
@@ -1923,7 +1950,7 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 - `syscall_dispatch()` — [10](#ch-10), [10.2](#s-10-2), [10.3](#s-10-3)
 - `sys_sleep()` — [2.4](#s-2-4), [4.5](#s-4-5), [5.1](#s-5-1), [5.6](#s-5-6), [9.2](#s-9-2), [10.2](#s-10-2), [11.4](#s-11-4), [14.1](#s-14-1), [14.2](#s-14-2)
 - system calls — [10](#ch-10), [10.1](#s-10-1), [10.2](#s-10-2), [10.3](#s-10-3), [10.4](#s-10-4)
-- SysTick — [3.4](#s-3-4), [5.1](#s-5-1), [5.5](#s-5-5), [5.6](#s-5-6), [6.1](#s-6-1), [8.2](#s-8-2), [A.2](#s-a-2)
+- SysTick — [3.4](#s-3-4), [5.1](#s-5-1), [5.5](#s-5-5), [5.6](#s-5-6), [5.7](#s-5-7), [6.1](#s-6-1), [8.2](#s-8-2), [A.2](#s-a-2)
 
 **T**
 
@@ -1931,9 +1958,10 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 - tests, host-native — [7.9](#s-7-9), [12.6](#s-12-6), [12.8](#s-12-8), [16.1](#s-16-1)
 - thread — [2.5](#s-2-5), [3.3](#s-3-3), [4](#ch-4), [4.1](#s-4-1)
 - thread states — [4.5](#s-4-5), [5.3](#s-5-3)
-- `threads` command — [1.6](#s-1-6), [2.6](#s-2-6), [4.6](#s-4-6), [5.7](#s-5-7), [6.5](#s-6-5), [13.3](#s-13-3), [16.2](#s-16-2)
-- time slice — [5](#ch-5), [5.1](#s-5-1), [5.3](#s-5-3), [5.6](#s-5-6), [5.7](#s-5-7), [6.1](#s-6-1), [6.4](#s-6-4), [8.4](#s-8-4), [A.2](#s-a-2)
+- `threads` command — [1.6](#s-1-6), [2.6](#s-2-6), [4.6](#s-4-6), [5.8](#s-5-8), [6.5](#s-6-5), [13.3](#s-13-3), [16.2](#s-16-2)
+- time slice — [5](#ch-5), [5.1](#s-5-1), [5.3](#s-5-3), [5.6](#s-5-6), [5.8](#s-5-8), [6.1](#s-6-1), [6.4](#s-6-4), [8.4](#s-8-4), [A.2](#s-a-2)
 - torn read — [15.2](#s-15-2)
+- `trace` command — [5.7](#s-5-7), [5.8](#s-5-8), [5.9](#s-5-9), [13.3](#s-13-3)
 - triple buffer — [15](#ch-15), [15.3](#s-15-3), [15.7](#s-15-7)
 - `tud_task()` — [5.4](#s-5-4)
 

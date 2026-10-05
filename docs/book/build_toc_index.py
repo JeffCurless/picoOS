@@ -160,6 +160,7 @@ INDEX_TERMS = [
     ("`threads` command", r"pico> threads|`threads`", None),
     ("time slice", r"time slice|TIME_SLICE_MS|10 ms", None),
     ("torn read", r"torn read", None),
+    ("`trace` command", r"`trace|trace on|trace show", None),
     ("triple buffer", r"triple buffer", None),
     ("`tud_task()`", r"tud_task", None),
     ("`dev_console_poll()`", r"dev_console_poll", None),
