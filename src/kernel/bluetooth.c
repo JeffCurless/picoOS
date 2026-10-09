@@ -246,14 +246,57 @@ static void set_name(bt_scan_result_t *dev, const uint8_t *src, size_t len)
     dev->name[0] = (char)src[0];
 }
 
-/* ---- BLE AD data parser: extracts name, flags, TX power, company ID ------- */
+/* Start a new slot: every optional field "unknown", one report heard. */
+static void slot_init(bt_scan_result_t *dev, const bd_addr_t addr,
+                      bt_devtype_t type, int8_t rssi)
+{
+    memset(dev, 0, sizeof(*dev));   /* name "", lengths 0, zero sentinels */
+    reverse_bd_addr(addr, dev->addr);
+    dev->type       = type;
+    dev->dev_class  = BT_CLASS_UNKNOWN;
+    dev->rssi       = rssi;
+    dev->tx_power   = BT_TX_POWER_UNKNOWN;
+    dev->flags      = BT_FLAGS_NONE;
+    dev->company_id = BT_COMPANY_NONE;
+    dev->addr_type  = BT_ADDR_TYPE_NONE;
+    dev->adv_type   = BT_ADV_TYPE_NONE;
+    dev->pkt_count  = 1u;
+}
+
+static void count_report(bt_scan_result_t *dev)
+{
+    if (dev->pkt_count != UINT16_MAX) dev->pkt_count++;
+}
+
+static uint16_t le16(const uint8_t *d) { return (uint16_t)((uint16_t)d[1] << 8 | d[0]); }
+
+static uint32_t le32(const uint8_t *d)
+{
+    return (uint32_t)d[3] << 24 | (uint32_t)d[2] << 16 |
+           (uint32_t)d[1] << 8  | d[0];
+}
+
+/* Copy up to `max` bytes and set *len.  The caller publishes the field
+ * that says the bytes are there (a UUID or company ID) after a barrier. */
+static void set_bytes(uint8_t *dst, uint8_t *len, size_t max,
+                      const uint8_t *src, size_t n)
+{
+    if (n > max) n = max;
+    memcpy(dst, src, n);
+    *len = (uint8_t)n;
+}
+
+/* ---- BLE AD data parser ------------------------------------------------- */
 /* `rsp` is true for a scan response.  Some devices send a different
  * company ID there than in their advertisement; the advertisement's wins
  * so the field does not flip between the two from packet to packet.
  *
  * `fill_only` is for a one-shot slot that is already published: a field
  * that is set is never changed, so each field goes from unknown to known
- * at most once while readers watch (the rule scantest checks). */
+ * at most once while readers watch (the rule scantest checks).  Service
+ * and manufacturer data are written before the UUID / company ID that
+ * marks them present, so a reader that checks that field first sees whole
+ * data. */
 static void extract_ble_adv_data(const uint8_t *ad_data, uint8_t ad_len,
                                   bool rsp, bool fill_only,
                                   bt_scan_result_t *dev)
@@ -269,7 +312,34 @@ static void extract_ble_adv_data(const uint8_t *ad_data, uint8_t ad_len,
         case 0x02u: /* Incomplete List of 16-bit Service Class UUIDs */
         case 0x03u: /* Complete List of 16-bit Service Class UUIDs   */
             if (dlen >= 2 && dev->service_uuid == BT_SERVICE_NONE)
-                dev->service_uuid = (uint16_t)((uint16_t)d[1] << 8 | d[0]);
+                dev->service_uuid = le16(d);
+            break;
+        case 0x04u: /* Incomplete List of 32-bit Service Class UUIDs */
+        case 0x05u: /* Complete List of 32-bit Service Class UUIDs   */
+            if (dlen >= 4 && dev->uuid32 == BT_UUID32_NONE)
+                dev->uuid32 = le32(d);
+            break;
+        case 0x06u: /* Incomplete List of 128-bit Service Class UUIDs */
+        case 0x07u: /* Complete List of 128-bit Service Class UUIDs   */
+            /* LSB first, so the top 32 bits are the last four bytes. */
+            if (dlen >= 16 && dev->uuid32 == BT_UUID32_NONE)
+                dev->uuid32 = le32(&d[12]);
+            break;
+        case 0x16u: /* Service Data - 16-bit UUID, then the data */
+            if (dlen >= 2) {
+                uint16_t uuid = le16(d);
+                if (dev->svc_data_uuid == BT_SERVICE_NONE ||
+                    (!fill_only && uuid == dev->svc_data_uuid)) {
+                    set_bytes(dev->svc_data, &dev->svc_data_len,
+                              BT_SVC_DATA_LEN, &d[2], dlen - 2u);
+                    __dmb();
+                    dev->svc_data_uuid = uuid;
+                }
+            }
+            break;
+        case 0x19u: /* Appearance */
+            if (dlen >= 2 && (!fill_only || dev->appearance == BT_APPEARANCE_NONE))
+                dev->appearance = le16(d);
             break;
         case 0x08u: /* Shortened Local Name */
         case 0x09u: /* Complete Local Name */
@@ -283,10 +353,14 @@ static void extract_ble_adv_data(const uint8_t *ad_data, uint8_t ad_len,
             if (!fill_only || dev->tx_power == BT_TX_POWER_UNKNOWN)
                 dev->tx_power = (int8_t)d[0];
             break;
-        case 0xFFu: /* Manufacturer Specific Data — first 2 bytes are company ID (LE) */
+        case 0xFFu: /* Manufacturer Specific Data — company ID (LE), then data */
             if (dlen >= 2 && (dev->company_id == BT_COMPANY_NONE ||
-                              (!rsp && !fill_only)))
-                dev->company_id = (uint16_t)((uint16_t)d[1] << 8 | d[0]);
+                              (!rsp && !fill_only))) {
+                set_bytes(dev->mfr_data, &dev->mfr_data_len,
+                          BT_MFR_DATA_LEN, &d[2], dlen - 2u);
+                __dmb();
+                dev->company_id = le16(d);
+            }
             break;
         default:
             break;
@@ -329,24 +403,35 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
         int dup = find_slot_by_addr(addr);
         if (dup >= 0) {
             if (rssi != BT_RSSI_UNKNOWN) items[dup].rssi = rssi;
+            count_report(&items[dup]);
             return;
         }
 
         int idx = next_slot();
         if (idx < 0) return;
 
-        reverse_bd_addr(addr, items[idx].addr);
-        items[idx].name[0]         = '\0';
-        items[idx].type            = BT_DEVTYPE_CLASSIC;
+        slot_init(&items[idx], addr, BT_DEVTYPE_CLASSIC, rssi);
         items[idx].class_of_device =
             gap_event_inquiry_result_get_class_of_device(packet);
         items[idx].dev_class       =
             cod_to_devclass(items[idx].class_of_device);
-        items[idx].rssi            = rssi;
-        items[idx].tx_power        = BT_TX_POWER_UNKNOWN;
-        items[idx].flags           = BT_FLAGS_NONE;
-        items[idx].company_id      = BT_COMPANY_NONE;
-        items[idx].service_uuid    = BT_SERVICE_NONE;
+
+        /* Extended inquiry response (bt_init asks for it): the Device ID
+         * record and the name, which then needs no remote name request. */
+        if (gap_event_inquiry_result_get_device_id_available(packet)) {
+            items[idx].did_source  =
+                gap_event_inquiry_result_get_device_id_vendor_id_source(packet);
+            items[idx].did_vendor  =
+                gap_event_inquiry_result_get_device_id_vendor_id(packet);
+            items[idx].did_product =
+                gap_event_inquiry_result_get_device_id_product_id(packet);
+            items[idx].did_version =
+                gap_event_inquiry_result_get_device_id_version(packet);
+        }
+        if (gap_event_inquiry_result_get_name_available(packet))
+            set_name(&items[idx], gap_event_inquiry_result_get_name(packet),
+                     gap_event_inquiry_result_get_name_len(packet));
+        bool eir_name = items[idx].name[0] != '\0';
 
         uint8_t  psrm =
             gap_event_inquiry_result_get_page_scan_repetition_mode(packet);
@@ -356,8 +441,10 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
         /* Continuous mode asks for each name once per session and fills it
          * in from the cache in later windows.  A device whose request has
          * not been sent yet stays NAME_PENDING with fresh paging info. */
-        bool ask = true;
-        if (g_tgt_cont) {
+        bool ask = !eir_name;
+        if (g_tgt_cont && eir_name) {
+            name_store(items[idx].addr, items[idx].name);
+        } else if (g_tgt_cont) {
             bt_name_ent_t *n = name_find(items[idx].addr);
             if (n == NULL) n = name_add(items[idx].addr);
             if (n->state == NAME_KNOWN) {
@@ -431,8 +518,9 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
         int8_t rssi = ble_report_rssi(packet);
         uint8_t       ad_len  = gap_event_advertising_report_get_data_length(packet);
         const uint8_t *ad_data = gap_event_advertising_report_get_data(packet);
-        bool          rsp     =
-            gap_event_advertising_report_get_advertising_event_type(packet) == 4u;
+        uint8_t       evt     =
+            gap_event_advertising_report_get_advertising_event_type(packet);
+        bool          rsp     = evt == 4u;   /* SCAN_RSP */
 
         /* Already seen this scan: refresh the RSSI (see Classic above) and
          * merge this report's AD fields — a device often spreads its name
@@ -443,6 +531,11 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
         int dup = find_slot_by_addr(addr);
         if (dup >= 0) {
             if (rssi != BT_RSSI_UNKNOWN) items[dup].rssi = rssi;
+            count_report(&items[dup]);
+            /* The first advertisement sets the type; a device can mix
+             * types (e.g. ADV_IND and NONCONN), so it does not flip. */
+            if (!rsp && items[dup].adv_type == BT_ADV_TYPE_NONE)
+                items[dup].adv_type = evt;
             bool had_name = items[dup].name[0] != '\0';
             if (g_tgt_cont || !had_name) {
                 extract_ble_adv_data(ad_data, ad_len, rsp, !g_tgt_cont,
@@ -456,16 +549,10 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
         int idx = next_slot();
         if (idx < 0) return;
 
-        reverse_bd_addr(addr, items[idx].addr);
-        items[idx].name[0]         = '\0';
-        items[idx].type            = BT_DEVTYPE_BLE;
-        items[idx].dev_class       = BT_CLASS_UNKNOWN;
-        items[idx].class_of_device = 0;
-        items[idx].rssi            = rssi;
-        items[idx].tx_power        = BT_TX_POWER_UNKNOWN;
-        items[idx].flags           = BT_FLAGS_NONE;
-        items[idx].company_id      = BT_COMPANY_NONE;
-        items[idx].service_uuid    = BT_SERVICE_NONE;
+        slot_init(&items[idx], addr, BT_DEVTYPE_BLE, rssi);
+        /* 2 and 3 are resolved identities, which need a bond: none here. */
+        items[idx].addr_type = gap_event_advertising_report_get_address_type(packet) & 1u;
+        if (!rsp) items[idx].adv_type = evt;
 
         extract_ble_adv_data(ad_data, ad_len, rsp, false, &items[idx]);
         if (g_tgt_cont) {
@@ -764,6 +851,41 @@ static void print_addr(const uint8_t addr[BT_ADDR_LEN])
                 addr[5], addr[4], addr[3], addr[2], addr[1], addr[0]);
 }
 
+static void print_hex(const uint8_t *d, int n)
+{
+    for (int i = 0; i < n; i++) shell_print("%02X", d[i]);
+}
+
+/* `bt scan -v`: one more line per device with every optional field set. */
+static void print_fields(const bt_scan_result_t *r)
+{
+    shell_print("    pkts=%u", (unsigned)r->pkt_count);
+    if (r->addr_type != BT_ADDR_TYPE_NONE)
+        shell_print(" addr=%s", r->addr_type == BT_ADDR_PUBLIC ? "public" : "random");
+    if (r->adv_type != BT_ADV_TYPE_NONE) shell_print(" adv=%u", r->adv_type);
+    if (r->class_of_device)              shell_print(" cod=%06lX",
+                                                     (unsigned long)r->class_of_device);
+    if (r->tx_power != BT_TX_POWER_UNKNOWN) shell_print(" tx=%d", r->tx_power);
+    if (r->flags != BT_FLAGS_NONE)       shell_print(" flags=%02X", r->flags);
+    if (r->appearance != BT_APPEARANCE_NONE)
+        shell_print(" app=%04X", r->appearance);
+    if (r->service_uuid != BT_SERVICE_NONE) shell_print(" svc=%04X", r->service_uuid);
+    if (r->uuid32 != BT_UUID32_NONE)     shell_print(" uuid=%08lX",
+                                                     (unsigned long)r->uuid32);
+    if (r->did_source != BT_DID_NONE)
+        shell_print(" did=%u:%04X:%04X:%04X", r->did_source, r->did_vendor,
+                    r->did_product, r->did_version);
+    if (r->company_id != BT_COMPANY_NONE) {
+        shell_print(" mfr=%04X:", r->company_id);
+        print_hex(r->mfr_data, r->mfr_data_len);
+    }
+    if (r->svc_data_uuid != BT_SERVICE_NONE) {
+        shell_print(" data=%04X:", r->svc_data_uuid);
+        print_hex(r->svc_data, r->svc_data_len);
+    }
+    shell_print("\r\n");
+}
+
 static int cmd_bt(int argc, char **argv)
 {
     const char *sub = (argc >= 2) ? argv[1] : "status";
@@ -775,6 +897,7 @@ static int cmd_bt(int argc, char **argv)
     }
 
     if (strcmp(sub, "scan") == 0) {
+        bool verbose = argc >= 3 && strcmp(argv[2], "-v") == 0;
         if (g_state == BT_STATE_OFF) {
             shell_print("Bluetooth not ready\r\n");
             return -1;
@@ -814,6 +937,7 @@ static int cmd_bt(int argc, char **argv)
                         r->type == BT_DEVTYPE_CLASSIC ? "Classic" : "BLE",
                         bt_devclass_str(r->dev_class),
                         r->name[0] ? r->name : "(unknown)");
+            if (verbose) print_fields(r);
         }
         return 0;
     }
@@ -849,13 +973,13 @@ static int cmd_bt(int argc, char **argv)
         return 0;
     }
 
-    shell_print("Usage: bt [status|scan|watch [n]]\r\n");
+    shell_print("Usage: bt [status|scan [-v]|watch [n]]\r\n");
     return -1;
 }
 
 static const shell_cmd_t bt_cmd = {
     "bt",
-    "bt [status|scan|watch [n]]",
+    "bt [status|scan [-v]|watch [n]]",
     cmd_bt
 };
 
@@ -885,6 +1009,11 @@ void bt_init(void)
     /* Power on the BT radio asynchronously.  The HCI init sequence runs in
      * the async context; packet_handler moves g_state from OFF to IDLE when
      * BTstack reports HCI_STATE_WORKING. */
+    /* BTstack's default inquiry mode is standard, whose results carry no
+     * RSSI.  RSSI + EIR adds it, and the EIR gives many devices' name and
+     * Device ID record with no remote name request.  Must precede power on:
+     * the mode is written during HCI init. */
+    hci_set_inquiry_mode(INQUIRY_MODE_RSSI_AND_EIR);
     hci_power_control(HCI_POWER_ON);
 
     shell_register_cmd(&bt_cmd);

@@ -161,8 +161,9 @@ static bool bt_entry_ok(const bt_scan_result_t *e)
 
 /* Same device, same fields — except RSSI (refreshed by repeat reports).  A
  * BLE device spreads its AD fields over several packets, so the name, TX
- * power, flags, company ID and service UUID may each appear once
- * (unknown → set); once set they must not change. */
+ * power, flags, company ID, service UUIDs, service data UUID, appearance
+ * and advertising type may each appear once (unknown → set); once set they
+ * must not change. */
 #define FILLED_ONCE(o, c, none)  ((o) == (c) || (o) == (none))
 
 static bool bt_entry_same(const bt_scan_result_t *old, const bt_scan_result_t *cur)
@@ -170,11 +171,19 @@ static bool bt_entry_same(const bt_scan_result_t *old, const bt_scan_result_t *c
     if (memcmp(old->addr, cur->addr, BT_ADDR_LEN) != 0) return false;
     if (old->type            != cur->type            ||
         old->dev_class       != cur->dev_class       ||
-        old->class_of_device != cur->class_of_device) return false;
+        old->class_of_device != cur->class_of_device ||
+        old->addr_type       != cur->addr_type       ||
+        old->did_source      != cur->did_source      ||
+        old->did_vendor      != cur->did_vendor      ||
+        old->did_product     != cur->did_product) return false;
     if (!FILLED_ONCE(old->tx_power,     cur->tx_power,     BT_TX_POWER_UNKNOWN) ||
         !FILLED_ONCE(old->flags,        cur->flags,        BT_FLAGS_NONE)       ||
         !FILLED_ONCE(old->company_id,   cur->company_id,   BT_COMPANY_NONE)     ||
-        !FILLED_ONCE(old->service_uuid, cur->service_uuid, BT_SERVICE_NONE))
+        !FILLED_ONCE(old->service_uuid, cur->service_uuid, BT_SERVICE_NONE)     ||
+        !FILLED_ONCE(old->uuid32,       cur->uuid32,       BT_UUID32_NONE)      ||
+        !FILLED_ONCE(old->svc_data_uuid, cur->svc_data_uuid, BT_SERVICE_NONE)   ||
+        !FILLED_ONCE(old->appearance,   cur->appearance,   BT_APPEARANCE_NONE)  ||
+        !FILLED_ONCE(old->adv_type,     cur->adv_type,     BT_ADV_TYPE_NONE))
         return false;
     if (old->name[0] != '\0' && strcmp(old->name, cur->name) != 0) return false;
     return true;

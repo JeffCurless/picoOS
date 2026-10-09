@@ -58,9 +58,36 @@ typedef enum {
 #define BT_FLAGS_NONE        ((uint8_t) 0xFFu)
 #define BT_COMPANY_NONE      ((uint16_t)0xFFFFu)
 #define BT_SERVICE_NONE      ((uint16_t)0x0000u)  /* 0x0000 is not a valid BT UUID */
+#define BT_UUID32_NONE       ((uint32_t)0u)
+#define BT_APPEARANCE_NONE   ((uint16_t)0x0000u)  /* 0x0000 is "Unknown"        */
+#define BT_ADDR_TYPE_NONE    ((uint8_t) 0xFFu)    /* Classic: no LE addr type   */
+#define BT_ADV_TYPE_NONE     ((uint8_t) 0xFFu)    /* Classic, or only a scan rsp */
+#define BT_DID_NONE          ((uint16_t)0x0000u)  /* did_source: no Device ID   */
 
+/* addr_type: the HCI LE address type.  A random address is one of three
+ * kinds, given by the top two bits of addr[5]: 11 static, 01 resolvable
+ * private (rotates, as phones do), 00 non-resolvable private. */
+#define BT_ADDR_PUBLIC       0u
+#define BT_ADDR_RANDOM       1u
+
+/* adv_type: the HCI LE advertising event type of the device's
+ * advertisements (scan responses do not set it). */
+#define BT_ADV_IND           0u     /* connectable, scannable             */
+#define BT_ADV_DIRECT_IND    1u     /* connectable, directed at one peer  */
+#define BT_ADV_SCAN_IND      2u     /* scannable, not connectable         */
+#define BT_ADV_NONCONN_IND   3u     /* neither: beacons                   */
+
+/* did_source: who assigned did_vendor (Device ID profile). */
+#define BT_DID_SRC_BT_SIG    1u     /* a Bluetooth SIG company ID         */
+#define BT_DID_SRC_USB_IF    2u     /* a USB vendor ID                    */
+
+#define BT_SVC_DATA_LEN     16      /* Service Data bytes kept after the UUID */
+#define BT_MFR_DATA_LEN     24      /* Manufacturer bytes kept after the ID:
+                                     * enough for a whole iBeacon (23)      */
+
+/* The byte arrays svc_data[] and mfr_data[] are valid up to their _len. */
 typedef struct {
-    uint8_t       addr[BT_ADDR_LEN];
+    uint8_t       addr[BT_ADDR_LEN];  /* LSB first: addr[5] is printed first */
     char          name[BT_NAME_LEN];
     int8_t        rssi;
     bt_devtype_t  type;
@@ -70,6 +97,21 @@ typedef struct {
     uint8_t       flags;            /* AD Flags byte (AD 0x01)                 */
     uint16_t      company_id;       /* Manufacturer company ID (AD 0xFF)       */
     uint16_t      service_uuid;     /* First 16-bit service UUID (AD 0x02/03)  */
+    uint8_t       addr_type;        /* BLE: BT_ADDR_PUBLIC / BT_ADDR_RANDOM    */
+    uint8_t       adv_type;         /* BLE: BT_ADV_* (HCI event type)          */
+    uint16_t      appearance;       /* GAP Appearance (AD 0x19)                */
+    uint32_t      uuid32;           /* First 32-bit service UUID, or the top
+                                     * 32 bits of a 128-bit one (AD 0x04-07)  */
+    uint16_t      pkt_count;        /* reports heard this window (or scan)     */
+    uint16_t      svc_data_uuid;    /* Service Data UUID (AD 0x16)             */
+    uint8_t       svc_data_len;
+    uint8_t       mfr_data_len;
+    uint8_t       svc_data[BT_SVC_DATA_LEN];
+    uint8_t       mfr_data[BT_MFR_DATA_LEN];  /* after the company ID       */
+    uint16_t      did_source;       /* Classic EIR Device ID: BT_DID_SRC_*     */
+    uint16_t      did_vendor;
+    uint16_t      did_product;
+    uint16_t      did_version;
 } bt_scan_result_t;
 
 void          bt_init(void);
@@ -165,6 +207,8 @@ typedef struct { uint8_t *data; uint8_t len; uint8_t pos; } ad_context_t;
 
 static inline bool btstack_cyw43_init(void *ctx)   { (void)ctx; return true; }
 static inline int  hci_power_control(int m)        { (void)m; return 0; }
+#define INQUIRY_MODE_RSSI_AND_EIR 2
+static inline void hci_set_inquiry_mode(int m)     { (void)m; }
 static inline void hci_add_event_handler(btstack_packet_callback_registration_t *r) { (void)r; }
 static inline int  gap_inquiry_start(uint8_t d)    { (void)d; return 0; }
 static inline int  gap_inquiry_stop(void)          { return 0; }
@@ -198,6 +242,14 @@ static inline bool gap_event_inquiry_result_get_rssi_available(const uint8_t *p)
 static inline int8_t gap_event_inquiry_result_get_rssi(const uint8_t *p) { (void)p; return 0; }
 static inline uint8_t gap_event_inquiry_result_get_page_scan_repetition_mode(const uint8_t *p) { (void)p; return 0; }
 static inline uint16_t gap_event_inquiry_result_get_clock_offset(const uint8_t *p) { (void)p; return 0; }
+static inline uint8_t gap_event_inquiry_result_get_device_id_available(const uint8_t *p) { (void)p; return 0; }
+static inline uint16_t gap_event_inquiry_result_get_device_id_vendor_id_source(const uint8_t *p) { (void)p; return 0; }
+static inline uint16_t gap_event_inquiry_result_get_device_id_vendor_id(const uint8_t *p) { (void)p; return 0; }
+static inline uint16_t gap_event_inquiry_result_get_device_id_product_id(const uint8_t *p) { (void)p; return 0; }
+static inline uint16_t gap_event_inquiry_result_get_device_id_version(const uint8_t *p) { (void)p; return 0; }
+static inline uint8_t gap_event_inquiry_result_get_name_available(const uint8_t *p) { (void)p; return 0; }
+static inline uint8_t gap_event_inquiry_result_get_name_len(const uint8_t *p) { (void)p; return 0; }
+static inline const uint8_t *gap_event_inquiry_result_get_name(const uint8_t *p) { (void)p; return (const uint8_t *)""; }
 static inline void hci_event_remote_name_request_complete_get_bd_addr(const uint8_t *p, bd_addr_t a)
     { (void)p; (void)a; }
 static inline const uint8_t *hci_event_remote_name_request_complete_get_remote_name(const uint8_t *p) { (void)p; return (const uint8_t *)""; }
@@ -207,6 +259,7 @@ static inline void gap_event_advertising_report_get_address(const uint8_t *p, bd
     { (void)p; (void)a; }
 static inline int8_t gap_event_advertising_report_get_rssi(const uint8_t *p) { (void)p; return 0; }
 static inline uint8_t gap_event_advertising_report_get_advertising_event_type(const uint8_t *p) { (void)p; return 0; }
+static inline uint8_t gap_event_advertising_report_get_address_type(const uint8_t *p) { (void)p; return 0; }
 static inline uint8_t gap_event_advertising_report_get_data_length(const uint8_t *p) { (void)p; return 0; }
 static inline const uint8_t *gap_event_advertising_report_get_data(const uint8_t *p) { (void)p; return NULL; }
 
