@@ -2,8 +2,8 @@
 # Version
 # ---------------------------------------------------------------------------
 set(PICOOS_VERSION_MAJOR 0)
-set(PICOOS_VERSION_MINOR 3)
-set(PICOOS_VERSION_EDIT  9)
+set(PICOOS_VERSION_MINOR 4)
+set(PICOOS_VERSION_EDIT  0)
 
 message(STATUS "picoOS version        : ${PICOOS_VERSION_MAJOR}.${PICOOS_VERSION_MINOR}.${PICOOS_VERSION_EDIT}")
 
