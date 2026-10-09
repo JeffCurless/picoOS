@@ -1052,6 +1052,11 @@ Only the first 255 bytes of `config.txt` are read, only the first `AUTORUN=` lin
 used, and the value must match the app name exactly (no trailing spaces).  See
 [application.md](application.md#launching-an-app-automatically) for details.
 
+Apps can read their own keys from `config.txt` with `vfs_open` / `vfs_read`.
+`cray-one` reads `SSID`, `PASSWORD`, `SSIDALT`, `PASSWORDALT`, `NODEID` and
+`MAXNODES`.  The full list of keys is in
+[application.md](application.md#configtxt-reference).
+
 ---
 
 ## 9. Memory

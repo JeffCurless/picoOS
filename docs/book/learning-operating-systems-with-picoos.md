@@ -1463,6 +1463,8 @@ The built-in commands are a table of these. Other modules add their own at start
 
 When the shell starts it reads `config.txt` from the filesystem (only its first 255 bytes). `AUTORUN=<app>` starts an app at every boot, with a PID from 50. On display builds, `BUTTONA=`, `BUTTONB=`, `BUTTONX=` and `BUTTONY=` bind each Display Pack button to an app, which starts with a PID from 200. This is how a picoOS board can run a program on its own, with no computer attached.
 
+Apps can keep their own settings in the same file. The `cray-one` demo reads `SSID=` and `PASSWORD=` (and a fallback `SSIDALT=` / `PASSWORDALT=`) to join WiFi, and `NODEID=` and `MAXNODES=` to find its place in the cluster. Each reader scans the file for its own keys and skips the rest. `docs/application.md` lists every key.
+
 <a id="s-13-5"></a>
 ### 13.5 Try this
 

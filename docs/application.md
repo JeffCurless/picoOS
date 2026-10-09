@@ -559,6 +559,9 @@ launch apps:
 | `AUTORUN=<app>` | Starts `<app>` at boot | all |
 | `BUTTONA=<app>`, `BUTTONB=<app>`, `BUTTONX=<app>`, `BUTTONY=<app>` | Starts `<app>` when that Display Pack button is pressed | display builds |
 
+Apps can store their own settings in the same file. See
+[config.txt reference](#configtxt-reference) for every key.
+
 `<app>` is the name from `app_table[]`, exactly as you would type it after
 `run`.
 
@@ -630,6 +633,60 @@ At boot the shell prints `[shell] btn A -> pi` for each binding and starts a
 `btn-mon` thread (priority 3) that polls the buttons every 100 ms.  A press
 starts the app with PID 200 and up; pressing again while that app is still
 running is ignored.  App names for buttons are limited to 15 characters.
+
+---
+
+## config.txt reference
+
+`config.txt` is a plain text file in the picoOS filesystem, one `KEY=value`
+per line.  Several readers parse it independently: the shell at boot, and some
+apps when they start.  This table lists every key the firmware reads:
+
+| Key | Read by | Value | Default if absent |
+|-----|---------|-------|-------------------|
+| `AUTORUN` | shell, at boot (all builds) | App name from `app_table[]`, up to 31 chars | No app is started |
+| `BUTTONA`, `BUTTONB`, `BUTTONX`, `BUTTONY` | shell, at boot (display builds) | App name, up to 15 chars | Button is unbound; `btn-mon` thread is not created if no button is bound |
+| `SSID` | `cray-one` (WiFi + display builds) | WiFi network name, up to 63 chars | **Required** — `cray-one` exits with `SSID= not found` |
+| `PASSWORD` | `cray-one` | WiFi passphrase for `SSID`, up to 63 chars | Open network (no password) |
+| `SSIDALT` | `cray-one` | Fallback network, tried if connecting to `SSID` fails | No fallback |
+| `PASSWORDALT` | `cray-one` | Passphrase for `SSIDALT` | Open network |
+| `NODEID` | `cray-one` | This board's node number, `0` … `MAXNODES-1` | `0` |
+| `MAXNODES` | `cray-one` | Number of boards in the cluster, `1` … `16` | `1` |
+
+Example for one node of a three-board `cray-one` cluster that starts the
+demo at boot and binds button A to `pi`:
+
+```
+AUTORUN=cray-one
+BUTTONA=pi
+SSID=MyNetwork
+PASSWORD=secret123
+SSIDALT=MyPhoneHotspot
+PASSWORDALT=hotspot-pass
+NODEID=0
+MAXNODES=3
+```
+
+Give each board a different `NODEID` and the same `MAXNODES`.
+
+Parsing rules (the same for every reader):
+
+- **Only the first 255 bytes** of the file are read.  A line that starts past
+  byte 255, or is cut off there, is ignored or truncated.
+- **Keys are case-sensitive** and must start in column 1.  There is no
+  whitespace trimming: `SSID = Net` is not recognised, and `PASSWORD=abc `
+  sets a four-character password ending in a space.
+- **Lines may end in `\n` or `\r\n`.**  Blank lines are skipped.
+- **Unknown lines are ignored**, so a line such as `# comment` is harmless,
+  and each reader skips the other readers' keys.
+- **Duplicates:** the shell uses the first `AUTORUN=`; `cray-one` uses the
+  *last* value of each of its keys.
+- **Numbers** (`NODEID`, `MAXNODES`) are read as leading decimal digits;
+  anything that isn't a digit stops the number, so `NODEID=x` reads as `0`.
+- Values longer than the limit are truncated silently.
+
+`src/apps/wifi_test.c` also reads `SSID` and `PASSWORD`, but it is not part of
+the build.  If you add an app that reads its own keys, add them to this table.
 
 ---
 
