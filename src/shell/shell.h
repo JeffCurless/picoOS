@@ -60,8 +60,10 @@ int shell_register_cmd(const shell_cmd_t *cmd);
 
 /*
  * shell_print — printf-style formatted output to the USB console.
+ *               The format attribute lets the compiler check the arguments
+ *               against fmt, exactly as it does for printf.
  */
-void shell_print(const char *fmt, ...);
+void shell_print(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
 /*
  * shell_println — print a string followed by CRLF.

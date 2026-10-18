@@ -114,6 +114,31 @@ The repository root has a `build` script (a file, not a directory) that configur
 ```
 
 It uses `$PICO_SDK_PATH`, or `$HOME/workspace/pico-sdk` if that is not set.
+The script stops with `BUILD FAILED: <board> / <variant>` and a non-zero exit
+status at the first variant that fails, so the images in `kits/` are always
+from the current run up to that point.
+
+### Warnings are errors
+
+Every picoOS `.c` file is compiled with a broad warning set and `-Werror`
+(`PICOOS_WARNINGS` in `src/CMakeLists.txt`): `-Wall -Wextra -Wshadow -Wundef
+-Wpointer-arith -Wwrite-strings -Wformat=2 -Wformat-truncation=2
+-Wimplicit-fallthrough -Wnull-dereference -Wdouble-promotion -Wredundant-decls
+-Wstrict-prototypes -Wmissing-prototypes -Wold-style-definition
+-Wnested-externs`. The Pico SDK, lwIP, CYW43 and BTstack sources are not built
+with these flags. The host tests use the same set (`TEST_FLAGS` in
+`tests/CMakeLists.txt`).
+
+Two things trip people up most:
+
+- On ARM `uint32_t` is `unsigned long`, so `printf("%u", x)` with a `uint32_t`
+  is a warning. Cast it: `printf("%u", (unsigned)x)`. `shell_print()` is
+  checked the same way as `printf`.
+- A non-`static` function needs a prototype in a header the `.c` file
+  includes (`-Wmissing-prototypes`).
+
+To keep the warnings but stop them failing the build while you experiment,
+configure with `-DPICOOS_WERROR=OFF`.
 
 ### Configure and build one board by hand
 

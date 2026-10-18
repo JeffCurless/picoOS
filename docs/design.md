@@ -201,8 +201,8 @@ Built-in commands:
 * `help` — list registered commands
 * `ps` — show processes
 * `threads` — show all threads with state, core affinity, CPU time, stack canary
-* `kill <tid>` — terminate a thread
-* `killproc <pid>` — terminate all threads in a process
+* `kill <tid>` — terminate a thread (refused for threads of PIDs 1–9, the kernel range)
+* `killproc <pid>` — terminate all threads in a process (refused for PIDs 1–9)
 * `mem` — heap usage and stats
 * `ls` — list filesystem files
 * `cat <file>` — print a file

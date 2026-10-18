@@ -367,7 +367,7 @@ static void __attribute__((noreturn)) stack_overflow_panic(const tcb_t *t)
            "System halted. Reboot required.\r\n\r\n",
            (unsigned)t->tid, t->name,
            (unsigned)(uintptr_t)t->stack_base,
-           *(const uint32_t *)t->stack_base,
+           (unsigned)*(const uint32_t *)t->stack_base,
            STACK_CANARY);
 
     /* Pump USB for ~0.5 s so the message reaches the host terminal. */

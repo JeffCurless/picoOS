@@ -98,7 +98,7 @@ static int cmd_ps(int argc, char **argv)
         pcb_t *p = task_get_process_slot(i);
         if (p == NULL) { continue; }
         shell_print("%-4u %-16s %-8u %s\r\n",
-                    p->pid, p->name, p->thread_count,
+                    (unsigned)p->pid, p->name, (unsigned)p->thread_count,
                     p->alive ? "yes" : "no");
     }
     return 0;
@@ -164,17 +164,17 @@ static int cmd_threads(int argc, char **argv)
         if (t == NULL) { continue; }
         uint32_t *canary_ptr = (uint32_t *)t->stack_base;
         const char *stack_str = (*canary_ptr == STACK_CANARY) ? "OK" : "OVERFLOW";
-        char time_buf[12];
+        char time_buf[16];   /* longest: "213503982.3d" */
         format_cpu_time(t->cpu_time_us, time_buf, sizeof(time_buf));
         const char *core_str = (t->affinity == THREAD_AFFINITY_ANY) ? "*"
                              : (t->affinity == THREAD_AFFINITY_C0)  ? "0"
                              :                                         "1";
         shell_print("%-4u %-4u %-4u %-5s %-9s %-7s %-7u %-16s %s\r\n",
-                    t->tid, t->pid, (unsigned)t->priority,
+                    (unsigned)t->tid, (unsigned)t->pid, (unsigned)t->priority,
                     core_str,
                     state_name(t->state),
                     time_buf,
-                    t->stack_size,
+                    (unsigned)t->stack_size,
                     t->name,
                     stack_str);
     }
@@ -191,7 +191,12 @@ static int cmd_kill(int argc, char **argv)
     uint32_t tid = (uint32_t)strtol(argv[1], NULL, 10);
     tcb_t *t = task_find_thread(tid);
     if (t == NULL) {
-        shell_print("kill: thread %u not found\r\n", tid);
+        shell_print("kill: thread %u not found\r\n", (unsigned)tid);
+        return -1;
+    }
+    if (PID_IS_KERNEL(t->pid)) {
+        shell_print("kill: thread %u (%s) belongs to kernel process %u\r\n",
+                    (unsigned)tid, t->name, (unsigned)t->pid);
         return -1;
     }
     /* Copy the name first: the TCB may be freed (and zeroed) right away. */
@@ -200,7 +205,7 @@ static int cmd_kill(int argc, char **argv)
     bool self = (t == (tcb_t *)CURRENT_TCB);
 
     task_kill_thread(t);
-    shell_print("kill: thread %u (%s) killed\r\n", tid, name);
+    shell_print("kill: thread %u (%s) killed\r\n", (unsigned)tid, name);
     if (self) {
         sched_yield();   /* reaped by the scheduler; does not return */
     }
@@ -215,12 +220,20 @@ static int cmd_killproc(int argc, char **argv)
         return -1;
     }
     uint32_t pid = (uint32_t)strtol(argv[1], NULL, 10);
-    pcb_t *p = task_find_process(pid);
-    if (p == NULL) {
-        shell_print("killproc: process %u not found\r\n", pid);
+    if (PID_IS_KERNEL(pid)) {
+        /* Killing the kernel process would take both idle threads and
+         * wifi-poll with it; killing the shell leaves no way back. */
+        shell_print("killproc: PIDs %u-%u are kernel processes\r\n",
+                    PID_KERNEL_MIN, PID_KERNEL_MAX);
         return -1;
     }
-    shell_print("killproc: killing process %u (%s)\r\n", pid, p->name);
+    pcb_t *p = task_find_process(pid);
+    if (p == NULL) {
+        shell_print("killproc: process %u not found\r\n", (unsigned)pid);
+        return -1;
+    }
+    shell_print("killproc: killing process %u (%s)\r\n",
+                (unsigned)pid, p->name);
     task_kill_process(p);
     if (CURRENT_TCB->state == THREAD_ZOMBIE) {
         sched_yield();   /* killed our own process: reaped, does not return */
@@ -237,9 +250,9 @@ static int cmd_mem(int argc, char **argv)
     kmem_stats(&used, &free_bytes, &largest);
 
     shell_print("Kernel heap:\r\n");
-    shell_print("  Used        : %u bytes\r\n",  used);
-    shell_print("  Free        : %u bytes\r\n",  free_bytes);
-    shell_print("  Largest free: %u bytes\r\n",  largest);
+    shell_print("  Used        : %u bytes\r\n",  (unsigned)used);
+    shell_print("  Free        : %u bytes\r\n",  (unsigned)free_bytes);
+    shell_print("  Largest free: %u bytes\r\n",  (unsigned)largest);
 
     /* Stack canary check for all threads. */
     shell_println("Thread stack canaries:");
@@ -249,8 +262,8 @@ static int cmd_mem(int argc, char **argv)
         uint32_t *canary_ptr = (uint32_t *)t->stack_base;
         bool ok = (*canary_ptr == STACK_CANARY);
         shell_print("  TID %-3u %-14s  canary=%08X  %s\r\n",
-                    t->tid, t->name,
-                    *canary_ptr,
+                    (unsigned)t->tid, t->name,
+                    (unsigned)*canary_ptr,
                     ok ? "OK" : "*** OVERFLOWED ***");
     }
     return 0;
@@ -259,7 +272,7 @@ static int cmd_mem(int argc, char **argv)
 /* --- ls ------------------------------------------------------------------ */
 static int ls_callback(const fs_entry_t *entry)
 {
-    shell_print("  %-16s  %u bytes\r\n", entry->name, entry->size);
+    shell_print("  %-16s  %u bytes\r\n", entry->name, (unsigned)entry->size);
     return 0;
 }
 
@@ -588,9 +601,8 @@ static int cmd_run(int argc, char **argv)
     const char *appname = argv[1];
     for (int i = 0; i < app_table_size; i++) {
         if (strcmp(app_table[i].name, appname) == 0) {
-            /* Assign a new PID from the 100+ range for user apps. */
-            static uint32_t user_pid = 100u;
-            uint32_t pid = user_pid++;
+            /* PIDs 100..199 are for apps started with 'run'. */
+            uint32_t pid = task_alloc_pid(PID_RANGE_RUN);
 
             /* If an extra argument was supplied, copy it to the kernel heap
              * and pass the pointer as the thread's arg.  The launched app
@@ -623,7 +635,7 @@ static int cmd_run(int argc, char **argv)
                 return -1;
             }
             shell_print("run: started '%s' as PID %u TID %u\r\n",
-                        appname, pid, t->tid);
+                        appname, (unsigned)pid, (unsigned)t->tid);
             return 0;
         }
     }
@@ -650,7 +662,8 @@ static int cmd_info(int argc, char **argv)
     {
         uint32_t spin_used, spin_total;
         sync_spinlock_report(&spin_used, &spin_total);
-        shell_print("Spinlocks : %u/%u claim-free HW slots in use\r\n", spin_used, spin_total);
+        shell_print("Spinlocks : %u/%u claim-free HW slots in use\r\n",
+                    (unsigned)spin_used, (unsigned)spin_total);
     }
 #ifdef PICOOS_WIFI_ENABLE
     shell_print("WiFi      : CYW43 (enabled)\r\n");
@@ -673,8 +686,8 @@ static const shell_cmd_t builtin_cmds[] = {
     { "help",    "List all commands",                          cmd_help    },
     { "ps",      "Show processes",                             cmd_ps      },
     { "threads", "Show all threads with state and CPU time",   cmd_threads },
-    { "kill",    "kill <tid>  — kill a thread",                cmd_kill    },
-    { "killproc","killproc <pid>  — kill all threads in a process", cmd_killproc },
+    { "kill",    "kill <tid>  — kill a thread (not one in PIDs 1-9)", cmd_kill },
+    { "killproc","killproc <pid>  — kill all threads in a process (not PIDs 1-9)", cmd_killproc },
     { "mem",     "Show heap usage and stack canary status",    cmd_mem     },
     { "ls",      "List filesystem contents",                   cmd_ls      },
     { "cat",     "cat <file>  — print file contents",          cmd_cat     },
@@ -781,9 +794,8 @@ static void btn_monitor_thread(void *arg)
             for (int j = 0; j < app_table_size; j++) {
                 if (strcmp(app_table[j].name, btn_bindings[i].appname) != 0)
                     continue;
-                static uint32_t btn_pid = 200u;
                 pcb_t *proc = task_create_process(btn_bindings[i].appname,
-                                                   btn_pid++);
+                                                   task_alloc_pid(PID_RANGE_BUTTON));
                 if (!proc) {
                     printf("[shell] btn: process pool full\r\n");
                     break;
@@ -798,7 +810,7 @@ static void btn_monitor_thread(void *arg)
                     break;
                 }
                 printf("[shell] btn: started '%s' PID %u TID %u\r\n",
-                       btn_bindings[i].appname, proc->pid, t->tid);
+                       btn_bindings[i].appname, (unsigned)proc->pid, (unsigned)t->tid);
                 break;
             }
         }
@@ -896,8 +908,8 @@ static void shell_autorun_init(void)
     for (int i = 0; i < app_table_size; i++) {
         if (strcmp(app_table[i].name, appname) != 0) continue;
 
-        static uint32_t autorun_pid = 50u;
-        pcb_t *proc = task_create_process(appname, autorun_pid++);
+        pcb_t *proc = task_create_process(appname,
+                                          task_alloc_pid(PID_RANGE_AUTORUN));
         if (!proc) {
             printf("[shell] autorun: process pool full\r\n");
             return;
@@ -912,7 +924,7 @@ static void shell_autorun_init(void)
             return;
         }
         printf("[shell] autorun: started '%s' PID %u TID %u\r\n",
-               appname, proc->pid, t->tid);
+               appname, (unsigned)proc->pid, (unsigned)t->tid);
         return;
     }
 

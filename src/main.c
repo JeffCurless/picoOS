@@ -183,7 +183,7 @@ int main(void)
     /* ------------------------------------------------------------------
      * 5. Create the kernel process (PID 1)
      * ------------------------------------------------------------------ */
-    pcb_t *kernel_proc = task_create_process("kernel", 1u);
+    pcb_t *kernel_proc = task_create_process("kernel", PID_KERNEL);
 
     /* ------------------------------------------------------------------
      * 5a. WiFi module init (pico_w / pico2_w only)
@@ -235,7 +235,7 @@ int main(void)
     /* ------------------------------------------------------------------
      * 7. Shell thread — priority 2, service stack
      * ------------------------------------------------------------------ */
-    pcb_t *shell_proc = task_create_process("shell", 2u);
+    pcb_t *shell_proc = task_create_process("shell", PID_SHELL);
     task_create_thread(shell_proc, "shell",
                        shell_thread_entry, NULL,
                        2u, DEFAULT_STACK_SIZE);
@@ -249,7 +249,7 @@ int main(void)
         tcb_t *t = task_get_thread_slot(i);
         if (t == NULL) { continue; }
         printf("  TID %u  PID %u  pri %u  %s\r\n",
-               t->tid, t->pid, (unsigned)t->priority, t->name);
+               (unsigned)t->tid, (unsigned)t->pid, (unsigned)t->priority, t->name);
     }
     printf("\r\nStarting scheduler...\r\n\r\n");
 

@@ -25,7 +25,7 @@
 #include "../shell/shell.h"
 
 #if defined(PICOOS_WIFI_ENABLE) && defined(PICOOS_DISPLAY_ENABLE)
-extern void cray_one(void *arg);
+#include "cray_one.h"
 #endif
 
 /* =========================================================================
@@ -152,7 +152,8 @@ void demo_sensor(void *arg)
         uint32_t integer_part  = temp_tenths / 10u;
         uint32_t decimal_part  = temp_tenths % 10u;
 
-        shell_print("[sensor] temp=%u.%u C\r\n", integer_part, decimal_part);
+        shell_print("[sensor] temp=%u.%u C\r\n",
+                    (unsigned)integer_part, (unsigned)decimal_part);
 
         tick++;
     }

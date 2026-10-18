@@ -238,7 +238,7 @@ From the picoOS directory:
 ./build             # builds all 12 variants
 ```
 
-`build` is a script, not a folder. Never delete it. Each board is compiled in its own `build_<board>_<variant>/` directory, and the finished images are copied to `kits/`. A file name such as `picoos_D-v0.3.9.uf2` means: pico board, Display Pack build (`_D`), version 0.3.9. `_D2` means Display Pack 2; no suffix means no display.
+`build` is a script, not a folder. Never delete it. picoOS treats every compiler warning in its own code as an error, so a build either finishes cleanly or stops at the first variant with a problem and prints `BUILD FAILED`. Each board is compiled in its own `build_<board>_<variant>/` directory, and the finished images are copied to `kits/`. A file name such as `picoos_D-v0.3.9.uf2` means: pico board, Display Pack build (`_D`), version 0.3.9. `_D2` means Display Pack 2; no suffix means no display.
 
 <a id="s-1-4"></a>
 ### 1.4 Flash
@@ -502,11 +502,15 @@ picoOS hands out PIDs by range, so you can tell where a process came from by its
 
 | PID | Who |
 | --- | --- |
-| 1 | the kernel process: idle threads, `wifi-poll` |
+| 1 | the kernel process: idle threads, `wifi-poll`, `btn-mon` |
 | 2 | the shell |
-| 50+ | an app started by `AUTORUN=` in `config.txt` |
-| 100+ | an app started with `run` |
-| 200+ | an app started by a Display Pack button |
+| 3–9 | reserved for the kernel |
+| 10–49 | a process made by the `SYS_SPAWN` syscall |
+| 50–99 | an app started by `AUTORUN=` in `config.txt` |
+| 100–199 | an app started with `run` |
+| 200–299 | an app started by a Display Pack button |
+
+`task_alloc_pid()` in `src/kernel/task.c` picks the next PID in a range that no live process is using, and wraps back to the start at the top, so the ranges never run into each other. PIDs 1–9 are the **kernel range**: `killproc` refuses them, and `kill` refuses any thread that belongs to them. Without that check, `killproc 1` would remove both idle threads, and a core with nothing else to run would have no thread at all.
 
 <a id="s-4-3"></a>
 ### 4.3 Fixed tables instead of malloc
@@ -554,7 +558,7 @@ A thread cannot free its own stack while it is still standing on it. So a finish
 ### 4.6 Try this
 
 - `pico> run sensor`, then `pico> threads`. Find its TID, PID, priority and state.
-- `pico> kill <tid>` removes one thread; `pico> killproc <pid>` removes a whole process.
+- `pico> kill <tid>` removes one thread; `pico> killproc <pid>` removes a whole process. Try `pico> killproc 1` and `pico> kill 1` too: both are refused, because PID 1 is in the kernel range.
 - The `threads` command has a `CANARY` column. Find it in `cmd_threads()` in `src/shell/shell.c` and work out what it prints.
 
 <a id="s-4-7"></a>
@@ -1236,7 +1240,7 @@ In practice apps also call kernel functions directly: `mqueue_send()`, `kmutex_l
 <a id="s-10-5"></a>
 ### 10.5 Try this
 
-- Read the `SYS_PS` and `SYS_KILL` cases. What would stop an app from killing the shell?
+- Read the `SYS_PS` and `SYS_KILL` cases. `SYS_KILL` refuses threads of PIDs 1–9, so an app cannot kill the shell that way. What could the app call instead to get around the check, and what would it take to close that path (Chapter 2)?
 - Write an app that calls `sys_getpid()`, `sys_gettid()` and `sys_getcore()` and prints them. Run it several times.
 
 <a id="s-10-6"></a>
@@ -1492,9 +1496,19 @@ A picoOS application is one C function, `void my_app(void *arg)`, registered in 
 <a id="s-14-2"></a>
 ### 14.2 Step 1: write it
 
-Create `src/apps/ticker.c`. It starts a worker thread pinned to core 1, and the two talk through a message queue:
+Create `src/apps/ticker.h` with the entry point's prototype. picoOS builds with `-Wmissing-prototypes -Werror`, so a function that other files call must be declared in a header its own file includes:
 
 ```c
+#ifndef APPS_TICKER_H
+#define APPS_TICKER_H
+void ticker(void *arg);
+#endif
+```
+
+Then create `src/apps/ticker.c`. It starts a worker thread pinned to core 1, and the two talk through a message queue:
+
+```c
+#include "ticker.h"
 #include "../kernel/sync.h"
 #include "../kernel/syscall.h"
 #include "../kernel/task.h"
@@ -1545,7 +1559,7 @@ This is the pattern `docs/application.md` recommends: initialise shared objects 
 Add a line to `app_table[]` in `src/apps/demo.c`:
 
 ```c
-extern void ticker(void *arg);
+#include "ticker.h"
 
 const app_entry_t app_table[] = {
     { "producer", demo_producer, 4u },
@@ -1573,6 +1587,8 @@ run: started 'ticker' as PID 100 TID 4
 | --- | --- |
 | `!!! STACK OVERFLOW !!!` | a large local array or deep recursion; use `static` or `kmalloc()` |
 | Shell stops responding | your threads never sleep, run at priority 0 or 1 (more urgent than the shell), and keep both cores busy |
+| build stops: `no previous prototype for 'ticker'` | `ticker.c` does not include `ticker.h`; every warning is an error |
+| build stops: `format '%u' expects … 'long unsigned int'` | a `uint32_t` passed to `%u`; on ARM it is `unsigned long`, so cast it: `(unsigned)x` |
 | `run: cannot create thread (pool full)` | 16 threads already exist, or the heap has no 2 KB block left |
 | Heap shrinks every run | `arg` was not freed, or a buffer from `kmalloc()` was not |
 | Hang forever on a queue | the other side never started, or re-initialised the queue (Chapter 9) |
@@ -1873,7 +1889,7 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 
 - kernel process (PID 1) — [3.2](#s-3-2), [4.2](#s-4-2), [15.1](#s-15-1)
 - `kfree()` — [7.5](#s-7-5), [7.8](#s-7-8), [14.1](#s-14-1), [14.2](#s-14-2), [16.2](#s-16-2), [A.3](#s-a-3)
-- `kill`, `killproc` — [4.2](#s-4-2), [4.5](#s-4-5), [4.6](#s-4-6), [4.7](#s-4-7), [5.7](#s-5-7), [7.9](#s-7-9), [8.11](#s-8-11), [13.3](#s-13-3), [16.2](#s-16-2)
+- `kill`, `killproc` — [4.2](#s-4-2), [4.5](#s-4-5), [4.6](#s-4-6), [4.7](#s-4-7), [5.7](#s-5-7), [7.9](#s-7-9), [8.11](#s-8-11), [10.5](#s-10-5), [13.3](#s-13-3), [16.2](#s-16-2)
 - `kmalloc()` — [P.4](#s-p-4), [3.2](#s-3-2), [7.3](#s-7-3), [7.5](#s-7-5), [7.8](#s-7-8), [14.1](#s-14-1), [14.5](#s-14-5), [A.3](#s-a-3)
 - `kmutex_t`, `kmutex_lock()` — [8.5](#s-8-5), [8.11](#s-8-11), [8.12](#s-8-12), [8.13](#s-8-13), [10.4](#s-10-4), [12.6](#s-12-6), [15.4](#s-15-4), [16.2](#s-16-2), [A.3](#s-a-3)
 

@@ -57,16 +57,26 @@ build_variant() {
     cp -f "$dir"/src/*.uf2 kits/
 }
 
+# Stop at the first variant that fails (including on a warning, which is an
+# error in picoOS sources) so a stale kits/*.uf2 is never mistaken for a
+# fresh build.
+fail() {
+    echo "" >&2
+    echo "BUILD FAILED: $1" >&2
+    exit 1
+}
+
 for board in $BOARDS; do
-    build_variant "$board" ND  "-DPICOOS_DISPLAY_ENABLE=OFF"
-    build_variant "$board" D   "-DPICOOS_DISPLAY_ENABLE=ON  -DPICOOS_DISPLAY_PACK2=OFF"
-    build_variant "$board" D2  "-DPICOOS_DISPLAY_ENABLE=ON  -DPICOOS_DISPLAY_PACK2=ON"
+    build_variant "$board" ND  "-DPICOOS_DISPLAY_ENABLE=OFF" || fail "$board / ND"
+    build_variant "$board" D   "-DPICOOS_DISPLAY_ENABLE=ON  -DPICOOS_DISPLAY_PACK2=OFF" || fail "$board / D"
+    build_variant "$board" D2  "-DPICOOS_DISPLAY_ENABLE=ON  -DPICOOS_DISPLAY_PACK2=ON" || fail "$board / D2"
 done
 
 # Fault-injection test images (no display) — TEST ONLY, see docs/testing.md.
 if [ "${1:-all}" = "wifi" ]; then
     for board in $BOARDS; do
-        build_variant "$board" INJ "-DPICOOS_DISPLAY_ENABLE=OFF -DPICOOS_SCAN_RACE_INJECT=ON"
+        build_variant "$board" INJ "-DPICOOS_DISPLAY_ENABLE=OFF -DPICOOS_SCAN_RACE_INJECT=ON" \
+            || fail "$board / INJ"
     done
 fi
 

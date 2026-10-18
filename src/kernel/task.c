@@ -54,6 +54,21 @@ static bool pcb_used[MAX_PROCESSES];
 /* monotonically increasing ID counters */
 static uint32_t next_tid = 1;
 
+/* PID ranges handed out by task_alloc_pid(), indexed by pid_range_t.
+ * next is the PID to try first; it starts at base. */
+typedef struct {
+    uint32_t base;
+    uint32_t limit;   /* inclusive */
+    uint32_t next;
+} pid_range_info_t;
+
+static pid_range_info_t pid_ranges[PID_RANGE_COUNT] = {
+    [PID_RANGE_SPAWN]   = {  10u,  49u,  10u },
+    [PID_RANGE_AUTORUN] = {  50u,  99u,  50u },
+    [PID_RANGE_RUN]     = { 100u, 199u, 100u },
+    [PID_RANGE_BUTTON]  = { 200u, 299u, 200u },
+};
+
 /* Per-core current TCB: index 0 = Core 0, index 1 = Core 1. */
 tcb_t * volatile current_tcb[2] = {NULL, NULL};
 
@@ -80,6 +95,9 @@ void task_init(void)
     memset(pcb_used, 0, sizeof(pcb_used));
 
     next_tid = 1;
+    for (int i = 0; i < PID_RANGE_COUNT; i++) {
+        pid_ranges[i].next = pid_ranges[i].base;
+    }
     current_tcb[0] = current_tcb[1] = NULL;
 }
 
@@ -251,6 +269,13 @@ static void thread_exit(void)
  * ------------------------------------------------------------------------- */
 pcb_t *task_create_process(const char *name, uint32_t pid)
 {
+    /* PID 0 means "none" (parent_pid) and is what task_alloc_pid() returns
+     * when a range is full; a duplicate would make task_find_process()
+     * ambiguous. */
+    if (pid == 0u || task_find_process(pid) != NULL) {
+        return NULL;
+    }
+
     /* Find a free PCB slot. */
     int slot = -1;
     for (int i = 0; i < MAX_PROCESSES; i++) {
@@ -270,7 +295,7 @@ pcb_t *task_create_process(const char *name, uint32_t pid)
     p->parent_pid   = 0;
     p->thread_count = 0;
 
-    if (pid == 1u) {
+    if (pid == PID_KERNEL) {
         s_kernel_proc = p;
     }
     p->heap_base    = NULL;
@@ -295,6 +320,29 @@ pcb_t *task_create_process(const char *name, uint32_t pid)
     }
 
     return p;
+}
+
+/* -------------------------------------------------------------------------
+ * task_alloc_pid
+ * ------------------------------------------------------------------------- */
+uint32_t task_alloc_pid(pid_range_t range)
+{
+    if ((unsigned)range >= PID_RANGE_COUNT) {
+        return 0u;
+    }
+    pid_range_info_t *r = &pid_ranges[range];
+    uint32_t span = r->limit - r->base + 1u;
+    uint32_t pid  = r->next;
+
+    for (uint32_t i = 0; i < span; i++) {
+        uint32_t candidate = pid;
+        pid = (pid == r->limit) ? r->base : pid + 1u;
+        if (task_find_process(candidate) == NULL) {
+            r->next = pid;
+            return candidate;
+        }
+    }
+    return 0u;   /* every PID in the range is live */
 }
 
 /* -------------------------------------------------------------------------

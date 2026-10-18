@@ -113,7 +113,7 @@ typedef struct {
     volatile uint32_t ICSR;     /* Interrupt Control and State Register */
 } SCB_Type;
 
-static SCB_Type scb_stub_instance;
+static SCB_Type scb_stub_instance __attribute__((unused));
 #define SCB                    (&scb_stub_instance)
 #define SCB_ICSR_PENDSVSET_Msk (1u << 28)
 
@@ -249,7 +249,7 @@ static inline bool    gpio_get(uint32_t gpio)                         { (void)gp
 
 /* SPI stubs --------------------------------------------------------------- */
 typedef uint8_t spi_inst_t;
-static spi_inst_t spi0_inst;
+static spi_inst_t spi0_inst __attribute__((unused));
 #define spi0 (&spi0_inst)
 static inline uint     spi_init(spi_inst_t *s, uint baud)                          { (void)s;(void)baud; return 0; }
 static inline void     spi_set_format(spi_inst_t *s,uint d,uint cp,uint ch,uint o) { (void)s;(void)d;(void)cp;(void)ch;(void)o; }

@@ -286,7 +286,7 @@ void fs_init(void)
         /* Valid filesystem found — load the metadata into RAM. */
         memcpy(superblock_ram, flash_sb, sizeof(*superblock_ram));
         printf("[fs] mounted: %u file(s) found\r\n",
-               superblock_ram->file_count);
+               (unsigned)superblock_ram->file_count);
     } else {
         /* No valid filesystem — create a fresh one. */
         printf("[fs] no valid FS found, formatting flash...\r\n");

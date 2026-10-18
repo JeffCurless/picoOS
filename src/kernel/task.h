@@ -56,6 +56,32 @@
 #define THREAD_AFFINITY_C1   ((int8_t) 1)  /* core 1 only             */
 
 /* -------------------------------------------------------------------------
+ * PID ranges
+ *
+ * Each way of starting a process draws its PID from its own range, so a PID
+ * says how the process was started.  1..9 is the kernel range: PID 1 is the
+ * kernel process, PID 2 the shell, 3..9 reserved.  killproc, kill and
+ * SYS_KILL refuse the whole kernel range.  The other ranges are handed out
+ * by task_alloc_pid().
+ * ------------------------------------------------------------------------- */
+#define PID_KERNEL          1u     /* kernel process (idle, wifi-poll, ...) */
+#define PID_SHELL           2u     /* shell process                         */
+#define PID_KERNEL_MIN      1u
+#define PID_KERNEL_MAX      9u
+
+/* True for a PID in the kernel range: killproc, kill and SYS_KILL
+ * refuse these and their threads. */
+#define PID_IS_KERNEL(pid)  ((pid) >= PID_KERNEL_MIN && (pid) <= PID_KERNEL_MAX)
+
+typedef enum {
+    PID_RANGE_SPAWN = 0,    /*  10.. 49  SYS_SPAWN                    */
+    PID_RANGE_AUTORUN,      /*  50.. 99  config.txt AUTORUN=          */
+    PID_RANGE_RUN,          /* 100..199  shell 'run'                  */
+    PID_RANGE_BUTTON,       /* 200..299  Display Pack BUTTONx=        */
+    PID_RANGE_COUNT
+} pid_range_t;
+
+/* -------------------------------------------------------------------------
  * Thread states
  * ------------------------------------------------------------------------- */
 
@@ -169,6 +195,14 @@ tcb_t   *task_create_thread(pcb_t      *proc,
                              uint32_t    stack_size);
 
 pcb_t   *task_create_process(const char *name, uint32_t pid);
+
+/*
+ * task_alloc_pid — pick the next PID in range that no live process uses.
+ *                  Continues after the last PID it gave out and wraps at the
+ *                  top of the range, so a freed PID is not reused straight
+ *                  away.  Returns 0 if every PID in the range is in use.
+ */
+uint32_t task_alloc_pid(pid_range_t range);
 
 tcb_t   *task_find_thread(uint32_t tid);
 pcb_t   *task_find_process(uint32_t pid);

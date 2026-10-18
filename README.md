@@ -173,8 +173,8 @@ Once running, the USB shell accepts:
 | `help` | List all commands |
 | `ps` | Show processes |
 | `threads` | Show all threads with state, priority, **core affinity**, CPU time, and stack canary status |
-| `kill <tid>` | Terminate a thread; frees its stack and TCB slot; auto-frees the process when its last thread exits |
-| `killproc <pid>` | Terminate all threads in a process and free the PCB |
+| `kill <tid>` | Terminate a thread; frees its stack and TCB slot; auto-frees the process when its last thread exits. Refuses threads of the kernel range (PIDs 1–9: kernel, shell) |
+| `killproc <pid>` | Terminate all threads in a process and free the PCB. Refuses PIDs 1–9 (kernel range) |
 | `mem` | Memory usage and heap stats |
 | `ls` | List filesystem files |
 | `cat <file>` | Print a filesystem file (reads through `fs_open`, so `/dev/*` paths are not supported) |

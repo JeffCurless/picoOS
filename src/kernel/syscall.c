@@ -54,9 +54,11 @@ int32_t syscall_dispatch(uint32_t num,
         void         (*entry)(void *) = (void (*)(void *))a1;
         void          *arg   = (void *)a2;
 
-        /* Assign the next available PID (simple counter — good enough). */
-        static uint32_t next_pid = 10;   /* 1..9 reserved for kernel */
-        uint32_t pid = next_pid++;
+        /* PIDs 10..49; 1..9 are the kernel range. */
+        uint32_t pid = task_alloc_pid(PID_RANGE_SPAWN);
+        if (pid == 0u) {
+            return -1;
+        }
 
         pcb_t *proc = task_create_process(name, pid);
         if (proc == NULL) {
@@ -274,7 +276,7 @@ int32_t syscall_dispatch(uint32_t num,
                 continue;
             }
             printf("%-4u %-16s %-8u %s\n",
-                   p->pid, p->name, p->thread_count,
+                   (unsigned)p->pid, p->name, (unsigned)p->thread_count,
                    p->alive ? "yes" : "no");
         }
         return 0;
@@ -293,8 +295,8 @@ int32_t syscall_dispatch(uint32_t num,
     case SYS_KILL: {
         uint32_t tid = a0;
         tcb_t   *t   = task_find_thread(tid);
-        if (t == NULL) {
-            return -1;
+        if (t == NULL || PID_IS_KERNEL(t->pid)) {
+            return -1;   /* kernel-range threads are protected */
         }
         bool self = (t == (tcb_t *)CURRENT_TCB);
         task_kill_thread(t);

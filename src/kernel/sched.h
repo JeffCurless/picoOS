@@ -25,8 +25,7 @@
 /* Millisecond tick counter.  Incremented by isr_systick every 1 ms. */
 extern volatile uint32_t tick_count;
 
-/* Per-core running TCB (same array as declared in task.h). */
-extern tcb_t * volatile current_tcb[2];
+/* current_tcb[2] (per-core running TCB) is declared in task.h. */
 
 /* -------------------------------------------------------------------------
  * Scheduler API

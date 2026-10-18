@@ -154,8 +154,9 @@ static bool bt_entry_ok(const bt_scan_result_t *e)
     if (memchr(e->name, '\0', sizeof(e->name)) == NULL)          return false;
     if (memcmp(e->addr, zero, BT_ADDR_LEN) == 0)                 return false;
     if (e->type != BT_DEVTYPE_CLASSIC && e->type != BT_DEVTYPE_BLE) return false;
-    if ((int)e->dev_class < (int)BT_CLASS_UNKNOWN ||
-        (int)e->dev_class > (int)BT_CLASS_OTHER)                 return false;
+    /* BT_CLASS_UNKNOWN is 0, so one unsigned compare also catches a
+     * corrupted value that would read as negative. */
+    if ((unsigned)e->dev_class > (unsigned)BT_CLASS_OTHER)       return false;
     return true;
 }
 

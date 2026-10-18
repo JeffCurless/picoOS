@@ -18,7 +18,7 @@ void my_app(void *arg);
 
 When the user types `run my_app` at the shell, the kernel:
 
-1. Creates a new process (PCB) with a fresh PID (100 and up).
+1. Creates a new process (PCB) with a fresh PID (100–199).
 2. Creates one thread (TCB) inside that process, pointing at `my_app`, with
    the priority from `app_table[]` and a `DEFAULT_STACK_SIZE` (2 KB) stack.
 3. Adds the thread to the ready queue; the scheduler runs it preemptively,
@@ -65,12 +65,26 @@ src/
     ├── demo.c        ← existing demo apps
     ├── demo.h
     ├── myapp.c       ← your new file
-    └── myapp.h       ← optional
+    └── myapp.h       ← declares myapp()
+```
+
+`src/apps/myapp.h` declares the entry point.  picoOS builds with
+`-Wmissing-prototypes -Werror`, so a non-`static` function needs a prototype
+in a header that its own `.c` file includes:
+
+```c
+#ifndef APPS_MYAPP_H
+#define APPS_MYAPP_H
+
+void myapp(void *arg);
+
+#endif /* APPS_MYAPP_H */
 ```
 
 Minimal template — `src/apps/myapp.c`:
 
 ```c
+#include "myapp.h"
 #include "../kernel/syscall.h"   /* sys_sleep, sys_yield, sys_exit */
 #include "../kernel/fs.h"        /* fs_open, fs_read, fs_write, fs_close */
 #include "../shell/shell.h"      /* shell_print */
@@ -86,7 +100,7 @@ void myapp(void *arg)
 
     for (;;) {
         sys_sleep(1000);   /* sleep 1 second — yields CPU while waiting */
-        shell_print("[myapp] tick %u\r\n", count);
+        shell_print("[myapp] tick %u\r\n", (unsigned)count);
         count++;
     }
 }
@@ -100,7 +114,10 @@ Key points:
 - Use `sys_sleep(ms)` instead of the Pico SDK's `sleep_ms(ms)`.  `sys_sleep`
   moves the thread to `SLEEPING` state so other threads get CPU time; `sleep_ms`
   busy-waits and starves the scheduler.
-- Always cast away unused `arg` with `(void)arg` to avoid compiler warnings.
+- Cast `uint32_t` values to `(unsigned)` for `%u` / `%X`: on ARM `uint32_t`
+  is `unsigned long`, and `shell_print()` format strings are checked like
+  `printf`'s.
+- Always cast away unused `arg` with `(void)arg`: picoOS sources build with `-Werror`, so an unused parameter fails the build (see "Warnings are errors" in `docs/setup.md`).
 
 ---
 
@@ -147,17 +164,15 @@ The three fields are:
 | `entry` | `void (*)(void *)` | Thread entry function |
 | `priority` | `uint8_t` | Scheduling priority — see guidance below |
 
-If you created a header (`myapp.h`), include it at the top of `demo.c`:
+Include your header at the top of `demo.c`:
 
 ```c
 #include "myapp.h"
 ```
 
-Otherwise, add a forward declaration directly in `demo.c` above the table:
-
-```c
-void myapp(void *arg);
-```
+Do not just write `void myapp(void *arg);` in `demo.c` instead: `myapp.c`
+would then define `myapp()` with no prototype in sight, and
+`-Wmissing-prototypes` fails the build.
 
 ---
 
@@ -263,7 +278,7 @@ void myapp(void *arg)
 
 `pi.c` (`run pi single`) is a complete example.
 
-Stop an app with `killproc <pid>` (all its threads) or `kill <tid>`.
+Stop an app with `killproc <pid>` (all its threads) or `kill <tid>`. `killproc` refuses the kernel range, PIDs 1–9, and `kill` refuses their threads.
 
 ---
 
@@ -360,7 +375,7 @@ mqueue_send(&my_queue, &out);
 /* Receiver: */
 my_msg_t in;
 mqueue_recv(&my_queue, &in);
-shell_print("got %u\r\n", in.value);
+shell_print("got %u\r\n", (unsigned)in.value);
 ```
 
 `msg_size` passed to `mqueue_init` must be ≤ `MQ_MSG_SIZE` (64 bytes).
@@ -498,7 +513,7 @@ static void worker_thread(void *arg)
     (void)arg;
     for (;;) {
         ksemaphore_wait(&work_ready);
-        shell_print("[worker] processing value %u\r\n", shared_value);
+        shell_print("[worker] processing value %u\r\n", (unsigned)shared_value);
     }
 }
 
@@ -598,7 +613,7 @@ upload a new copy with `tools/console.py --upload config.txt config.txt`), or
 2. Reads **only the first 255 bytes** and looks for the first line starting
    with `AUTORUN=`.
 3. Takes the rest of the line as the app name (up to 31 characters).
-4. Looks it up in `app_table[]`, creates a process with PID 50 and up and one
+4. Looks it up in `app_table[]`, creates a process with a PID from 50–99 and one
    thread with the table's priority and a `DEFAULT_STACK_SIZE` stack, and
    prints `[shell] autorun: started ...`.
 
@@ -631,7 +646,7 @@ pico> reboot
 
 At boot the shell prints `[shell] btn A -> pi` for each binding and starts a
 `btn-mon` thread (priority 3) that polls the buttons every 100 ms.  A press
-starts the app with PID 200 and up; pressing again while that app is still
+starts the app with a PID from 200–299; pressing again while that app is still
 running is ignored.  App names for buttons are limited to 15 characters.
 
 ---

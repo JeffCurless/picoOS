@@ -23,8 +23,27 @@ enable_testing()
 
 set(KERNEL_SRC ${CMAKE_CURRENT_SOURCE_DIR}/../src/kernel)
 
-# Common compile flags shared by all test targets.
-set(TEST_FLAGS -Wall -Wextra -Wno-unused-parameter -Wno-unused-variable -Werror)
+# Common compile flags shared by all test targets: the same warning set as
+# the firmware build (src/CMakeLists.txt, PICOOS_WARNINGS), with -Werror.
+set(TEST_FLAGS
+    -Wall
+    -Wextra
+    -Wshadow
+    -Wundef
+    -Wpointer-arith
+    -Wwrite-strings
+    -Wformat=2
+    -Wformat-truncation=2
+    -Wimplicit-fallthrough
+    -Wnull-dereference
+    -Wdouble-promotion
+    -Wredundant-decls
+    -Wstrict-prototypes
+    -Wmissing-prototypes
+    -Wold-style-definition
+    -Wnested-externs
+    -Werror
+)
 
 # ---------------------------------------------------------------------------
 # Memory allocator tests

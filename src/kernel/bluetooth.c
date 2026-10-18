@@ -469,7 +469,7 @@ static void packet_handler(uint8_t pkt_type, uint16_t channel,
         hci_event_remote_name_request_complete_get_bd_addr(packet, addr);
         bool ok = hci_event_remote_name_request_complete_get_status(packet) == 0;
         const uint8_t *name = ok
-            ? hci_event_remote_name_request_complete_get_remote_name(packet)
+            ? (const uint8_t *)hci_event_remote_name_request_complete_get_remote_name(packet)
             : NULL;
         g_name_busy = false;
 

@@ -273,6 +273,36 @@ forever.
 
 ---
 
+## 12. Kernel-process protection is a check, not a boundary
+
+**Current behavior**: PIDs come from fixed ranges (`task_alloc_pid()`: 10–49
+`SYS_SPAWN`, 50–99 `AUTORUN=`, 100–199 `run`, 200–299 buttons; 1–9 is the
+kernel range). `killproc`, `kill` and `SYS_KILL` refuse the kernel range with
+`PID_IS_KERNEL()`. That is the only protection: any code can still call
+`task_kill_thread()` or `task_kill_process()` directly, or write over a TCB,
+because nothing stops an app from reaching kernel functions and memory
+(see 6). The PCB pool, `task_alloc_pid()` and `task_create_process()` also
+run without a lock, so two cores creating processes at once can race; the
+duplicate-PID check in `task_create_process()` turns the second one away
+rather than letting two processes share a PID.
+
+**File:line**: `src/kernel/task.c` (`task_alloc_pid`, `task_create_process`),
+`src/shell/shell.c` (`cmd_kill`, `cmd_killproc`), `src/kernel/syscall.c`
+(`SYS_KILL`)
+
+**Better implementation**:
+- Give each process a privilege level or owner, and check it inside
+  `task_kill_*()` so every path is covered, not just the shell and syscall.
+- With an MPU and SVC entry (6), apps can only reach the kernel through the
+  syscall table, which makes the check a real boundary.
+- Take a spinlock around the PCB pool and PID allocation.
+
+**SRAM impact**: N/A
+
+**Difficulty**: Low (lock, privilege field) / High (with MPU)
+
+---
+
 ## SRAM Impact Summary
 
 None of the fixes above saves SRAM. Thread stacks are already `kmalloc`'d from

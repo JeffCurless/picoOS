@@ -28,6 +28,7 @@
  */
 
 #include "mock_flash.h"
+#include "arch.h"   /* HOST_TEST prototypes for flash_range_erase/program */
 #include "fs.h"     /* FS_FLASH_OFFSET, FS_BLOCK_SIZE, FS_MAX_FILES */
 
 #include <stdlib.h>

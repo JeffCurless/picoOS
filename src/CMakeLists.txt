@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------------------
 set(PICOOS_VERSION_MAJOR 0)
 set(PICOOS_VERSION_MINOR 4)
-set(PICOOS_VERSION_EDIT  0)
+set(PICOOS_VERSION_EDIT  1)
 
 message(STATUS "picoOS version        : ${PICOOS_VERSION_MAJOR}.${PICOOS_VERSION_MINOR}.${PICOOS_VERSION_EDIT}")
 
@@ -222,6 +222,52 @@ if(PICOOS_APP_SOURCES)
 endif()
 
 add_executable(picoos ${PICOOS_SOURCES})
+
+# ---------------------------------------------------------------------------
+# Warnings — every picoOS source is built with a broad warning set, and any
+# warning fails the build.
+#
+# The flags go on the picoOS source files, not on the picoos target: the SDK,
+# lwIP, CYW43 and BTstack sources are compiled into the same target and are
+# not written to this standard.  Parent-project PICOOS_APP_SOURCES are left
+# alone too.  For a quick experiment, turn -Werror off with:
+#   cmake -B build_x -DPICOOS_WERROR=OFF
+# ---------------------------------------------------------------------------
+option(PICOOS_WERROR "Treat warnings in picoOS sources as errors" ON)
+
+set(PICOOS_WARNINGS
+    -Wall
+    -Wextra
+    -Wshadow
+    -Wundef
+    -Wpointer-arith
+    -Wwrite-strings
+    -Wformat=2
+    -Wformat-truncation=2
+    -Wimplicit-fallthrough
+    -Wnull-dereference
+    -Wdouble-promotion
+    -Wredundant-decls
+    -Wstrict-prototypes
+    -Wmissing-prototypes
+    -Wold-style-definition
+    -Wnested-externs
+)
+if(PICOOS_WERROR)
+    list(APPEND PICOOS_WARNINGS -Werror)
+endif()
+# Visible to a parent project, which may apply it to its PICOOS_APP_SOURCES
+# (docs/project-submodule.md).
+set(PICOOS_WARNINGS "${PICOOS_WARNINGS}" PARENT_SCOPE)
+
+set(_picoos_own_sources ${PICOOS_SOURCES})
+if(PICOOS_APP_SOURCES)
+    list(REMOVE_ITEM _picoos_own_sources ${PICOOS_APP_SOURCES})
+endif()
+list(FILTER _picoos_own_sources INCLUDE REGEX "\\.c$")
+set_source_files_properties(${_picoos_own_sources} PROPERTIES
+    COMPILE_OPTIONS "${PICOOS_WARNINGS}")
+message(STATUS "picoOS -Werror        : ${PICOOS_WERROR}")
 
 # ---------------------------------------------------------------------------
 # Output file naming — board + display variant + version.

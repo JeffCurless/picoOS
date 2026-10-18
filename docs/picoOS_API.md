@@ -119,7 +119,31 @@ pcb_t *task_create_process(const char *name, uint32_t pid);
 ```
 
 Allocates a PCB from the static pool. Returns `NULL` if the pool is full
-(`MAX_PROCESSES = 8`).
+(`MAX_PROCESSES = 8`), if `pid` is 0, or if a live process already has `pid`.
+
+**`task_alloc_pid`**
+
+```c
+uint32_t task_alloc_pid(pid_range_t range);
+```
+
+Returns the next PID in `range` that no live process uses, or 0 if the range is
+full. It continues after the last PID it handed out and wraps at the top of the
+range, so a freed PID is not reused straight away. Pass the result to
+`task_create_process()`.
+
+| PIDs | Used by |
+|------|---------|
+| 1 (`PID_KERNEL`) | kernel process: `idle`, `idle1`, `wifi-poll`, `btn-mon` |
+| 2 (`PID_SHELL`) | shell process |
+| 3–9 | reserved (kernel range, `PID_KERNEL_MIN`..`PID_KERNEL_MAX`) |
+| 10–49 (`PID_RANGE_SPAWN`) | `SYS_SPAWN` |
+| 50–99 (`PID_RANGE_AUTORUN`) | `config.txt` `AUTORUN=` |
+| 100–199 (`PID_RANGE_RUN`) | shell `run` |
+| 200–299 (`PID_RANGE_BUTTON`) | Display Pack `BUTTONx=` |
+
+`killproc` refuses every PID in the kernel range (1–9), and `kill <tid>` /
+`SYS_KILL` refuse any thread owned by one (`PID_IS_KERNEL(pid)`).
 
 **`task_create_thread`**
 
@@ -204,7 +228,8 @@ THREAD_NEW → THREAD_READY → THREAD_RUNNING → THREAD_BLOCKED
 ### 3.6 Killing Threads and Processes
 
 ```c
-// Kill a single thread by TID (frees its stack and TCB)
+// Kill a single thread by TID (frees its stack and TCB).
+// Returns -1 if not found or owned by a kernel-range process (PIDs 1–9).
 syscall_dispatch(SYS_KILL, tid, 0, 0, 0);
 
 // Same, from kernel code that already has the TCB
@@ -956,7 +981,7 @@ vfs_close(fd);
 ```c
 // List all files (callback receives one fs_entry_t * per file)
 static int list_cb(const fs_entry_t *e) {
-    shell_print("%s  %u bytes\r\n", e->name, e->size);
+    shell_print("%s  %u bytes\r\n", e->name, (unsigned)e->size);
     return 0;  // non-zero stops iteration early
 }
 fs_list(list_cb);
@@ -1028,7 +1053,7 @@ Use `run` and an app for anything that should run in the background.
 ### Output Functions
 
 ```c
-shell_print("value = %u\r\n", val);   // printf-style formatted output
+shell_print("value = %u\r\n", (unsigned)val);   // printf-style; format-checked like printf
 shell_println("done");                 // print string + CRLF
 ```
 
@@ -1038,8 +1063,8 @@ The shell reads `config.txt` from the filesystem once, when it starts:
 
 | Line | Effect |
 |------|--------|
-| `AUTORUN=<app>` | Spawn `<app>` from `app_table[]` at boot (PID 50+, priority from the table, 2 KB stack, `arg = NULL`) |
-| `BUTTONA=<app>` … `BUTTONY=<app>` | Display builds: launch `<app>` when that Display Pack button is pressed (PID 200+; a second press while it runs is ignored) |
+| `AUTORUN=<app>` | Spawn `<app>` from `app_table[]` at boot (PID 50–99, priority from the table, 2 KB stack, `arg = NULL`) |
+| `BUTTONA=<app>` … `BUTTONY=<app>` | Display builds: launch `<app>` when that Display Pack button is pressed (PID 200–299; a second press while it runs is ignored) |
 
 ```
 pico> fs write config.txt AUTORUN=sensor
@@ -1087,7 +1112,7 @@ heap, leaving ~32 KB for other allocations.
 
 | Number | Constant | Wrapper | Description |
 |--------|----------|---------|-------------|
-| 0 | `SYS_SPAWN` | — | Spawn a new process |
+| 0 | `SYS_SPAWN` | — | Spawn a new process (PID 10–49) |
 | 1 | `SYS_THREAD_CREATE` | — | Add a thread to a process |
 | 2 | `SYS_EXIT` | `sys_exit(code)` | Exit current thread |
 | 3 | `SYS_YIELD` | `sys_yield()` | Yield CPU |
@@ -1103,7 +1128,7 @@ heap, leaving ~32 KB for other allocations.
 | 13 | `SYS_GETPID` | `sys_getpid()` | Get process ID |
 | 14 | `SYS_GETTID` | `sys_gettid()` | Get thread ID |
 | 15 | `SYS_PS` | — | Process/thread list |
-| 16 | `SYS_KILL` | — | Kill thread by TID |
+| 16 | `SYS_KILL` | — | Kill thread by TID (-1 for a thread of PIDs 1–9) |
 | 17 | `SYS_GETCORE` | `sys_getcore()` | Get current core number |
 
 ### Thread Affinity

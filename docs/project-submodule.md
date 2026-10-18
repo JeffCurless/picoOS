@@ -208,6 +208,13 @@ add_subdirectory(picoOS/src)
 
 When you add a new application file (e.g. `apps/otherapp.c`), append it to `PICOOS_APP_SOURCES` in `CMakeLists.txt` and add its entry to `apps/app_table.c`.
 
+picoOS builds its own sources with a broad warning set and `-Werror` (see "Warnings are errors" in `docs/setup.md`), but leaves `PICOOS_APP_SOURCES` alone. To hold your apps to the same standard, add after `add_subdirectory(picoOS/src)`:
+
+```cmake
+set_source_files_properties(${PICOOS_APP_SOURCES} PROPERTIES
+    COMPILE_OPTIONS "${PICOOS_WARNINGS}")
+```
+
 ---
 
 ## Step 5 — Create the `build` script
@@ -316,7 +323,7 @@ myapp: tick
 ...
 ```
 
-Kill the app with `killproc <pid>` (find the PID with `ps`).
+Kill the app with `killproc <pid>` (find the PID with `ps`; apps started with `run` get PIDs 100–199). PIDs 1–9 are the kernel range and cannot be killed.
 
 ---
 

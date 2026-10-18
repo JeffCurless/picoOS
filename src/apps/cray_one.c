@@ -14,6 +14,7 @@
 
 #if defined(PICOOS_WIFI_ENABLE) && defined(PICOOS_DISPLAY_ENABLE)
 
+#include "apps/cray_one.h"
 #include "kernel/wifi.h"
 #include "kernel/vfs.h"
 #include "kernel/syscall.h"
