@@ -19,7 +19,7 @@ Your project supplies two things picoOS does not: an **app table** (the list of 
 ## Prerequisites
 
 - Raspberry Pi Pico SDK installed (tested with SDK 1.5+).  Set `PICO_SDK_PATH` to its location, or adjust the path in the build script.
-- `cmake` 3.13+, `make`, `gcc-arm-none-eabi`, `python3`.
+- `cmake` 3.13+ (3.18+ to apply the picoOS warning set to your app sources, see Step 4), `make`, `gcc-arm-none-eabi`, `python3`.
 - A GitHub account (or any git remote) to host your project repo.
 
 ---
@@ -211,9 +211,16 @@ When you add a new application file (e.g. `apps/otherapp.c`), append it to `PICO
 picoOS builds its own sources with a broad warning set and `-Werror` (see "Warnings are errors" in `docs/setup.md`), but leaves `PICOOS_APP_SOURCES` alone. To hold your apps to the same standard, add after `add_subdirectory(picoOS/src)`:
 
 ```cmake
-set_source_files_properties(${PICOOS_APP_SOURCES} PROPERTIES
-    COMPILE_OPTIONS "${PICOOS_WARNINGS}")
+set_source_files_properties(${PICOOS_APP_SOURCES}
+    TARGET_DIRECTORY picoos
+    PROPERTIES COMPILE_OPTIONS "${PICOOS_WARNINGS}")
 ```
+
+`TARGET_DIRECTORY picoos` is required.  Source-file properties are scoped to the directory that sets them, and the `picoos` target is defined in `picoOS/src`, not in your project root.  Without it the call is silently ignored: CMake reports no error, but your app sources are compiled without the warning flags.  `TARGET_DIRECTORY` needs CMake 3.18 or later, so raise the first line of your `CMakeLists.txt` to `cmake_minimum_required(VERSION 3.18)`.
+
+To check that the flags are applied, build with `make VERBOSE=1` and look for `-Werror` on the compile line for one of your app files.
+
+The same rule applies to any other per-source property you set on your app files from the project root, such as `COMPILE_DEFINITIONS`: pass `TARGET_DIRECTORY picoos` there as well.
 
 ---
 
