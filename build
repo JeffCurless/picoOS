@@ -10,22 +10,25 @@
 #                     with PICOOS_SCAN_RACE_INJECT on, for the on-device scantest
 #   ./build tests     build and run host-native unit tests
 #
-# Build directories: build_<board>_ND | build_<board>_D | build_<board>_D2
+# Build directories: builds/<board>_ND | builds/<board>_D | builds/<board>_D2
+#                    (builds/<board>_INJ for "wifi", builds/tests for "tests")
 # Output naming:     <board>os-v<ver>  <board>os_D-v<ver>  <board>os_D2-v<ver>
 #
 # Override the SDK path: PICO_SDK_PATH=/path/to/pico-sdk ./build
 
 SDK="${PICO_SDK_PATH:-$HOME/workspace/pico-sdk}"
 JOBS="$(nproc)"
+BUILDS="builds"     # every build tree lives under here
 
 # ---------------------------------------------------------------------------
 # Host-native test suite
 # ---------------------------------------------------------------------------
 run_tests() {
     echo "--- tests ---"
-    cmake -B tests/build tests/ || return 1
-    make -j"$JOBS" -C tests/build || return 1
-    ctest --test-dir tests/build --output-on-failure
+    local dir="$BUILDS/tests"
+    cmake -B "$dir" -S tests || return 1
+    make -j"$JOBS" -C "$dir" || return 1
+    ctest --test-dir "$dir" --output-on-failure
 }
 
 case "${1:-all}" in
@@ -43,14 +46,14 @@ case "${1:-all}" in
         ;;
 esac
 
-mkdir -p kits
+mkdir -p kits "$BUILDS"
 
 build_variant() {
     local board="$1"     # pico | picow | pico2 | pico2w
     local disp="$2"      # ND | D | D2
     local flags="$3"     # extra cmake -D flags
 
-    local dir="build_${board}_${disp}"
+    local dir="$BUILDS/${board}_${disp}"
     echo "--- ${board} / ${disp} ---"
     cmake -B "$dir" -DPICO_SDK_PATH="$SDK" -DPICO_BOARD="$board" $flags || return 1
     make -j"$JOBS" -C "$dir"                                              || return 1

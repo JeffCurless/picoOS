@@ -1,19 +1,10 @@
 #!/usr/bin/bash
-# clean — remove all variant build directories and the test build directory
+# clean — remove every build tree made by ./build (everything in builds/
+# except the .gitkeep that keeps the directory in the repo)
 
-mkdir -p kits
+mkdir -p kits builds
+touch builds/.gitkeep
 
-for board in pico picow pico2 pico2w; do
-    for disp in ND D D2 INJ; do
-        dir="build_${board}_${disp}"
-        if [ -d "$dir" ]; then
-            echo "Cleaning $dir..."
-            rm -rf "$dir"
-        fi
-    done
-done
+echo "Cleaning builds/..."
+find builds -mindepth 1 -maxdepth 1 ! -name .gitkeep -exec rm -rf {} +
 
-if [ -d "tests/build" ]; then
-    echo "Cleaning tests/build..."
-    rm -rf "tests/build"
-fi

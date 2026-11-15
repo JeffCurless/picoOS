@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------------------
 set(PICOOS_VERSION_MAJOR 0)
 set(PICOOS_VERSION_MINOR 4)
-set(PICOOS_VERSION_EDIT  2)
+set(PICOOS_VERSION_EDIT  4)
 
 message(STATUS "picoOS version        : ${PICOOS_VERSION_MAJOR}.${PICOOS_VERSION_MINOR}.${PICOOS_VERSION_EDIT}")
 
@@ -32,7 +32,7 @@ endif()
 # before filling it, poison the slot, and busy-wait in between.  Lock-free
 # readers ("run scantest raw") should then report errors, while the copy-out
 # API ("run scantest") should still pass.  Never ship firmware built with it.
-#   cmake -B build_picow_INJ -DPICO_BOARD=picow -DPICOOS_SCAN_RACE_INJECT=ON
+#   cmake -B builds/picow_INJ -DPICO_BOARD=picow -DPICOOS_SCAN_RACE_INJECT=ON
 # Output names get an "_INJ" suffix so they cannot be mistaken for releases.
 # ---------------------------------------------------------------------------
 option(PICOOS_SCAN_RACE_INJECT "Test only: re-open the scan-buffer race for scantest" OFF)

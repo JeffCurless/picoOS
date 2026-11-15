@@ -12,7 +12,7 @@ picoOS ships four host-native test suites that compile kernel source files direc
 ./build tests
 ```
 
-This configures `tests/build/` with CMake (if not already done), compiles all four test binaries, and runs them via CTest.
+This configures `builds/tests/` with CMake (if not already done), compiles all four test binaries, and runs them via CTest.
 
 ### Manual path (from the `tests/` directory)
 
@@ -26,9 +26,9 @@ ctest --test-dir build --output-on-failure
 ### Cleaning
 
 ```bash
-./clean        # removes tests/build as well as all firmware build directories
+./clean        # removes builds/tests as well as all firmware build directories
 # or just the test build:
-rm -rf tests/build
+rm -rf builds/tests
 ```
 
 ---
@@ -361,12 +361,12 @@ The `PICOOS_LOCK_DEBUG` build option adds timeout-based deadlock detection to ev
 
 ```bash
 # Build the pico_w + Display Pack variant with deadlock detection:
-cmake -B build_picow_D \
+cmake -B builds/picow_D \
       -DPICO_BOARD=pico_w \
       -DPICOOS_DISPLAY_ENABLE=ON \
       -DPICOOS_LOCK_DEBUG=ON \
       -DPICOOS_LOCK_TIMEOUT_MS=5000   # optional — default is 5000 ms
-make -j$(nproc) -C build_picow_D
+make -j$(nproc) -C builds/picow_D
 ```
 
 When any lock wait exceeds `PICOOS_LOCK_TIMEOUT_MS`, the system prints:

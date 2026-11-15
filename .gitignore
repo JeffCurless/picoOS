@@ -19,10 +19,13 @@ __pycache__/
 # Pico SDK (fetched separately — not part of this repo)
 pico-sdk/
 
-# Build areas
-build_pico*/
-kits/
-tests/build
+# Build areas (./build puts every build tree under builds/ and the .uf2
+# images in kits/).  Both directories are kept in the repo by a .gitkeep;
+# nothing else in them is tracked.
+builds/*
+!builds/.gitkeep
+kits/*
+!kits/.gitkeep
 
 # Log files from the console tool
 *.log

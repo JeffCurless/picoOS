@@ -92,11 +92,11 @@ export PICO_SDK_PATH="$HOME/pico-sdk"
 
 # 3. Build (choose your board)
 cd picoOS
-cmake -B build_pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico
-make -j$(nproc) -C build_pico
+cmake -B builds/pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico
+make -j$(nproc) -C builds/pico
 
 # 4. Flash (hold BOOTSEL on Pico, then plug in USB)
-cp build_pico/src/picoos_D-v0.3.9.uf2 /media/$USER/RPI-RP2/
+cp builds/pico/src/picoos_D-v0.3.9.uf2 /media/$USER/RPI-RP2/
 
 # 5. Open the console
 pip install pyserial
@@ -146,19 +146,19 @@ Dependency rules enforced by CMake:
 
 ```bash
 # Plain Pico — no Display Pack hardware
-cmake -B build_pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico \
+cmake -B builds/pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico \
       -DPICOOS_DISPLAY_ENABLE=OFF
-make -j$(nproc) -C build_pico
+make -j$(nproc) -C builds/pico
 
 # Display Pack attached, but suppress the shell commands
-cmake -B build_pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico \
+cmake -B builds/pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico \
       -DPICOOS_DISPLAY_SHELL=OFF \
       -DPICOOS_LED_SHELL=OFF
-make -j$(nproc) -C build_pico
+make -j$(nproc) -C builds/pico
 
 # Full build with Display Pack (default)
-cmake -B build_pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico
-make -j$(nproc) -C build_pico
+cmake -B builds/pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico
+make -j$(nproc) -C builds/pico
 ```
 
 ---
@@ -212,7 +212,7 @@ picoOS/
 │   ├── project-submodule.md   Tutorial: using picoOS as a git submodule
 │   └── book/                  Notes and outline for a companion book
 ├── build                   Script: build all firmware variants into kits/, or run host tests
-├── clean                   Script: remove build directories and tests/build
+├── clean                   Script: remove build directories and builds/tests
 ├── src/
 │   ├── CMakeLists.txt      Source-level build: feature flags, sources, output naming
 │   ├── main.c              Boot sequence, process/thread creation
@@ -347,13 +347,13 @@ The `tools/mem_report.py` script derives live numbers from the linker map after 
 
 ```bash
 # Pass the board-named map file as a positional argument
-python3 tools/mem_report.py build_pico/src/picoos_D-v0.3.9.elf.map
+python3 tools/mem_report.py builds/pico/src/picoos_D-v0.3.9.elf.map
 
 # Or use the --map option
-python3 tools/mem_report.py --map build_pico2w/src/pico2wos_D-v0.3.9.elf.map
+python3 tools/mem_report.py --map builds/pico2w/src/pico2wos_D-v0.3.9.elf.map
 
 # One-line summary
-python3 tools/mem_report.py build_pico/src/picoos_D-v0.3.9.elf.map --brief
+python3 tools/mem_report.py builds/pico/src/picoos_D-v0.3.9.elf.map --brief
 ```
 
 RP2040 breakdown for `picoos_D-v0.3.4` (Pico with Display Pack, no WiFi):
@@ -390,11 +390,11 @@ python3 tools/console.py --help
 
 ### `tools/mem_report.py`
 
-Parses the linker map produced by every build and prints an SRAM usage breakdown by subsystem.  The map file is named after the board, display variant, and version (e.g. `build_pico/src/picoos_D-v0.3.9.elf.map`).
+Parses the linker map produced by every build and prints an SRAM usage breakdown by subsystem.  The map file is named after the board, display variant, and version (e.g. `builds/pico/src/picoos_D-v0.3.9.elf.map`).
 
 ```bash
-python3 tools/mem_report.py build_pico/src/picoos_D-v0.3.9.elf.map        # positional path
-python3 tools/mem_report.py --map build_pico/src/picoos_D-v0.3.9.elf.map  # named option
+python3 tools/mem_report.py builds/pico/src/picoos_D-v0.3.9.elf.map        # positional path
+python3 tools/mem_report.py --map builds/pico/src/picoos_D-v0.3.9.elf.map  # named option
 python3 tools/mem_report.py --brief                             # one-line summary (uses default path)
 ```
 

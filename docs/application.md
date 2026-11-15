@@ -211,19 +211,19 @@ board by hand:
 cd /path/to/picoOS
 ./build pico                          # pico + picow, all display variants → kits/
 # or a single build directory:
-cmake -B build_pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico
-make -j$(nproc) -C build_pico
+cmake -B builds/pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico
+make -j$(nproc) -C builds/pico
 ```
 
 `build` at the repository root is a script, not a directory — don't pass it to
 `cmake -B`.  The output is named after the board and display variant, for
-example `build_pico/src/picoos_D-v0.3.9.uf2` for a pico + Display Pack build.
+example `builds/pico/src/picoos_D-v0.3.9.uf2` for a pico + Display Pack build.
 
 Flash to the Pico:
 
 ```bash
 # Option A: drag-and-drop (hold BOOTSEL while plugging in USB)
-cp build_pico/src/picoos_D-v0.3.9.uf2 /media/$USER/RPI-RP2/
+cp builds/pico/src/picoos_D-v0.3.9.uf2 /media/$USER/RPI-RP2/
 
 # Option B: from the running shell (reboots into BOOTSEL automatically)
 pico> update

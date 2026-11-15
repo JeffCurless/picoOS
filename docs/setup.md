@@ -102,7 +102,7 @@ If `-DPICO_BOARD` is omitted, CMake defaults to `pico`.
 
 ### Build every variant with the `build` script
 
-The repository root has a `build` script (a file, not a directory) that configures and builds each board/display combination in its own `build_<board>_<ND|D|D2>/` directory and copies the `.uf2` images into `kits/`:
+The repository root has a `build` script (a file, not a directory) that configures and builds each board/display combination in its own `builds/<board>_<ND|D|D2>/` directory and copies the `.uf2` images into `kits/`:
 
 ```bash
 ./build            # all 12 variants: pico, picow, pico2, pico2w × no display / Display Pack / Display Pack 2
@@ -110,7 +110,7 @@ The repository root has a `build` script (a file, not a directory) that configur
 ./build pico2      # pico2 + pico2w (6 variants)
 ./build wifi       # picow + pico2w (6 variants) + 2 scantest fault-injection images (*_INJ)
 ./build tests      # host-native unit tests (see section 6)
-./clean            # remove the build_<board>_<variant>/ directories and tests/build
+./clean            # remove the builds/<board>_<variant>/ directories and builds/tests
 ```
 
 It uses `$PICO_SDK_PATH`, or `$HOME/workspace/pico-sdk` if that is not set.
@@ -146,13 +146,13 @@ Use any directory name except `build`, which is the script above:
 
 ```bash
 # Configure (replace pico with your target board)
-cmake -B build_pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico
+cmake -B builds/pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico
 
 # Build
-make -j$(nproc) -C build_pico
+make -j$(nproc) -C builds/pico
 ```
 
-A successful build produces these files in `build_pico/src/`, named after the board, display variant and version (`<name>` below is e.g. `picoos_D-v0.3.9`):
+A successful build produces these files in `builds/pico/src/`, named after the board, display variant and version (`<name>` below is e.g. `picoos_D-v0.3.9`):
 
 | File | Purpose |
 |------|---------|
@@ -171,11 +171,11 @@ The Display Pack drivers are ON by default.  Override on the CMake command line:
 
 ```bash
 # No Display Pack hardware attached
-cmake -B build_pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico \
+cmake -B builds/pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico \
       -DPICOOS_DISPLAY_ENABLE=OFF
 
 # Display Pack present but suppress shell commands
-cmake -B build_pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico \
+cmake -B builds/pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico \
       -DPICOOS_DISPLAY_SHELL=OFF -DPICOOS_LED_SHELL=OFF
 ```
 
@@ -198,7 +198,7 @@ Setting `PICOOS_DISPLAY_ENABLE=OFF` cascades OFF to all sub-features.  Setting a
 After editing source files, just run `make` again:
 
 ```bash
-make -j$(nproc) -C build_pico
+make -j$(nproc) -C builds/pico
 ```
 
 CMake tracks dependencies automatically — it will only recompile changed translation units.
@@ -206,10 +206,10 @@ CMake tracks dependencies automatically — it will only recompile changed trans
 ### Cleaning
 
 ```bash
-make -C build_pico clean      # remove compiled objects, keep CMake cache
+make -C builds/pico clean      # remove compiled objects, keep CMake cache
 # or wipe everything:
-rm -rf build_pico && cmake -B build_pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico && make -j$(nproc) -C build_pico
-# or remove every build_<board>_<variant>/ directory made by ./build:
+rm -rf builds/pico && cmake -B builds/pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico && make -j$(nproc) -C builds/pico
+# or remove every builds/<board>_<variant>/ directory made by ./build:
 ./clean
 ```
 
@@ -233,11 +233,11 @@ From the project root:
 ./build tests
 ```
 
-This configures `tests/build/` if necessary, compiles all four test binaries, and runs them via CTest.  A passing run looks like:
+This configures `builds/tests/` if necessary, compiles all four test binaries, and runs them via CTest.  A passing run looks like:
 
 ```
 --- tests ---
-Test project /home/user/picoOS/tests/build
+Test project /home/user/picoOS/builds/tests
     Start 1: mem
 1/4 Test #1: mem ..............................   Passed    0.03 sec
     Start 2: sync
@@ -264,7 +264,7 @@ See **[docs/testing.md](testing.md)** for a full description of each test case a
 ### Clean the test build
 
 ```bash
-./clean          # removes tests/build along with all firmware build directories
+./clean          # removes builds/tests along with all firmware build directories
 ```
 
 ---
@@ -279,8 +279,8 @@ See **[docs/testing.md](testing.md)** for a full description of each test case a
 4. Copy the `.uf2` file to the drive (substitute the actual filename for your board):
 
 ```bash
-cp build_pico/src/picoos_D-v0.3.9.uf2 /media/$USER/RPI-RP2/
-# macOS: cp build_pico/src/picoos_D-v0.3.9.uf2 /Volumes/RPI-RP2/
+cp builds/pico/src/picoos_D-v0.3.9.uf2 /media/$USER/RPI-RP2/
+# macOS: cp builds/pico/src/picoos_D-v0.3.9.uf2 /Volumes/RPI-RP2/
 ```
 
 5. The Pico unmounts and reboots into picoOS automatically.
@@ -297,7 +297,7 @@ sudo apt install picotool
 With the Pico in BOOTSEL mode:
 
 ```bash
-picotool load build_pico/src/picoos_D-v0.3.9.uf2 --force
+picotool load builds/pico/src/picoos_D-v0.3.9.uf2 --force
 picotool reboot
 ```
 
@@ -394,9 +394,9 @@ Type `help` to list available shell commands.  To start an app automatically on 
 For full SDK-aware completions and diagnostics, point clangd at the compile database generated by CMake.  Configure with a WiFi board if you want the WiFi/BT code (and `scantest.c`) to resolve, since those files are only compiled for `picow` / `pico2w`:
 
 ```bash
-cmake -B build_picow -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=picow \
+cmake -B builds/picow -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=picow \
       -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
-ln -sf build_picow/compile_commands.json compile_commands.json
+ln -sf builds/picow/compile_commands.json compile_commands.json
 ```
 
 Then open the project root in your editor.
@@ -432,7 +432,7 @@ openocd -f interface/cmsis-dap.cfg -f target/rp2350.cfg
 In another terminal, launch GDB (substitute the actual ELF name for your board):
 
 ```bash
-arm-none-eabi-gdb build_pico/src/picoos_D-v0.3.9.elf
+arm-none-eabi-gdb builds/pico/src/picoos_D-v0.3.9.elf
 (gdb) target remote :3333
 (gdb) monitor reset init
 (gdb) continue
@@ -451,5 +451,5 @@ arm-none-eabi-gdb build_pico/src/picoos_D-v0.3.9.elf
 | `make` fails on `arm-none-eabi-gcc` not found | Toolchain not installed | Follow step 2 |
 | `picotool` can't find device | Pico not in BOOTSEL mode | Hold BOOTSEL while plugging in, or use `update` shell command |
 | No USB input on pico2_w | Stale build without M33 FPU fix | Ensure you are on the current branch and rebuild |
-| `cmake -B build` fails, or `build` vanished | `build` is the build script, not a directory | Use another directory name (`build_pico`) or `./build`; restore the script with `git checkout build` |
+| `cmake -B build` fails, or `build` vanished | `build` is the build script, not a directory | Use another directory name (`builds/pico`) or `./build`; restore the script with `git checkout build` |
 | AUTORUN app does not start | Name mismatch or line past byte 255 of `config.txt` | See [application.md](application.md#launching-an-app-automatically) |

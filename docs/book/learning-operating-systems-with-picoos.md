@@ -185,7 +185,7 @@ Keep a Pico plugged in and a terminal open while you read. An operating system i
 - `$ ./build pico` — a command typed on your computer.
 - **RP2040** means the original Pico and Pico W; **RP2350** means the Pico 2 and Pico 2 W.
 
-This edition describes picoOS v0.3.9.
+This edition describes picoOS v0.4.4.
 
 <a id="ch-1"></a>
 ## Chapter 1 — Getting Started
@@ -238,7 +238,7 @@ From the picoOS directory:
 ./build             # builds all 12 variants
 ```
 
-`build` is a script, not a folder. Never delete it. picoOS treats every compiler warning in its own code as an error, so a build either finishes cleanly or stops at the first variant with a problem and prints `BUILD FAILED`. Each board is compiled in its own `build_<board>_<variant>/` directory, and the finished images are copied to `kits/`. A file name such as `picoos_D-v0.3.9.uf2` means: pico board, Display Pack build (`_D`), version 0.3.9. `_D2` means Display Pack 2; no suffix means no display.
+`build` is a script, not a folder. Never delete it. picoOS treats every compiler warning in its own code as an error, so a build either finishes cleanly or stops at the first variant with a problem and prints `BUILD FAILED`. Each board is compiled in its own `builds/<board>_<variant>/` directory, and the finished images are copied to `kits/`. A file name such as `picoos_D-v0.4.4.uf2` means: pico board, Display Pack build (`_D`), version 0.4.4. `_D2` means Display Pack 2; no suffix means no display.
 
 <a id="s-1-4"></a>
 ### 1.4 Flash
@@ -261,7 +261,7 @@ The script finds the Pico by its USB ID. You should see a banner like this:
 
 ```
 =======================================================
-picoOS  v0.3.9
+picoOS  v0.4.4
 
   Platform : RP2040, dual ARM Cortex-M0+ (133 MHz max)
   Options  : DISPLAY_PACK
@@ -471,7 +471,8 @@ typedef struct tcb {
     uint64_t        wake_time_us; /* when a sleeper should wake        */
     uint64_t        cpu_time_us;  /* CPU time used so far              */
     char            name[16];
-    struct tcb     *next;         /* link in a ready or waiter list    */
+    struct tcb     *next;         /* link in a ready queue             */
+    struct tcb     *wait_next;    /* link in a lock's waiter list      */
 } tcb_t;
 ```
 
@@ -515,7 +516,7 @@ picoOS hands out PIDs by range, so you can tell where a process came from by its
 <a id="s-4-3"></a>
 ### 4.3 Fixed tables instead of malloc
 
-TCBs and PCBs live in two static arrays, `tcb_pool[16]` and `pcb_pool[8]`. Creating a thread scans for a free slot. Only the stack comes from the heap. This is a common embedded design: the kernel's bookkeeping can never fail for lack of heap, and you can see the whole table in a debugger. The price is a hard limit. Try to start a 17th thread and `task_create_thread()` returns `NULL`.
+TCBs and PCBs live in two static arrays, `tcb_pool[MAX_THREADS]` and `pcb_pool[MAX_PROCESSES]` — 32 and 16 slots unless you change `PICOOS_MAX_THREADS` or `PICOOS_MAX_PROCESSES` in `src/CMakeLists.txt`. Creating a thread scans for a free slot. Only the stack comes from the heap. This is a common embedded design: the kernel's bookkeeping can never fail for lack of heap, and you can see the whole table in a debugger. The price is a hard limit. Try to start a 33rd thread and `task_create_thread()` returns `NULL`. In practice the heap usually runs out first: 32 stacks of 2 KB are 64 KB, most of a 96 KB heap.
 
 <a id="s-4-4"></a>
 ### 4.4 Stack sizes and the canary
@@ -541,7 +542,7 @@ Every thread is in exactly one state:
 
 | State | Meaning |
 | --- | --- |
-| NEW | being created (picoOS goes straight to READY) |
+| NEW | being created: its slot is claimed but its first stack frame is not built yet; it becomes READY before `task_create_thread()` returns |
 | READY | could run; waiting in a ready queue for a core |
 | RUNNING | on a core right now; at most two threads at once |
 | BLOCKED | waiting for a lock, semaphore, event or message |
@@ -587,7 +588,7 @@ picoOS does both. Threads can yield, and a 1 ms **SysTick** interrupt on each co
 <a id="s-5-2"></a>
 ### 5.2 Priorities and ready queues
 
-Priorities run from 0 (most urgent) to 7 (least). The scheduler keeps one linked list per priority, `ready_queues[8]` in `src/kernel/sched.c`. A thread that can run sits in the list for its priority, linked through the `next` field of its TCB.
+Priorities run from 0 (most urgent) to 7 (least). The scheduler keeps one linked list per priority, `ready_queues[8]` in `src/kernel/sched.c`. A thread that can run sits in the list for its priority, linked through the `next` field of its TCB. The ready queues are the only lists that use `next`; Chapter 8 explains why the lock waiter lists must not.
 
 | Priority | Typical thread |
 | --- | --- |
@@ -595,7 +596,7 @@ Priorities run from 0 (most urgent) to 7 (least). The scheduler keeps one linked
 | 6 | `wifi-poll` (W boards) |
 | 7 | `idle`, `idle1` |
 
-Apps choose their own priority in `app_table[]`.
+Apps choose their own priority, and their stack size, in `app_table[]` (Chapter 14).
 
 <a id="s-5-3"></a>
 ### 5.3 The algorithm
@@ -651,7 +652,7 @@ The M33 has a floating-point unit. A thread that has used it gets a 26-word hard
 <a id="s-5-6"></a>
 ### 5.6 Sleeping
 
-`sys_sleep(ms)` records a wake time in the TCB, marks the thread SLEEPING, removes it from its ready queue and yields. Every millisecond core 0's SysTick handler walks all 16 TCB slots looking for sleepers whose time has come, marks them READY and puts them back in a queue.
+`sys_sleep(ms)` records a wake time in the TCB, marks the thread SLEEPING, removes it from its ready queue and yields. Every millisecond core 0's SysTick handler walks all 32 TCB slots (`MAX_THREADS`) looking for sleepers whose time has come, marks them READY and puts them back in a queue.
 
 One subtlety: a woken thread does not run immediately. It waits for the next switch, which may be up to 10 ms away unless it outranks the running thread. A sleep of 1 ms can therefore last longer than 1 ms. All general-purpose operating systems share this: a sleep means "at least this long".
 
@@ -790,9 +791,9 @@ On a pico with a Display Pack, the build's linker map (read with `tools/mem_repo
 | Kernel heap: thread stacks + dynamic objects | 96 KB |
 | Display framebuffer | \~32 KB |
 | Filesystem buffers | \~6 KB |
-| TCB/PCB tables, VFS tables, other globals | \~10 KB |
-| Pico SDK | \~6 KB |
-| Free | \~146 KB |
+| TCB/PCB tables, VFS tables, other globals | \~14 KB |
+| Pico SDK and everything else | \~12 KB |
+| Free | \~105 KB |
 
 The C compiler puts every variable in one of four places:
 
@@ -832,10 +833,10 @@ struct heap_block {
 };
 ```
 
-The header is 12 bytes on the Pico, rounded up to 16 so every payload starts on an 8-byte boundary. At boot the whole heap is one free block. The blocks always form a list in address order, from the start of the array to the end:
+The header is 12 bytes on the Pico, rounded up to 16 so every payload starts on an 8-byte boundary. At boot the whole heap is one free block. The blocks always form a list in address order, from the start of the array to the end. On a pico, with a 96 KB heap:
 
 ```
-[hdr|free 65520 bytes                                           ]
+[hdr|free 98288 bytes                                           ]
 ```
 
 `kmalloc(n)` in `src/kernel/mem.c`:
@@ -848,7 +849,7 @@ The header is 12 bytes on the Pico, rounded up to 16 so every payload starts on 
 After three threads are created, the heap might look like this:
 
 ```
-[hdr|A 2048][hdr|B 2048][hdr|C 2048][hdr|free 59328            ]
+[hdr|A 2048][hdr|B 2048][hdr|C 2048][hdr|free 92096            ]
 ```
 
 `kfree(p)` steps back 16 bytes from `p` to find the header, marks it free, and **coalesces**: it merges the block with any free neighbours so that two small holes become one large one. Merging forward is easy because each header points to the next. Merging backward needs the previous block, which the header does not record, so `kfree()` walks the list from the start to find it. That makes `kfree()` slower as the heap fills up.
@@ -861,7 +862,7 @@ The code comment calls this a "boundary-tag" allocator. A true boundary-tag allo
 Free B from the picture above:
 
 ```
-[hdr|A 2048][hdr|free 2048][hdr|C 2048][hdr|free 59328         ]
+[hdr|A 2048][hdr|free 2048][hdr|C 2048][hdr|free 92096         ]
 ```
 
 Now allocate 32 bytes. First-fit takes them from the hole where B was, and splits it. Do this a few dozen times with mixed sizes and the heap fills with small holes between used blocks. The total free space can be large while the **largest free block** is too small for a new 2 KB stack. This is **external fragmentation**, and it is the main weakness of first-fit.
@@ -903,12 +904,12 @@ Both cores call `kmalloc()`. If both walked and split the same free block at the
 - `pico> mem`, then `run producer`, `run consumer`, `run sensor`, and `mem` again. How much did each thread cost?
 - Kill one in the middle (`kill <tid>`), start a different one, and look at "Largest free".
 - Run the host tests with `./build tests`. Read `tests/mem/` to see a fragmentation test that needs no hardware.
-- Run `python3 tools/mem_report.py build_pico_D/src/picoos_D-v0.3.9.elf.map` and find the heap array.
+- Run `python3 tools/mem_report.py builds/pico_D/src/picoos_D-v0.4.4.elf.map` and find the heap array.
 
 <a id="s-7-10"></a>
 ### 7.10 Think about it
 
-1. Every thread stack is 2 KB even if `threads` shows it using 600 bytes. The high-water mark only covers paths the thread has run. How would you pick a smaller stack size for an app, and how much margin would you leave?
+1. An app gets a 2 KB stack unless its `app_table[]` entry asks for another size, even if `threads` shows it using 600 bytes. The high-water mark only covers paths the thread has run. How would you pick the `stack_size` for an app, and how much margin would you leave?
 2. The pico_w + Display Pack 2 build keeps a 64 KB heap while the other builds get 96 or 128 KB. Run `mem_report.py` on its map: why? What else in SRAM wants the memory the kernel heap does not take?
 
 <a id="ch-8"></a>
@@ -975,7 +976,7 @@ It disables interrupts *and* takes the hardware lock. Both are needed:
 - The hardware lock keeps the **other core** out.
 - Disabling interrupts keeps **this core** from switching threads while it holds the lock. Without it, a thread could be preempted while holding the lock, and every other thread that wants it would spin uselessly for a whole time slice.
 
-The rule for spinlocks: **hold them for microseconds, never across anything that waits.** Spinning wastes a whole core. picoOS uses dedicated spinlocks for just three hot structures: the ready queues (`sched_lock`), the heap (`heap_lock`) and a table of event waiters (`event_pool_lock`).
+The rule for spinlocks: **hold them for microseconds, never across anything that waits.** Spinning wastes a whole core. picoOS uses dedicated spinlocks for just four hot structures: the ready queues (`sched_lock`), the heap (`heap_lock`), a table of event waiters (`event_pool_lock`) and the TCB and PCB tables with their ID counters (`task_lock`).
 
 <a id="s-8-5"></a>
 ### 8.5 Blocking locks
@@ -1014,7 +1015,7 @@ Three details are worth slowing down for.
 
 **A wake-up is a hint, not a gift.** `kmutex_unlock()` frees the mutex and wakes the first waiter. But by the time the waiter runs, a third thread may have taken the mutex. So the waiter loops back and checks again. Almost every OS works this way.
 
-**The waiter list costs no memory.** A BLOCKED thread is in no ready queue, so its TCB's `next` field is free. The waiter list is threaded through that same field.
+**The waiter list has its own link.** Waiters are chained through the TCB's `wait_next` field, not `next`. It looks as if they could share: a BLOCKED thread is in no ready queue, so `next` should be free. But look at the order of the calls above. `waiter_enqueue()` runs *before* `sched_block()`, while the thread is still in its ready queue. Earlier versions of picoOS did share the field, and `waiter_enqueue()` set `next = NULL` on a thread that still had other threads queued behind it. That cut the ready queue in two. `sched_block()` then unlinked the thread, and everything after it at the same priority was lost: still READY, on no queue, never scheduled again. Nothing crashed and nothing was printed. A display thread just stopped updating, and `threads` showed it READY with its CPU time frozen. The fix cost 4 bytes per TCB. The lesson: a field is free only if *every* path agrees it is free, at every moment.
 
 <a id="s-8-6"></a>
 ### 8.6 Semaphores
@@ -1051,9 +1052,10 @@ Break any one and deadlock cannot happen. The easiest to break is the fourth: al
 
 ```
 primitive's stripe  ->  event_pool_lock  ->  sched_lock  ->  heap_lock
+                                            sched_lock  ->  task_lock
 ```
 
-No code path takes them in the other direction.
+No code path takes them in the other direction. `task_lock` is a **leaf**: nothing takes another lock while holding it. `task.c` calls `kmalloc()` and `kfree()` only before or after its critical section.
 
 picoOS also has a debugging aid. Build with `-DPICOOS_LOCK_DEBUG=ON` and every blocking lock records which file and line took it. If a thread stays BLOCKED longer than 5 seconds, the kernel halts and prints the waiting thread, the lock and where its holder took it.
 
@@ -1491,7 +1493,7 @@ A picoOS application is one C function, `void my_app(void *arg)`, registered in 
 ### 14.1 The rules
 
 - Use **picoOS APIs only**: `shell_print()` not `printf()`, `sys_sleep()` not `sleep_ms()`, `sys_getcore()` not `get_core_num()`, `dev_ioctl(DEV_TIMER, IOCTL_TIMER_GET_US, …)` not `time_us_64()`. Never include `arch.h` or Pico SDK headers. If something is missing, add a small kernel wrapper first.
-- Your stack is 2 KB. Large buffers go in `static` variables or come from `kmalloc()`.
+- Your stack is 2 KB unless your `app_table[]` entry asks for more (step 2). Large buffers go in `static` variables or come from `kmalloc()`.
 - Sleep or block when you have nothing to do. A loop that never waits starves every lower priority.
 - If `run` passes a word, `arg` points to a copy on the heap, and **your app must `kfree()` it**. Otherwise `arg` is `NULL`.
 
@@ -1570,6 +1572,8 @@ const app_entry_t app_table[] = {
 };
 ```
 
+The last field is the stack size in bytes for the thread `run` starts; 0 means `DEFAULT_STACK_SIZE` (2 KB). Run the app, read its high-water mark in the STACK column of `threads`, and add a margin. The kernel rounds the size up to a multiple of 8 and refuses anything below `MIN_STACK_SIZE` (256 B). Threads the app creates itself, such as `ticker-w`, pass their own size to `task_create_thread()`.
+
 <a id="s-14-4"></a>
 ### 14.4 Step 3: build and run
 
@@ -1591,7 +1595,7 @@ run: started 'ticker' as PID 100 TID 4
 | Shell stops responding | your threads never sleep, run at priority 0 or 1 (more urgent than the shell), and keep both cores busy |
 | build stops: `no previous prototype for 'ticker'` | `ticker.c` does not include `ticker.h`; every warning is an error |
 | build stops: `format '%u' expects … 'long unsigned int'` | a `uint32_t` passed to `%u`; on ARM it is `unsigned long`, so cast it: `(unsigned)x` |
-| `run: cannot create thread (pool full)` | 32 threads already exist, or the heap has no 2 KB block left |
+| `run: cannot create thread (pool or heap full, …)` | 32 threads already exist, the heap has no block as big as the stack, or `stack_size` is below 256 B |
 | Heap shrinks every run | `arg` was not freed, or a buffer from `kmalloc()` was not |
 | Hang forever on a queue | the other side never started, or re-initialised the queue (Chapter 9) |
 
@@ -1690,10 +1694,9 @@ Every shortcut you met in this book is a project waiting to be done. Each one be
 | Project | Where | Chapter | Difficulty |
 | --- | --- | --- | --- |
 | Owner check and "already locked" panic in `kmutex_t` | `sync.c` | 8 | Low |
-| Stack high-water mark: fill stacks with a pattern, report the deepest use in `threads` | `task.c`, `shell.c` | 4, 7 | Low |
 | Add a size footer to heap blocks so `kfree()` merges backward in one step | `mem.c` | 7 | Low |
 | Move `/dev/flash` and `/dev/gpio` read/write from stubs to real functions | `dev.c` | 11 | Medium |
-| Sorted sleep queue instead of scanning 16 TCBs every millisecond | `sched.c` | 5 | Medium |
+| Sorted sleep queue instead of scanning 32 TCBs every millisecond | `sched.c` | 5 | Medium |
 | Priority bitmap for an O(1) pick of the next ready queue | `sched.c` | 5 | Medium |
 | Priority inheritance for `kmutex_t` | `sync.c`, `sched.c` | 8 | Medium |
 | Free a thread killed while it waits at once: record what it is blocked on and unlink it | `task.c`, `sync.c` | 4, 8 | Medium |
@@ -1706,7 +1709,7 @@ Every shortcut you met in this book is a project waiting to be done. Each one be
 | Buddy or slab allocator | `mem.c` | 7 | High |
 | Real system calls: `svc` trap plus RP2350 MPU regions per process | `syscall.c`, `sched_asm.S` | 10 | High |
 
-`docs/imperfections.md` in the repository describes the original eleven in more depth, with file and line numbers and the SRAM each fix saves or costs.
+`docs/imperfections.md` in the repository describes twelve of them in more depth, with file and line numbers and the SRAM each fix saves or costs.
 
 <a id="s-16-3"></a>
 ### 16.3 A last word
@@ -1768,7 +1771,8 @@ The goal was never a perfect operating system. It was to make each design decisi
 | `TIME_SLICE_MS` | 10 | `sched.c` |
 | SysTick period | 1 ms | `sched.c` |
 | `HEAP_SIZE` | 128 KB (RP2350) / 96 KB (RP2040) / 64 KB (pico_w + Display Pack 2) | `CMakeLists.txt` |
-| Stack sizes | 512 B / 2 KB / 3 KB | `task.h` |
+| Stack sizes | 512 B / 2 KB / 3 KB; minimum 256 B | `task.h` |
+| App stack size | per app, 0 = 2 KB | `app_table[]` in `demo.c` |
 | `MQ_MAX_MSG` × `MQ_MSG_SIZE` | 16 × 64 B | `sync.h` |
 | `VFS_MAX_OPEN` | 16 | `vfs.h` |
 | `FS_MAX_FILES` | 64 (RP2040) / 127 (RP2350) | `CMakeLists.txt` |
@@ -1803,7 +1807,7 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 
 - affinity — [4.1](#s-4-1), [5.3](#s-5-3), [6.3](#s-6-3), [8.12](#s-8-12), [9.2](#s-9-2), [12.5](#s-12-5), [14.2](#s-14-2)
 - applications, writing — [14](#ch-14), [14.1](#s-14-1), [14.2](#s-14-2), [14.3](#s-14-3), [14.4](#s-14-4), [14.5](#s-14-5)
-- `app_table[]` — [5.2](#s-5-2), [14.3](#s-14-3)
+- `app_table[]` — [5.2](#s-5-2), [7.10](#s-7-10), [14.1](#s-14-1), [14.3](#s-14-3), [A.2](#s-a-2)
 - `arch.h` — [14.1](#s-14-1)
 - async context (SDK) — [15.1](#s-15-1), [15.4](#s-15-4)
 - `AUTORUN=` — [4.2](#s-4-2), [13.4](#s-13-4), [13.5](#s-13-5)
@@ -1833,7 +1837,7 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 - copy-on-write — [12.7](#s-12-7), [16.2](#s-16-2)
 - Cortex-M0+ — [1.1](#s-1-1), [1.5](#s-1-5), [5.5](#s-5-5), [8.3](#s-8-3)
 - Cortex-M33 — [1.1](#s-1-1), [5.5](#s-5-5), [8.3](#s-8-3)
-- critical section — [8.1](#s-8-1), [8.2](#s-8-2), [8.4](#s-8-4)
+- critical section — [8.1](#s-8-1), [8.2](#s-8-2), [8.4](#s-8-4), [8.9](#s-8-9)
 - cross-compiler — [1.2](#s-1-2)
 - `current_tcb[]`, `CURRENT_TCB` — [3.4](#s-3-4), [5.5](#s-5-5), [6.1](#s-6-1), [8.5](#s-8-5), [9.2](#s-9-2)
 - CYW43 radio — [15](#ch-15)
@@ -1890,9 +1894,9 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 **K**
 
 - kernel process (PID 1) — [3.2](#s-3-2), [4.2](#s-4-2), [15.1](#s-15-1)
-- `kfree()` — [7.5](#s-7-5), [7.8](#s-7-8), [14.1](#s-14-1), [14.2](#s-14-2), [16.2](#s-16-2), [A.3](#s-a-3)
+- `kfree()` — [7.5](#s-7-5), [7.8](#s-7-8), [8.9](#s-8-9), [14.1](#s-14-1), [14.2](#s-14-2), [16.2](#s-16-2), [A.3](#s-a-3)
 - `kill`, `killproc` — [4.2](#s-4-2), [4.5](#s-4-5), [4.6](#s-4-6), [4.7](#s-4-7), [5.7](#s-5-7), [7.9](#s-7-9), [8.11](#s-8-11), [10.5](#s-10-5), [13.3](#s-13-3), [16.2](#s-16-2)
-- `kmalloc()` — [P.4](#s-p-4), [3.2](#s-3-2), [7.3](#s-7-3), [7.5](#s-7-5), [7.8](#s-7-8), [14.1](#s-14-1), [14.5](#s-14-5), [A.3](#s-a-3)
+- `kmalloc()` — [P.4](#s-p-4), [3.2](#s-3-2), [7.3](#s-7-3), [7.5](#s-7-5), [7.8](#s-7-8), [8.9](#s-8-9), [14.1](#s-14-1), [14.5](#s-14-5), [A.3](#s-a-3)
 - `kmutex_t`, `kmutex_lock()` — [8.5](#s-8-5), [8.11](#s-8-11), [8.12](#s-8-12), [8.13](#s-8-13), [10.4](#s-10-4), [12.6](#s-12-6), [15.4](#s-15-4), [16.2](#s-16-2), [A.3](#s-a-3)
 
 **L**
@@ -1916,7 +1920,7 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 
 **P**
 
-- PCB (process control block) — [4.2](#s-4-2), [6.1](#s-6-1), [7.3](#s-7-3), [7.7](#s-7-7), [14.2](#s-14-2)
+- PCB (process control block) — [4.2](#s-4-2), [6.1](#s-6-1), [7.3](#s-7-3), [7.7](#s-7-7), [8.4](#s-8-4), [14.2](#s-14-2)
 - PendSV — [5.5](#s-5-5), [5.7](#s-5-7), [6.1](#s-6-1), [8.2](#s-8-2), [A.3](#s-a-3)
 - `pi` app — [1.6](#s-1-6), [5.7](#s-5-7), [5.8](#s-5-8), [6.3](#s-6-3), [6.5](#s-6-5)
 - Pico SDK — [1.2](#s-1-2), [2.4](#s-2-4), [7.3](#s-7-3), [10.4](#s-10-4), [14.1](#s-14-1)
@@ -1935,7 +1939,7 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 **R**
 
 - race condition — [8](#ch-8), [8.1](#s-8-1), [8.11](#s-8-11), [15.5](#s-15-5)
-- ready queues — [4.5](#s-4-5), [5.2](#s-5-2), [5.6](#s-5-6), [6](#ch-6), [6.1](#s-6-1), [6.4](#s-6-4), [8.4](#s-8-4), [8.5](#s-8-5), [16.2](#s-16-2)
+- ready queues — [4.1](#s-4-1), [4.5](#s-4-5), [5.2](#s-5-2), [5.6](#s-5-6), [6](#ch-6), [6.1](#s-6-1), [6.4](#s-6-4), [8.4](#s-8-4), [8.5](#s-8-5), [16.2](#s-16-2)
 - reaping — [4.5](#s-4-5)
 - ring buffer — [5.7](#s-5-7), [9.1](#s-9-1)
 - round-robin — [5](#ch-5), [5.3](#s-5-3)
@@ -1978,7 +1982,7 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 - tests, host-native — [7.9](#s-7-9), [12.6](#s-12-6), [12.8](#s-12-8), [16.1](#s-16-1)
 - thread — [2.5](#s-2-5), [3.3](#s-3-3), [4](#ch-4), [4.1](#s-4-1)
 - thread states — [4.5](#s-4-5), [5.3](#s-5-3)
-- `threads` command — [1.6](#s-1-6), [2.6](#s-2-6), [4.4](#s-4-4), [4.6](#s-4-6), [5.8](#s-5-8), [6.5](#s-6-5), [7.10](#s-7-10), [13.3](#s-13-3), [16.2](#s-16-2)
+- `threads` command — [1.6](#s-1-6), [2.6](#s-2-6), [4.4](#s-4-4), [4.6](#s-4-6), [5.8](#s-5-8), [6.5](#s-6-5), [7.10](#s-7-10), [8.5](#s-8-5), [13.3](#s-13-3), [14.3](#s-14-3)
 - time slice — [5](#ch-5), [5.1](#s-5-1), [5.3](#s-5-3), [5.6](#s-5-6), [5.8](#s-5-8), [6.1](#s-6-1), [6.4](#s-6-4), [8.4](#s-8-4), [A.2](#s-a-2)
 - torn read — [15.2](#s-15-2)
 - `trace` command — [5.7](#s-5-7), [5.8](#s-5-8), [5.9](#s-5-9), [13.3](#s-13-3)
