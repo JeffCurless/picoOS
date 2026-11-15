@@ -61,15 +61,16 @@
  * without touching the scarce 8-slot claim-free range at all.
  *
  * picoOS's total HW spinlock claims, with this revision:
- *   event_pool_lock, heap_lock (mem.c), sched_lock (sched.c) — one each,
+ *   event_pool_lock, heap_lock (mem.c), sched_lock (sched.c),
+ *     task_lock (task.c) — one each,
  *     dedicated, because they sit on the hottest paths in the kernel (every
  *     kmalloc/kfree, every context switch); sharing a stripe with unrelated
  *     objects there would be a real throughput loss.
  *   prim_pool[0..PRIM_POOL_SIZE-1] — shared by kmutex_t, ksemaphore_t,
  *     event_flags_t, and mqueue_t via prim_pool_assign().
- * That's (3 + PRIM_POOL_SIZE) HW spinlocks total, of which only
- * (1 + PRIM_POOL_SIZE) come from the contended claim-free range (event_pool_
- * lock, heap_lock, sched_lock, plus all but the first two pool stripes) —
+ * That's (4 + PRIM_POOL_SIZE) HW spinlocks total, of which (2 +
+ * PRIM_POOL_SIZE) come from the contended claim-free range (event_pool_lock,
+ * heap_lock, sched_lock, task_lock, plus all but the first two pool stripes) —
  * see sync_spinlock_report() for a runtime view of how much headroom remains.
  * ------------------------------------------------------------------------- */
 #define PRIM_POOL_SIZE 4

@@ -87,6 +87,13 @@ static int cmd_help(int argc, char **argv)
     return 0;
 }
 
+/* app_stack_size — the stack an app_table[] entry asks for; 0 means the
+ * kernel default.  Used by every launcher (run, AUTORUN=, BUTTONx=). */
+static uint32_t app_stack_size(const app_entry_t *app)
+{
+    return (app->stack_size != 0u) ? app->stack_size : (uint32_t)DEFAULT_STACK_SIZE;
+}
+
 /* --- ps ------------------------------------------------------------------ */
 static int cmd_ps(int argc, char **argv)
 {
@@ -157,8 +164,9 @@ static int cmd_threads(int argc, char **argv)
 {
     (void)argc;
     (void)argv;
-    shell_println("TID  PID  PRI  CORE  STATE     Time    STACK   NAME            CANARY");
-    shell_println("---  ---  ---  ----  --------  ------  ------  ---------------  --------");
+    /* STACK is high-water mark / size in bytes (task_stack_used). */
+    shell_println("TID  PID  PRI  CORE  STATE     Time    STACK      NAME            CANARY");
+    shell_println("---  ---  ---  ----  --------  ------  ---------  ---------------  --------");
     for (int i = 0; i < MAX_THREADS; i++) {
         tcb_t *t = task_get_thread_slot(i);
         if (t == NULL) { continue; }
@@ -169,12 +177,15 @@ static int cmd_threads(int argc, char **argv)
         const char *core_str = (t->affinity == THREAD_AFFINITY_ANY) ? "*"
                              : (t->affinity == THREAD_AFFINITY_C0)  ? "0"
                              :                                         "1";
-        shell_print("%-4u %-4u %-4u %-5s %-9s %-7s %-7u %-16s %s\r\n",
+        char stack_buf[24];  /* "used/size", e.g. "1236/2048" */
+        snprintf(stack_buf, sizeof(stack_buf), "%u/%u",
+                 (unsigned)task_stack_used(t), (unsigned)t->stack_size);
+        shell_print("%-4u %-4u %-4u %-5s %-9s %-7s %-10s %-16s %s\r\n",
                     (unsigned)t->tid, (unsigned)t->pid, (unsigned)t->priority,
                     core_str,
                     state_name(t->state),
                     time_buf,
-                    (unsigned)t->stack_size,
+                    stack_buf,
                     t->name,
                     stack_str);
     }
@@ -627,9 +638,9 @@ static int cmd_run(int argc, char **argv)
             tcb_t *t = task_create_thread(proc, appname,
                                           app_table[i].entry, app_arg,
                                           app_table[i].priority,
-                                          DEFAULT_STACK_SIZE);
+                                          app_stack_size(&app_table[i]));
             if (t == NULL) {
-                shell_println("run: cannot create thread (pool full)");
+                shell_println("run: cannot create thread (pool or heap full, or stack_size below MIN_STACK_SIZE)");
                 task_free_process(proc);
                 if (app_arg != NULL) { kfree(app_arg); }
                 return -1;
@@ -803,7 +814,7 @@ static void btn_monitor_thread(void *arg)
                 tcb_t *t = task_create_thread(proc, btn_bindings[i].appname,
                                               app_table[j].entry, NULL,
                                               app_table[j].priority,
-                                              DEFAULT_STACK_SIZE);
+                                              app_stack_size(&app_table[j]));
                 if (!t) {
                     printf("[shell] btn: thread pool full\r\n");
                     task_free_process(proc);
@@ -917,7 +928,7 @@ static void shell_autorun_init(void)
         tcb_t *t = task_create_thread(proc, appname,
                                       app_table[i].entry, NULL,
                                       app_table[i].priority,
-                                      DEFAULT_STACK_SIZE);
+                                      app_stack_size(&app_table[i]));
         if (!t) {
             printf("[shell] autorun: thread pool full\r\n");
             task_free_process(proc);

@@ -444,7 +444,7 @@ The shell has priority 2 and the idle threads have priority 7. If the shell thre
 <a id="ch-4"></a>
 ## Chapter 4 — Processes and Threads
 
-A thread is the thing the CPU runs; a process is the thing that owns threads. picoOS keeps up to 16 threads and 8 processes in two fixed tables, and every one of them is described by a small C struct you can read in `src/kernel/task.h`.
+A thread is the thing the CPU runs; a process is the thing that owns threads. picoOS keeps up to 32 threads and 16 processes in two fixed tables, and every one of them is described by a small C struct you can read in `src/kernel/task.h`.
 
 <a id="s-4-1"></a>
 ### 4.1 What a thread really is
@@ -531,6 +531,8 @@ A thread's stack is fixed when it is created:
 The stack cannot grow. If a thread uses more than its share, it silently writes over whatever sits below it in memory — usually another thread's stack or a heap block. To catch this, picoOS writes the value `0xDEADBEEF` (the **canary**) at the lowest word of every stack. On every context switch the scheduler checks it. If it has changed, the thread overflowed, and picoOS prints `!!! STACK OVERFLOW !!!` with the thread's name and halts.
 
 The name comes from coal miners, who carried a canary underground: if the bird stopped singing, the air was bad. The check is cheap but late — it only notices damage after it has happened, and only if the overflow happened to change that exact word.
+
+The canary says whether a stack overflowed, not how close it came. For that, picoOS paints every word of a new stack with `0xA5A5A5A5` before the thread starts. A word the thread ever writes loses the pattern, so scanning up from the bottom for the first word that changed gives the deepest the stack has ever grown: its **high-water mark**. The `threads` command shows it as used/size in the STACK column, for example `612/2048`. It can only under-report, never over-report — a thread that happens to store `0xA5A5A5A5` leaves a painted-looking word — and it only counts the paths the thread has run so far.
 
 <a id="s-4-5"></a>
 ### 4.5 Thread states
@@ -754,7 +756,7 @@ The fix is a lock that works across cores. The scheduler holds `sched_lock` when
 <a id="ch-7"></a>
 ## Chapter 7 — Memory
 
-The Pico has two kinds of memory, and an operating system must manage both: a small, fast **SRAM** that is wiped at every reset, and a larger, slower **flash** that keeps its contents with the power off. picoOS runs its code from flash, keeps its data in SRAM, and carves 64 KB of the SRAM into a heap that every thread stack and dynamic object comes from.
+The Pico has two kinds of memory, and an operating system must manage both: a small, fast **SRAM** that is wiped at every reset, and a larger, slower **flash** that keeps its contents with the power off. picoOS runs its code from flash, keeps its data in SRAM, and carves 64–128 KB of the SRAM, depending on the board, into a heap that every thread stack and dynamic object comes from.
 
 <a id="s-7-1"></a>
 ### 7.1 Addresses: one big numbered list
@@ -785,7 +787,7 @@ On a pico with a Display Pack, the build's linker map (read with `tools/mem_repo
 
 | Region | Size |
 | --- | --- |
-| Kernel heap: thread stacks + dynamic objects | 64 KB |
+| Kernel heap: thread stacks + dynamic objects | 96 KB |
 | Display framebuffer | \~32 KB |
 | Filesystem buffers | \~6 KB |
 | TCB/PCB tables, VFS tables, other globals | \~10 KB |
@@ -795,7 +797,7 @@ On a pico with a Display Pack, the build's linker map (read with `tools/mem_repo
 The C compiler puts every variable in one of four places:
 
 - **.data** — globals with a starting value. Copied from flash to SRAM at boot.
-- **.bss** — globals with no starting value. Zeroed at boot. The 64 KB heap array is here: `static uint8_t heap_memory[HEAP_SIZE];`
+- **.bss** — globals with no starting value. Zeroed at boot. The heap array (96 KB on a pico) is here: `static uint8_t heap_memory[HEAP_SIZE];`
 - **the stack** — local variables, one stack per thread.
 - **the heap** — memory requested at run time with `kmalloc()`.
 
@@ -820,7 +822,7 @@ That array runs straight past the bottom of the stack into the heap block below,
 <a id="s-7-5"></a>
 ### 7.5 The heap and kmalloc
 
-The heap is one 64 KB array divided into **blocks**. Each block starts with a small header:
+The heap is one array — `HEAP_SIZE` bytes, set per board in `src/CMakeLists.txt` (`PICOOS_HEAP_KB`): 128 KB on RP2350, 96 KB on RP2040, 64 KB on a pico_w with Display Pack 2 — divided into **blocks**. Each block starts with a small header:
 
 ```c
 struct heap_block {
@@ -901,13 +903,13 @@ Both cores call `kmalloc()`. If both walked and split the same free block at the
 - `pico> mem`, then `run producer`, `run consumer`, `run sensor`, and `mem` again. How much did each thread cost?
 - Kill one in the middle (`kill <tid>`), start a different one, and look at "Largest free".
 - Run the host tests with `./build tests`. Read `tests/mem/` to see a fragmentation test that needs no hardware.
-- Run `python3 tools/mem_report.py build_pico_D/src/picoos_D-v0.3.9.elf.map` and find the 64 KB heap array.
+- Run `python3 tools/mem_report.py build_pico_D/src/picoos_D-v0.3.9.elf.map` and find the heap array.
 
 <a id="s-7-10"></a>
 ### 7.10 Think about it
 
-1. Every thread stack is 2 KB even if the thread uses 300 bytes. How could the OS measure how much of a stack is actually used? (Hint: fill it with a pattern at creation.)
-2. The heap is 64 KB, but 146 KB of SRAM is unused. What would you change to give apps more heap, and what would you check first?
+1. Every thread stack is 2 KB even if `threads` shows it using 600 bytes. The high-water mark only covers paths the thread has run. How would you pick a smaller stack size for an app, and how much margin would you leave?
+2. The pico_w + Display Pack 2 build keeps a 64 KB heap while the other builds get 96 or 128 KB. Run `mem_report.py` on its map: why? What else in SRAM wants the memory the kernel heap does not take?
 
 <a id="ch-8"></a>
 ## Chapter 8 — Concurrency and Locks
@@ -1562,9 +1564,9 @@ Add a line to `app_table[]` in `src/apps/demo.c`:
 #include "ticker.h"
 
 const app_entry_t app_table[] = {
-    { "producer", demo_producer, 4u },
+    { "producer", demo_producer, 4u, 0u },
     …
-    { "ticker",   ticker,        4u },   /* name, entry, priority */
+    { "ticker",   ticker,        4u, 0u },   /* name, entry, priority, stack */
 };
 ```
 
@@ -1589,7 +1591,7 @@ run: started 'ticker' as PID 100 TID 4
 | Shell stops responding | your threads never sleep, run at priority 0 or 1 (more urgent than the shell), and keep both cores busy |
 | build stops: `no previous prototype for 'ticker'` | `ticker.c` does not include `ticker.h`; every warning is an error |
 | build stops: `format '%u' expects … 'long unsigned int'` | a `uint32_t` passed to `%u`; on ARM it is `unsigned long`, so cast it: `(unsigned)x` |
-| `run: cannot create thread (pool full)` | 16 threads already exist, or the heap has no 2 KB block left |
+| `run: cannot create thread (pool full)` | 32 threads already exist, or the heap has no 2 KB block left |
 | Heap shrinks every run | `arg` was not freed, or a buffer from `kmalloc()` was not |
 | Hang forever on a queue | the other side never started, or re-initialised the queue (Chapter 9) |
 
@@ -1760,12 +1762,12 @@ The goal was never a perfect operating system. It was to make each design decisi
 
 | Constant | Value | Where |
 | --- | --- | --- |
-| `MAX_THREADS` | 16 | `task.h` |
-| `MAX_PROCESSES` | 8 | `task.h` |
+| `MAX_THREADS` | 32 | `CMakeLists.txt` (`task.h` default) |
+| `MAX_PROCESSES` | 16 | `CMakeLists.txt` (`task.h` default) |
 | Priorities | 0 (highest) to 7 | `sched.c` |
 | `TIME_SLICE_MS` | 10 | `sched.c` |
 | SysTick period | 1 ms | `sched.c` |
-| `HEAP_SIZE` | 64 KB | `mem.h` |
+| `HEAP_SIZE` | 128 KB (RP2350) / 96 KB (RP2040) / 64 KB (pico_w + Display Pack 2) | `CMakeLists.txt` |
 | Stack sizes | 512 B / 2 KB / 3 KB | `task.h` |
 | `MQ_MAX_MSG` × `MQ_MSG_SIZE` | 16 × 64 B | `sync.h` |
 | `VFS_MAX_OPEN` | 16 | `vfs.h` |
@@ -1843,7 +1845,7 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 - `device_t` — [11.1](#s-11-1)
 - `dev_ioctl()` — [8.12](#s-8-12), [10.4](#s-10-4), [11.2](#s-11-2), [14.1](#s-14-1), [14.2](#s-14-2)
 - Dijkstra, Edsger — [8.6](#s-8-6)
-- Display Pack — [1.1](#s-1-1), [1.3](#s-1-3), [2.4](#s-2-4), [4.2](#s-4-2), [7.3](#s-7-3), [11.1](#s-11-1), [13.3](#s-13-3), [13.4](#s-13-4)
+- Display Pack — [1.1](#s-1-1), [1.3](#s-1-3), [2.4](#s-2-4), [4.2](#s-4-2), [7.3](#s-7-3), [7.5](#s-7-5), [7.10](#s-7-10), [11.1](#s-11-1), [13.3](#s-13-3), [13.4](#s-13-4), [A.2](#s-a-2)
 - `dropped` counter — [15.3](#s-15-3), [15.7](#s-15-7)
 
 **E**
@@ -1976,7 +1978,7 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 - tests, host-native — [7.9](#s-7-9), [12.6](#s-12-6), [12.8](#s-12-8), [16.1](#s-16-1)
 - thread — [2.5](#s-2-5), [3.3](#s-3-3), [4](#ch-4), [4.1](#s-4-1)
 - thread states — [4.5](#s-4-5), [5.3](#s-5-3)
-- `threads` command — [1.6](#s-1-6), [2.6](#s-2-6), [4.6](#s-4-6), [5.8](#s-5-8), [6.5](#s-6-5), [13.3](#s-13-3), [16.2](#s-16-2)
+- `threads` command — [1.6](#s-1-6), [2.6](#s-2-6), [4.4](#s-4-4), [4.6](#s-4-6), [5.8](#s-5-8), [6.5](#s-6-5), [7.10](#s-7-10), [13.3](#s-13-3), [16.2](#s-16-2)
 - time slice — [5](#ch-5), [5.1](#s-5-1), [5.3](#s-5-3), [5.6](#s-5-6), [5.8](#s-5-8), [6.1](#s-6-1), [6.4](#s-6-4), [8.4](#s-8-4), [A.2](#s-a-2)
 - torn read — [15.2](#s-15-2)
 - `trace` command — [5.7](#s-5-7), [5.8](#s-5-8), [5.9](#s-5-9), [13.3](#s-13-3)

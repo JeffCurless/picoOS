@@ -148,6 +148,41 @@ endif()
 message(STATUS "picoOS Bluetooth      : ${PICOOS_HAS_BT}")
 
 # ---------------------------------------------------------------------------
+# Thread/process pools and kernel heap
+#
+# The pools are static (about 72 B per TCB, 300 B per PCB).  The kernel heap
+# holds every thread stack, so it is sized per variant from what is left
+# after the display framebuffer and the CYW43/lwIP/BTstack drivers.  Keep at
+# least ~30 KB of SRAM free on WiFi builds: BTstack allocates from the C
+# library heap (HAVE_MALLOC), which is whatever SRAM the linker leaves over.
+#
+#   variant                    heap    free SRAM after (v0.4.1 maps, 32/16 pools)
+#   RP2350 (all)               128 KB  ~215-360 KB
+#   RP2040, no WiFi            96 KB   ~60-135 KB
+#   RP2040 WiFi, Display Pack  96 KB   ~38-70 KB
+#   RP2040 WiFi, Display Pack2 64 KB   ~26 KB (75 KB framebuffer)
+#
+# Override on the command line, e.g. -DPICOOS_HEAP_KB=80 -DPICOOS_MAX_THREADS=24.
+# ---------------------------------------------------------------------------
+set(PICOOS_MAX_THREADS   32 CACHE STRING "Thread pool size (TCB slots)")
+set(PICOOS_MAX_PROCESSES 16 CACHE STRING "Process pool size (PCB slots)")
+set(PICOOS_HEAP_KB       "" CACHE STRING "Kernel heap size in KB (empty = per-variant default)")
+
+if(PICOOS_HEAP_KB)
+    set(_picoos_heap_kb ${PICOOS_HEAP_KB})
+elseif(PICO_RP2350)
+    set(_picoos_heap_kb 128)
+elseif(PICOOS_HAS_WIFI AND PICOOS_DISPLAY_PACK2)
+    set(_picoos_heap_kb 64)
+else()
+    set(_picoos_heap_kb 96)
+endif()
+
+set(_picoos_heap_def "(${_picoos_heap_kb}u * 1024u)")
+message(STATUS "picoOS kernel heap    : ${_picoos_heap_kb} KB")
+message(STATUS "picoOS pools          : ${PICOOS_MAX_THREADS} threads, ${PICOOS_MAX_PROCESSES} processes")
+
+# ---------------------------------------------------------------------------
 # External application injection
 #
 # When picoOS is used as a git submodule, the parent project sets:
@@ -322,6 +357,9 @@ target_compile_definitions(picoos PRIVATE
     PICOOS_FLASH_STR="${PICOOS_FLASH_STR}"
     FS_FLASH_SIZE=${PICOOS_FS_FLASH_SIZE}
     FS_MAX_FILES=${PICOOS_FS_MAX_FILES}
+    HEAP_SIZE=${_picoos_heap_def}
+    MAX_THREADS=${PICOOS_MAX_THREADS}
+    MAX_PROCESSES=${PICOOS_MAX_PROCESSES}
 )
 
 if(PICOOS_DISPLAY_ENABLE)

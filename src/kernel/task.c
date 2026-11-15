@@ -12,9 +12,11 @@
  * without prior written permission from the copyright holder.
  */
 
+
 #include "task.h"
 #include "sched.h"   /* sched_add_thread, sched_remove_thread */
 #include "mem.h"     /* kmalloc / kfree  */
+#include "sync.h"    /* spinlock_t (task_lock) */
 
 #include <stddef.h>
 #include <stdint.h>
@@ -69,6 +71,26 @@ static pid_range_info_t pid_ranges[PID_RANGE_COUNT] = {
     [PID_RANGE_BUTTON]  = { 200u, 299u, 200u },
 };
 
+/* -------------------------------------------------------------------------
+ * task_lock — guards the pools and ID counters across both cores
+ *
+ * Covers tcb_used[], pcb_used[], next_tid, pid_ranges[], each PCB's
+ * threads[] / thread_count, and s_kernel_proc.  Without it, two threads
+ * creating threads at once (say `pi` starting its workers on core 1 while
+ * the shell runs `run` on core 0) could both claim the same free slot.
+ *
+ * Lock order: sched_lock -> task_lock.  task_free_thread() is called from
+ * sched_next_thread() / sched_unblock() with sched_lock possibly held, so
+ * task_lock nests inside it.  task_lock itself is a leaf: nothing takes
+ * another lock while holding it — kmalloc/kfree (heap_lock) and
+ * sched_add_thread (sched_lock) run before or after the critical section.
+ *
+ * The lookups (task_find_*, task_get_*_slot) stay unlocked: they hand back
+ * a pointer the caller uses after any lock would be released anyway, so
+ * locking them would not make the result any safer to use.
+ * ------------------------------------------------------------------------- */
+static spinlock_t task_lock = {0};
+
 /* Per-core current TCB: index 0 = Core 0, index 1 = Core 1. */
 tcb_t * volatile current_tcb[2] = {NULL, NULL};
 
@@ -99,6 +121,32 @@ void task_init(void)
         pid_ranges[i].next = pid_ranges[i].base;
     }
     current_tcb[0] = current_tcb[1] = NULL;
+
+    spinlock_init(&task_lock);
+}
+
+/* -------------------------------------------------------------------------
+ * Unlocked helpers — caller holds task_lock
+ * ------------------------------------------------------------------------- */
+static pcb_t *find_process_locked(uint32_t pid)
+{
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        if (pcb_used[i] && pcb_pool[i].pid == pid) {
+            return &pcb_pool[i];
+        }
+    }
+    return NULL;
+}
+
+static void free_process_locked(pcb_t *p)
+{
+    for (int i = 0; i < MAX_PROCESSES; i++) {
+        if (&pcb_pool[i] == p) {
+            pcb_used[i] = false;
+            memset(p, 0, sizeof(pcb_t));
+            return;
+        }
+    }
 }
 
 /* -------------------------------------------------------------------------
@@ -130,11 +178,17 @@ void task_init(void)
  *   | r5        |  0
  *   | r4        |  0            <-- saved_sp points here (software frame)
  *   +-----------+
+ *   | STACK_FILL|  every unused word, so task_stack_used() can find the
+ *   |   ...     |  high-water mark later
+ *   +-----------+
  *   low address (stack_base + STACK_CANARY written here)
  *
  * The PendSV handler loads saved_sp, pops r4-r11, updates PSP, then returns
  * with the thread's saved EXC_RETURN value which causes the hardware to pop r0-r3, r12,
  * lr, pc, xpsr from the PSP stack.
+ *
+ * The stack is allocated and painted before task_lock is taken, so the
+ * lock is held only for the slot claim and never across kmalloc.
  * ------------------------------------------------------------------------- */
 tcb_t *task_create_thread(pcb_t      *proc,
                            const char *name,
@@ -143,6 +197,36 @@ tcb_t *task_create_thread(pcb_t      *proc,
                            uint8_t     priority,
                            uint32_t    stack_size)
 {
+    /* The initial frame alone is 64 bytes; anything this small cannot run
+     * a C function.  Round up to 8 so the stack top keeps the 8-byte
+     * alignment the AAPCS requires (kmalloc returns 8-aligned blocks). */
+    if (stack_size < MIN_STACK_SIZE) {
+        return NULL;
+    }
+    stack_size = (stack_size + 7u) & ~7u;
+
+    /* Allocate the stack from the kernel heap and paint it. */
+    uint8_t *stack = (uint8_t *)kmalloc(stack_size);
+    if (stack == NULL) {
+        return NULL;           /* heap exhausted */
+    }
+    uint32_t *words = (uint32_t *)stack;
+    for (uint32_t i = 0; i < stack_size / sizeof(uint32_t); i++) {
+        words[i] = STACK_FILL;
+    }
+    /* Canary at the very bottom of the stack (lowest address). */
+    words[0] = STACK_CANARY;
+
+    uint32_t save = spinlock_irq_acquire(&task_lock);
+
+    /* A process being killed (or already freed: memset clears alive) gets
+     * no new threads — it would outlive the kill. */
+    if (proc != NULL && (!proc->alive || proc->thread_count >= MAX_THREADS)) {
+        spinlock_irq_release(&task_lock, save);
+        kfree(stack);
+        return NULL;
+    }
+
     /* Find a free TCB slot. */
     int slot = -1;
     for (int i = 0; i < MAX_THREADS; i++) {
@@ -152,26 +236,22 @@ tcb_t *task_create_thread(pcb_t      *proc,
         }
     }
     if (slot < 0) {
+        spinlock_irq_release(&task_lock, save);
+        kfree(stack);
         return NULL;   /* pool exhausted */
     }
 
     tcb_t *t = &tcb_pool[slot];
     tcb_used[slot] = true;
 
-    /* Allocate the stack from the kernel heap. */
-    t->stack_base = (uint8_t *)kmalloc(stack_size);
-    if (t->stack_base == NULL) {
-        tcb_used[slot] = false;
-        return NULL;           /* heap exhausted */
-    }
-
     /* Basic fields. */
     t->tid        = next_tid++;
     t->pid        = proc ? proc->pid : 0;
+    t->stack_base = stack;
     t->stack_size = stack_size;
     t->priority   = priority;
     t->affinity   = THREAD_AFFINITY_ANY; /* run on any core */
-    t->state      = THREAD_READY;
+    t->state      = THREAD_NEW;          /* READY once the frame is built */
     t->kill_pending = false;
     t->wake_time_us = 0;
     t->cpu_time_us  = 0;
@@ -180,11 +260,15 @@ tcb_t *task_create_thread(pcb_t      *proc,
     strncpy(t->name, name ? name : "thread", sizeof(t->name) - 1);
     t->name[sizeof(t->name) - 1] = '\0';
 
-    /* Write canary at the very bottom of the stack (lowest address). */
-    uint32_t *canary_ptr = (uint32_t *)t->stack_base;
-    *canary_ptr = STACK_CANARY;
+    /* Link thread into its owning process. */
+    if (proc != NULL) {
+        proc->threads[proc->thread_count++] = t;
+    }
 
-    /* Build the initial stack frame.
+    spinlock_irq_release(&task_lock, save);
+
+    /* Build the initial stack frame.  The slot is ours, and the thread is
+     * not on a ready queue yet, so no lock is needed.
      *
      * We work from the top of the stack downward:
      *   stack_top = stack_base + stack_size
@@ -235,12 +319,8 @@ tcb_t *task_create_thread(pcb_t      *proc,
      * suspension so future restores use the correct frame size. */
     t->exc_return = 0xFFFFFFFDu;
 
-    /* Link thread into its owning process. */
-    if (proc != NULL && proc->thread_count < MAX_THREADS) {
-        proc->threads[proc->thread_count++] = t;
-    }
-
     /* Notify the scheduler so it can add the thread to a ready queue. */
+    t->state = THREAD_READY;
     sched_add_thread(t);
 
     return t;
@@ -270,9 +350,17 @@ static void thread_exit(void)
 pcb_t *task_create_process(const char *name, uint32_t pid)
 {
     /* PID 0 means "none" (parent_pid) and is what task_alloc_pid() returns
-     * when a range is full; a duplicate would make task_find_process()
-     * ambiguous. */
-    if (pid == 0u || task_find_process(pid) != NULL) {
+     * when a range is full. */
+    if (pid == 0u) {
+        return NULL;
+    }
+
+    uint32_t save = spinlock_irq_acquire(&task_lock);
+
+    /* A duplicate would make task_find_process() ambiguous.  Checked under
+     * the lock so two creators cannot both pass it. */
+    if (find_process_locked(pid) != NULL) {
+        spinlock_irq_release(&task_lock, save);
         return NULL;
     }
 
@@ -285,19 +373,16 @@ pcb_t *task_create_process(const char *name, uint32_t pid)
         }
     }
     if (slot < 0) {
+        spinlock_irq_release(&task_lock, save);
         return NULL;   /* pool exhausted */
     }
 
     pcb_t *p = &pcb_pool[slot];
-    pcb_used[slot] = true;
+    memset(p, 0, sizeof(pcb_t));   /* threads[] all NULL, counts 0 */
 
     p->pid          = pid;
     p->parent_pid   = 0;
     p->thread_count = 0;
-
-    if (pid == PID_KERNEL) {
-        s_kernel_proc = p;
-    }
     p->heap_base    = NULL;
     p->heap_size    = 0;
     p->exit_code    = 0;
@@ -314,39 +399,52 @@ pcb_t *task_create_process(const char *name, uint32_t pid)
         p->fd_table[i] = -1;
     }
 
-    /* Clear thread pointers. */
-    for (int i = 0; i < MAX_THREADS; i++) {
-        p->threads[i] = NULL;
+    if (pid == PID_KERNEL) {
+        s_kernel_proc = p;
     }
 
+    /* Publish the slot last, once the PCB is filled in. */
+    pcb_used[slot] = true;
+
+    spinlock_irq_release(&task_lock, save);
     return p;
 }
 
 /* -------------------------------------------------------------------------
  * task_alloc_pid
+ *
+ * Under task_lock, so two launchers drawing from the same range (two
+ * threads calling SYS_SPAWN at once) never get the same PID.
  * ------------------------------------------------------------------------- */
 uint32_t task_alloc_pid(pid_range_t range)
 {
     if ((unsigned)range >= PID_RANGE_COUNT) {
         return 0u;
     }
+
+    uint32_t save = spinlock_irq_acquire(&task_lock);
+
     pid_range_info_t *r = &pid_ranges[range];
     uint32_t span = r->limit - r->base + 1u;
     uint32_t pid  = r->next;
+    uint32_t result = 0u;   /* 0 = every PID in the range is live */
 
     for (uint32_t i = 0; i < span; i++) {
         uint32_t candidate = pid;
         pid = (pid == r->limit) ? r->base : pid + 1u;
-        if (task_find_process(candidate) == NULL) {
+        if (find_process_locked(candidate) == NULL) {
             r->next = pid;
-            return candidate;
+            result  = candidate;
+            break;
         }
     }
-    return 0u;   /* every PID in the range is live */
+
+    spinlock_irq_release(&task_lock, save);
+    return result;
 }
 
 /* -------------------------------------------------------------------------
- * Lookup helpers
+ * Lookup helpers (unlocked — see task_lock)
  * ------------------------------------------------------------------------- */
 
 tcb_t *task_find_thread(uint32_t tid)
@@ -361,12 +459,7 @@ tcb_t *task_find_thread(uint32_t tid)
 
 pcb_t *task_find_process(uint32_t pid)
 {
-    for (int i = 0; i < MAX_PROCESSES; i++) {
-        if (pcb_used[i] && pcb_pool[i].pid == pid) {
-            return &pcb_pool[i];
-        }
-    }
-    return NULL;
+    return find_process_locked(pid);
 }
 
 /* -------------------------------------------------------------------------
@@ -396,6 +489,33 @@ pcb_t *task_get_process_slot(int idx)
 }
 
 /* -------------------------------------------------------------------------
+ * task_stack_used
+ *
+ * The stack grows down from stack_base + stack_size, so the lowest words
+ * are the last to be touched.  Scan up from just above the canary: every
+ * word still holding STACK_FILL was never written.  A thread can write the
+ * fill value itself by chance, which would make this under-report by a
+ * word or so — good enough for sizing stacks.
+ * ------------------------------------------------------------------------- */
+uint32_t task_stack_used(const tcb_t *t)
+{
+    if (t == NULL || t->stack_base == NULL) {
+        return 0u;
+    }
+    const uint32_t *words = (const uint32_t *)t->stack_base;
+    uint32_t n = t->stack_size / sizeof(uint32_t);
+    uint32_t i = 1u;   /* words[0] is the canary */
+    while (i < n && words[i] == STACK_FILL) {
+        i++;
+    }
+    /* Canary gone: the stack overflowed, so all of it was used. */
+    if (words[0] != STACK_CANARY) {
+        return t->stack_size;
+    }
+    return t->stack_size - i * (uint32_t)sizeof(uint32_t);
+}
+
+/* -------------------------------------------------------------------------
  * Free / recycle
  * ------------------------------------------------------------------------- */
 
@@ -405,11 +525,11 @@ void task_free_thread(tcb_t *t)
         return;
     }
 
-    /* Save the PID now — memset below will zero the TCB. */
-    uint32_t pid = t->pid;
+    uint8_t *stack = NULL;
+    uint32_t save = spinlock_irq_acquire(&task_lock);
 
     /* Remove this thread from the owning process's thread array. */
-    pcb_t *proc = task_find_process(pid);
+    pcb_t *proc = find_process_locked(t->pid);
     if (proc != NULL) {
         for (uint32_t i = 0; i < proc->thread_count; i++) {
             if (proc->threads[i] == t) {
@@ -427,17 +547,24 @@ void task_free_thread(tcb_t *t)
     /* Free the TCB slot. */
     for (int i = 0; i < MAX_THREADS; i++) {
         if (&tcb_pool[i] == t) {
-            uint8_t *stack = t->stack_base;
+            stack = t->stack_base;
             tcb_used[i] = false;
             memset(t, 0, sizeof(tcb_t));
-            kfree(stack);   /* return stack memory to the heap */
             break;
         }
     }
 
     /* If the process now owns no threads, free the PCB slot. */
     if (proc != NULL && proc->thread_count == 0) {
-        task_free_process(proc);
+        free_process_locked(proc);
+    }
+
+    spinlock_irq_release(&task_lock, save);
+
+    /* Return stack memory to the heap outside task_lock (heap_lock is
+     * separate; task_lock stays a leaf). */
+    if (stack != NULL) {
+        kfree(stack);
     }
 }
 
@@ -446,13 +573,9 @@ void task_free_process(pcb_t *p)
     if (p == NULL) {
         return;
     }
-    for (int i = 0; i < MAX_PROCESSES; i++) {
-        if (&pcb_pool[i] == p) {
-            pcb_used[i] = false;
-            memset(p, 0, sizeof(pcb_t));
-            return;
-        }
-    }
+    uint32_t save = spinlock_irq_acquire(&task_lock);
+    free_process_locked(p);
+    spinlock_irq_release(&task_lock, save);
 }
 
 /* -------------------------------------------------------------------------
@@ -476,23 +599,27 @@ void task_kill_thread(tcb_t *t)
  *
  * Kill every thread in proc.  The PCB is freed with its last thread, which
  * may be later than this call (see task_kill_thread), so mark it not alive
- * now: owners of WiFi/BT continuous scans are reclaimed on that.
+ * now: owners of WiFi/BT continuous scans are reclaimed on that, and
+ * task_create_thread() refuses to add threads to it.
  *
- * Snapshot the thread array first, because task_free_thread() compacts
- * proc->threads[] as it goes and would corrupt a live iteration.
+ * Snapshot the thread array first (under task_lock), because
+ * task_free_thread() compacts proc->threads[] as it goes and would corrupt
+ * a live iteration.
  * ------------------------------------------------------------------------- */
 void task_kill_process(pcb_t *proc)
 {
     if (proc == NULL) {
         return;
     }
-    proc->alive = false;
 
-    uint32_t count = proc->thread_count;
     tcb_t *snapshot[MAX_THREADS];
+    uint32_t save = spinlock_irq_acquire(&task_lock);
+    proc->alive = false;
+    uint32_t count = proc->thread_count;
     for (uint32_t i = 0; i < count; i++) {
         snapshot[i] = proc->threads[i];
     }
+    spinlock_irq_release(&task_lock, save);
 
     for (uint32_t i = 0; i < count; i++) {
         task_kill_thread(snapshot[i]);

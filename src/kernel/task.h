@@ -26,29 +26,35 @@
 /*
  * Thread and process pool sizes.
  *
- * Memory budget note (RP2040 has 264 KB SRAM total):
- *   thread stacks (dynamic, from kernel heap)    =        variable
- *   kernel heap (mem.c HEAP_SIZE)                =             64 KB
- *   filesystem RAM buffer (fs.c)                 =             16 KB
- *   TCB/PCB pools + code + SDK overhead          ~             50 KB
- *   ---------------------------------------------------------------
- *   Total static footprint                       ~            130 KB  (OK)
+ * src/CMakeLists.txt sets MAX_THREADS / MAX_PROCESSES (PICOOS_MAX_THREADS,
+ * PICOOS_MAX_PROCESSES) and the kernel heap size (PICOOS_HEAP_KB, see
+ * mem.h); the defaults below are for builds that bypass it.
  *
- * Thread stacks are allocated dynamically from the kernel heap via kmalloc
- * and freed when the thread exits.  Pass the appropriate SIZE constant to
- * task_create_thread() based on the thread's call-chain depth.
+ * The pools themselves are cheap: about 72 B per TCB and 300 B per PCB, in
+ * static RAM.  What a live thread really costs is its stack, kmalloc'd from
+ * the kernel heap: 32 threads x DEFAULT_STACK_SIZE = 64 KB, so the heap and
+ * not MAX_THREADS is the limit for big-stack threads.  Run tools/mem_report.py
+ * on a build's .elf.map for the actual SRAM picture.
  *
- * Increase MAX_THREADS carefully — each additional live thread consumes at
- * least DEFAULT_STACK_SIZE bytes of heap at runtime.
+ * Every pool scan (SysTick sleep wake-up, event posts, task_find_*) is
+ * O(MAX_THREADS), and the SysTick one runs every 1 ms with interrupts off,
+ * so raise MAX_THREADS far beyond 32 only after replacing those scans.
  */
-#define MAX_THREADS        16
-#define MAX_PROCESSES      8
+#ifndef MAX_THREADS
+#define MAX_THREADS        32
+#endif
+#ifndef MAX_PROCESSES
+#define MAX_PROCESSES      16
+#endif
 #define MAX_FDS            16
 #define MAX_OPEN_FILES     8
 #define DEFAULT_STACK_SIZE 2048    /* general-purpose threads       */
 #define DEEP_STACK_SIZE    3072    /* threads with deep call chains */
 #define IDLE_STACK_SIZE     512    /* idle thread                   */
+#define MIN_STACK_SIZE      256    /* task_create_thread refuses less */
 #define STACK_CANARY       0xDEADBEEFu
+#define STACK_FILL         0xA5A5A5A5u  /* painted over a new stack: words
+                                         * still holding it were never used */
 
 /* Thread affinity values: which core(s) may run this thread. */
 #define THREAD_AFFINITY_ANY  ((int8_t)-1)  /* eligible on either core */
@@ -229,6 +235,14 @@ void     task_kill_thread(tcb_t *t);
  *                     (self-kill), it must yield afterwards.
  */
 void     task_kill_process(pcb_t *p);
+
+/*
+ * task_stack_used — high-water mark of t's stack in bytes: the deepest the
+ *                   stack has ever grown.  Every word of a new stack is
+ *                   painted with STACK_FILL; this scans up from the canary
+ *                   for the first word that no longer holds it.  O(stack size).
+ */
+uint32_t task_stack_used(const tcb_t *t);
 
 int      task_thread_count(void);
 int      task_process_count(void);

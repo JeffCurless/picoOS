@@ -20,7 +20,8 @@ When the user types `run my_app` at the shell, the kernel:
 
 1. Creates a new process (PCB) with a fresh PID (100–199).
 2. Creates one thread (TCB) inside that process, pointing at `my_app`, with
-   the priority from `app_table[]` and a `DEFAULT_STACK_SIZE` (2 KB) stack.
+   the priority and stack size from `app_table[]` (stack size 0 means
+   `DEFAULT_STACK_SIZE`, 2 KB).
 3. Adds the thread to the ready queue; the scheduler runs it preemptively,
    on either core unless the app sets its affinity.
 
@@ -130,15 +131,16 @@ Open `src/apps/demo.c` and locate the table at the end of the file:
 
 ```c
 const app_entry_t app_table[] = {
-    { "producer",  demo_producer, 4u },
-    { "consumer",  demo_consumer, 4u },
-    { "sensor",    demo_sensor,   5u },
-    { "pi",        pi_estimate,   3u },
+    /* name        entry          prio  stack (0 = DEFAULT_STACK_SIZE) */
+    { "producer",  demo_producer, 4u,   0u },
+    { "consumer",  demo_consumer, 4u,   0u },
+    { "sensor",    demo_sensor,   5u,   0u },
+    { "pi",        pi_estimate,   3u,   0u },
 #if defined(PICOOS_WIFI_ENABLE) && defined(PICOOS_DISPLAY_ENABLE)
-    { "cray-one",  cray_one,      3u },
+    { "cray-one",  cray_one,      3u,   0u },
 #endif
 #ifdef PICOOS_WIFI_ENABLE
-    { "scantest",  scantest,      4u },
+    { "scantest",  scantest,      4u,   0u },
 #endif
 };
 ```
@@ -147,22 +149,23 @@ Add your app:
 
 ```c
 const app_entry_t app_table[] = {
-    { "producer",  demo_producer, 4u },
+    { "producer",  demo_producer, 4u,   0u },
     ...
-    { "myapp",     myapp,         4u },   /* ← new entry */
+    { "myapp",     myapp,         4u,   0u },   /* ← new entry */
 };
 ```
 
 If the app needs WiFi or the display, wrap its entry in the same `#if` as
 `cray-one` / `scantest`, so builds without that hardware still link.
 
-The three fields are:
+The four fields are:
 
 | Field | Type | Description |
 |-------|------|-------------|
 | `name` | `const char *` | Name typed at the shell prompt (`run <name>`) |
 | `entry` | `void (*)(void *)` | Thread entry function |
 | `priority` | `uint8_t` | Scheduling priority — see guidance below |
+| `stack_size` | `uint32_t` | Stack bytes for the app's thread; `0` = `DEFAULT_STACK_SIZE` (2 KB).  Size it from the `threads` STACK column (high-water/size) plus a margin; below `MIN_STACK_SIZE` (256 B) the launch fails |
 
 Include your header at the top of `demo.c`:
 
@@ -476,7 +479,7 @@ with the `mem` or `threads` shell command.  If it reads anything other than
 
 ### Thread limits
 
-`MAX_THREADS` is 16.  At boot the system creates three threads, plus one more
+`MAX_THREADS` is 32 and `MAX_PROCESSES` 16.  At boot the system creates three threads, plus one more
 on pico_w / pico2_w:
 
 | Thread | Priority |
@@ -486,7 +489,8 @@ on pico_w / pico2_w:
 | shell | 2 |
 | wifi-poll *(pico_w / pico2_w only)* | 6 |
 
-That leaves **13 free thread slots** (12 on WiFi boards).  Each `run`
+That leaves **29 free thread slots** (28 on WiFi boards) and 14 free
+process slots (the kernel and shell processes take two).  Each `run`
 invocation consumes one slot, as do any worker threads an app creates.
 The demo apps (producer/consumer/sensor) are **not** started at boot — they are
 launched on demand via `run producer`, `run consumer`, `run sensor`.
@@ -544,7 +548,7 @@ void myapp_mt(void *arg)
 }
 ```
 
-Register this in `app_table[]` as `{ "myapp_mt", myapp_mt, 4u }`.
+Register this in `app_table[]` as `{ "myapp_mt", myapp_mt, 4u, 0u }`.
 
 **Note:** Creating a worker thread costs one slot from the global `MAX_THREADS`
 pool.  Check `threads` after launching to confirm no slots are exhausted.
