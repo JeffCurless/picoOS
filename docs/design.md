@@ -31,8 +31,6 @@ Instead, define two execution concepts:
 
   * one or more threads
   * a handle table
-  * current working directory
-  * heap region
   * open files
   * metadata such as name, PID, parent PID
 
@@ -201,6 +199,7 @@ Built-in commands:
 * `help` — list registered commands
 * `ps` — show processes
 * `threads` — show all threads with state, core affinity, CPU time, stack canary
+* `stacks [reset]` — deepest stack use per thread name, including threads that have exited
 * `kill <tid>` — terminate a thread (refused for threads of PIDs 1–9, the kernel range)
 * `killproc <pid>` — terminate all threads in a process (refused for PIDs 1–9)
 * `mem` — heap usage and stats

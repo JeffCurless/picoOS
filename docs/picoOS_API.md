@@ -52,10 +52,23 @@ typedef struct {
 
 `stack_size` sets the stack of the thread the shell starts for the app (`run`,
 `AUTORUN=`, `BUTTONx=`). Use 0 for the 2 KB default, or size it from the
-high-water mark in the `threads` STACK column (used/size) plus a margin.
+high-water mark plus a margin. `threads` shows the high-water mark of live
+threads (STACK column, used/size). `stacks` also covers threads that have
+already exited, and the hardware test `hwtest/test_30_stacks.py` runs the
+apps and suggests a size for each.
 It is rounded up to a multiple of 8, and a value below `MIN_STACK_SIZE`
 (256 B) makes the launch fail. Worker threads the app creates pass their own
 size to `task_create_thread()`.
+
+Kernel code can read the same records:
+
+```c
+// Deepest stack use per thread name, recorded by task_free_thread() as each
+// thread is freed (STACK_STATS_MAX = 24 names).  Live threads are not
+// included: use task_stack_used() on them.
+int  task_stack_stats(stack_stat_t *out, int max, uint32_t *dropped);
+void task_stack_stats_reset(void);
+```
 
 ### Adding an app
 
@@ -73,10 +86,11 @@ void my_app(void *arg) {
 
 ```c
 const app_entry_t app_table[] = {
-    { "producer", demo_producer, 4u, 0u },
-    { "consumer", demo_consumer, 4u, 0u },
-    { "sensor",   demo_sensor,   5u, 0u },
-    { "myapp",    my_app,        4u, 0u },  /* <-- add your entry */
+    { "producer", demo_producer, 4u, 1024u },
+    { "consumer", demo_consumer, 4u, 1024u },
+    { "sensor",   demo_sensor,   5u, 1024u },
+    { "myapp",    my_app,        4u, 0u },  /* <-- add your entry (0 = 2 KB
+                                             *     until you measure it) */
 };
 ```
 

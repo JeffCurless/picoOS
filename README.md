@@ -173,11 +173,12 @@ Once running, the USB shell accepts:
 | `help` | List all commands |
 | `ps` | Show processes |
 | `threads` | Show all threads with state, priority, **core affinity**, CPU time, and stack canary status |
+| `stacks [reset]` | Deepest stack use per thread name, including threads that have already exited (recorded as they are freed); `reset` forgets the exited ones |
 | `kill <tid>` | Terminate a thread; frees its stack and TCB slot; auto-frees the process when its last thread exits. Refuses threads of the kernel range (PIDs 1–9: kernel, shell) |
 | `killproc <pid>` | Terminate all threads in a process and free the PCB. Refuses PIDs 1–9 (kernel range) |
 | `mem` | Memory usage and heap stats |
 | `ls` | List filesystem files |
-| `cat <file>` | Print a filesystem file (reads through `fs_open`, so `/dev/*` paths are not supported) |
+| `cat <file>` | Print a file (through the VFS, so a `/dev/*` path reads that device) |
 | `fs write <file> [text]` | Create or overwrite a file (omit `[text]` for multi-line mode; end with `.` alone) |
 | `fs append <file> <text>` | Append a line to a file (creates it if missing) |
 | `fs format` | Erase all files and reinitialise the filesystem |

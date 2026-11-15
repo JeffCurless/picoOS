@@ -491,11 +491,13 @@ typedef struct pcb {
     char      name[16];
     tcb_t    *threads[MAX_THREADS];
     uint32_t  thread_count;
-    int       fd_table[MAX_FDS];   /* open files */
-    …
+    int       exit_code;
     bool      alive;
+    uint32_t  serial;              /* never reused, unlike a PID */
 } pcb_t;
 ```
+
+There is no table of open files in the PCB. The VFS keeps one table of open files for the whole system, and each entry records which process opened it, as its PID and `serial`. PIDs are reused, but a serial never is, so a new process that happens to get an old PID does not inherit its predecessor's files. When a process exits or is killed, its files are closed for it: data still being written is committed to flash. `parent_pid` is there for a parent/child relationship that picoOS does not track yet; it is always 0.
 
 On Linux a process also owns a private address space. On picoOS it does not — all threads share all memory (Chapter 2). A picoOS process is a **unit of cleanup**: `killproc 101` stops every thread the process owns and frees them together.
 
@@ -534,6 +536,8 @@ The stack cannot grow. If a thread uses more than its share, it silently writes 
 The name comes from coal miners, who carried a canary underground: if the bird stopped singing, the air was bad. The check is cheap but late — it only notices damage after it has happened, and only if the overflow happened to change that exact word.
 
 The canary says whether a stack overflowed, not how close it came. For that, picoOS paints every word of a new stack with `0xA5A5A5A5` before the thread starts. A word the thread ever writes loses the pattern, so scanning up from the bottom for the first word that changed gives the deepest the stack has ever grown: its **high-water mark**. The `threads` command shows it as used/size in the STACK column, for example `612/2048`. It can only under-report, never over-report — a thread that happens to store `0xA5A5A5A5` leaves a painted-looking word — and it only counts the paths the thread has run so far.
+
+A thread that finishes quickly is gone before you can type `threads`. So when the kernel frees a thread, it measures the stack one last time and keeps the deepest value seen for that thread name. `stacks` lists those peaks, together with the threads still running, and `stacks reset` starts the record again.
 
 <a id="s-4-5"></a>
 ### 4.5 Thread states
@@ -791,9 +795,9 @@ On a pico with a Display Pack, the build's linker map (read with `tools/mem_repo
 | Kernel heap: thread stacks + dynamic objects | 96 KB |
 | Display framebuffer | \~32 KB |
 | Filesystem buffers | \~6 KB |
-| TCB/PCB tables, VFS tables, other globals | \~14 KB |
+| TCB/PCB tables, VFS tables, other globals | \~12 KB |
 | Pico SDK and everything else | \~12 KB |
-| Free | \~105 KB |
+| Free | \~108 KB |
 
 The C compiler puts every variable in one of four places:
 
@@ -1457,6 +1461,7 @@ The built-in commands are a table of these. Other modules add their own at start
 | --- | --- | --- |
 | `info` | version, chip, hardware locks in use | 8 |
 | `ps`, `threads` | processes; threads with state, core, CPU time, stack | 4, 5 |
+| `stacks [reset]` | deepest stack use per thread name, including threads that have exited | 4 |
 | `kill <tid>`, `killproc <pid>` | stop a thread or a whole process | 4 |
 | `mem` | heap used, free, largest free block; stack canaries | 7 |
 | `ls`, `cat`, `rm`, `fs write/append/format` | the filesystem | 12 |
@@ -1566,13 +1571,13 @@ Add a line to `app_table[]` in `src/apps/demo.c`:
 #include "ticker.h"
 
 const app_entry_t app_table[] = {
-    { "producer", demo_producer, 4u, 0u },
+    { "producer", demo_producer, 4u, 1024u },
     …
     { "ticker",   ticker,        4u, 0u },   /* name, entry, priority, stack */
 };
 ```
 
-The last field is the stack size in bytes for the thread `run` starts; 0 means `DEFAULT_STACK_SIZE` (2 KB). Run the app, read its high-water mark in the STACK column of `threads`, and add a margin. The kernel rounds the size up to a multiple of 8 and refuses anything below `MIN_STACK_SIZE` (256 B). Threads the app creates itself, such as `ticker-w`, pass their own size to `task_create_thread()`.
+The last field is the stack size in bytes for the thread `run` starts; 0 means `DEFAULT_STACK_SIZE` (2 KB). Run the app, read its high-water mark with `stacks` (it also covers threads that have already exited), and add a margin. The demo apps were sized this way: `producer` peaked at 584 bytes, so it gets 1024. The kernel rounds the size up to a multiple of 8 and refuses anything below `MIN_STACK_SIZE` (256 B). Threads the app creates itself, such as `ticker-w`, pass their own size to `task_create_thread()`.
 
 <a id="s-14-4"></a>
 ### 14.4 Step 3: build and run
@@ -1968,6 +1973,7 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 - SRAM — [1.1](#s-1-1), [7](#ch-7), [7.1](#s-7-1), [7.3](#s-7-3), [12.4](#s-12-4)
 - stack — [3.3](#s-3-3), [4.4](#s-4-4), [7.4](#s-7-4)
 - stack overflow — [4.4](#s-4-4), [7.4](#s-7-4), [14.5](#s-14-5)
+- `stacks` command — [4.4](#s-4-4), [13.3](#s-13-3), [14.3](#s-14-3)
 - starvation — [5.3](#s-5-3), [13.1](#s-13-1), [14.1](#s-14-1)
 - superblock — [12.2](#s-12-2), [12.3](#s-12-3), [12.4](#s-12-4), [12.7](#s-12-7), [12.9](#s-12-9), [16.2](#s-16-2)
 - `svc` instruction — [10.1](#s-10-1), [10.3](#s-10-3), [10.6](#s-10-6), [16.2](#s-16-2)
@@ -1982,7 +1988,7 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 - tests, host-native — [7.9](#s-7-9), [12.6](#s-12-6), [12.8](#s-12-8), [16.1](#s-16-1)
 - thread — [2.5](#s-2-5), [3.3](#s-3-3), [4](#ch-4), [4.1](#s-4-1)
 - thread states — [4.5](#s-4-5), [5.3](#s-5-3)
-- `threads` command — [1.6](#s-1-6), [2.6](#s-2-6), [4.4](#s-4-4), [4.6](#s-4-6), [5.8](#s-5-8), [6.5](#s-6-5), [7.10](#s-7-10), [8.5](#s-8-5), [13.3](#s-13-3), [14.3](#s-14-3)
+- `threads` command — [1.6](#s-1-6), [2.6](#s-2-6), [4.4](#s-4-4), [4.6](#s-4-6), [5.8](#s-5-8), [6.5](#s-6-5), [7.10](#s-7-10), [8.5](#s-8-5), [13.3](#s-13-3)
 - time slice — [5](#ch-5), [5.1](#s-5-1), [5.3](#s-5-3), [5.6](#s-5-6), [5.8](#s-5-8), [6.1](#s-6-1), [6.4](#s-6-4), [8.4](#s-8-4), [A.2](#s-a-2)
 - torn read — [15.2](#s-15-2)
 - `trace` command — [5.7](#s-5-7), [5.8](#s-5-8), [5.9](#s-5-9), [13.3](#s-13-3)

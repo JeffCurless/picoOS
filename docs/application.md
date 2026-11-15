@@ -131,27 +131,32 @@ Open `src/apps/demo.c` and locate the table at the end of the file:
 
 ```c
 const app_entry_t app_table[] = {
-    /* name        entry          prio  stack (0 = DEFAULT_STACK_SIZE) */
-    { "producer",  demo_producer, 4u,   0u },
-    { "consumer",  demo_consumer, 4u,   0u },
-    { "sensor",    demo_sensor,   5u,   0u },
-    { "pi",        pi_estimate,   3u,   0u },
+    /* name        entry          prio  stack */
+    { "producer",  demo_producer, 4u,   1024u },   /* [584]  */
+    { "consumer",  demo_consumer, 4u,   1024u },   /* [576]  */
+    { "sensor",    demo_sensor,   5u,   1024u },   /* [568]  */
+    { "pi",        pi_estimate,   3u,   1024u },   /* [608]  */
+    { "hwtest",    hwtest,        4u,   1024u },   /* [656]  */
 #if defined(PICOOS_WIFI_ENABLE) && defined(PICOOS_DISPLAY_ENABLE)
-    { "cray-one",  cray_one,      3u,   0u },
+    { "cray-one",  cray_one,      3u,   0u    },   /* not measured */
 #endif
 #ifdef PICOOS_WIFI_ENABLE
-    { "scantest",  scantest,      4u,   0u },
+    { "scantest",  scantest,      4u,   1792u },   /* [1264] */
 #endif
 };
 ```
+
+The stack sizes were measured: the bracketed number is the deepest stack
+use `hwtest/test_30_stacks.py` saw, and the size adds a margin.
 
 Add your app:
 
 ```c
 const app_entry_t app_table[] = {
-    { "producer",  demo_producer, 4u,   0u },
+    { "producer",  demo_producer, 4u,   1024u },
     ...
-    { "myapp",     myapp,         4u,   0u },   /* ← new entry */
+    { "myapp",     myapp,         4u,   0u },   /* ← new entry: start at the
+                                                *   default, then measure */
 };
 ```
 
@@ -165,7 +170,7 @@ The four fields are:
 | `name` | `const char *` | Name typed at the shell prompt (`run <name>`) |
 | `entry` | `void (*)(void *)` | Thread entry function |
 | `priority` | `uint8_t` | Scheduling priority — see guidance below |
-| `stack_size` | `uint32_t` | Stack bytes for the app's thread; `0` = `DEFAULT_STACK_SIZE` (2 KB).  Size it from the `threads` STACK column (high-water/size) plus a margin; below `MIN_STACK_SIZE` (256 B) the launch fails |
+| `stack_size` | `uint32_t` | Stack bytes for the app's thread; `0` = `DEFAULT_STACK_SIZE` (2 KB).  Size it from the high-water mark (`threads` STACK column, or `stacks`, which also covers exited threads) plus a margin, or run `hwtest/test_30_stacks.py` for a suggestion; below `MIN_STACK_SIZE` (256 B) the launch fails |
 
 Include your header at the top of `demo.c`:
 

@@ -267,8 +267,10 @@ tests/
 `kits/picowos_D-v*.uf2` by default) onto an attached board and runs the tests
 in `hwtest/test_*.py` through the USB shell. The device side is the `hwtest`
 app (`src/apps/hwtest.c`, `run hwtest <mode>`), which runs sequences too
-tight to time from the host. `hwtest/README.md` explains how the host stays
-in step with the shell, and how to add tests.
+tight to time from the host. `test_30_stacks.py` runs the apps and reports
+each thread's peak stack use with a suggested `app_table[]` `stack_size`.
+`hwtest/README.md` explains how the host stays in step with the shell, and
+how to add tests.
 
 ---
 

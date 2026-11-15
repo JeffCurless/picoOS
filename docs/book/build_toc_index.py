@@ -158,6 +158,7 @@ INDEX_TERMS = [
     ("thread", None, ["2.5", "3.3", "4", "4.1"]),
     ("thread states", None, ["4.5", "5.3"]),
     ("`threads` command", r"pico> threads|`threads`", None),
+    ("`stacks` command", r"`stacks", None),
     ("time slice", r"time slice|TIME_SLICE_MS|10 ms", None),
     ("torn read", r"torn read", None),
     ("`trace` command", r"`trace|trace on|trace show", None),

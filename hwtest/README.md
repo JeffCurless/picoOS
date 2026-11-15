@@ -17,8 +17,9 @@ the kit lacks are skipped.
 python3 hwtest/run.py                # flash the newest picowos_D kit, run everything
 python3 hwtest/run.py --no-flash     # test what the board already runs
 python3 hwtest/run.py -k kill        # only tests whose name contains "kill"
-python3 hwtest/run.py --kit kits/picowos_D-v0.4.6.uf2
+python3 hwtest/run.py --kit kits/picowos_D-v0.4.7.uf2
 python3 hwtest/run.py -v             # echo the device output live
+python3 hwtest/run.py --slow         # also run slow tests (scantest, ~75 s)
 python3 hwtest/run.py --list
 ```
 
@@ -47,6 +48,7 @@ The tests create files named `hwt_*.txt` and delete them afterwards. A
 | `test_00_smoke.py` | Version matches the kit, commands present, core threads running |
 | `test_10_fs.py` | `fs write`/`append`/`cat`/`rm`, multi-line write, a file surviving `reboot` |
 | `test_20_kill.py` | Issue #26: a kill does not leak a held mutex or open files |
+| `test_30_stacks.py` | Runs every app that can run unattended, then reports each thread's peak stack use and a suggested `stack_size` |
 | `../src/apps/hwtest.c` | Device side: `run hwtest <mode>` |
 
 ## Commands go in step with the shell, never on a timer
@@ -106,6 +108,42 @@ apps) handles those in two ways:
 
 `run hwtest` with no mode lists them.
 
+## Stack measurement (`test_30_stacks.py`)
+
+This file sizes `app_table[]` stacks from measurements. It resets the
+records (`stacks reset`), then runs:
+- the demo apps
+- `pi` in both modes
+- the `hwtest` modes
+- a spread of shell commands, plus `wifi`/`bt scan` on W boards
+- `scantest`, with `--slow`
+
+`test_stack_report` then prints a table like this, and saves it to
+`hwtest/logs/stacks-<time>.txt`:
+
+```
+thread            peak  size  use  seen  suggest  note
+scantest          1264  2048  61%     1     1792  app_table[]
+shell             1096  2048  53%     1     1536
+pi                 608  2048  29%     2     1024  app_table[]
+pi-worker           96  2048   4%     8      512
+```
+
+Short-lived threads, such as the `pi` workers, are gone before `threads`
+could catch them. The measurement is therefore taken on the device:
+`task_free_thread()` records each thread's high-water mark as it frees it,
+keyed by thread name. The shell `stacks` command merges those records with
+the live threads.
+
+The suggested size is the peak plus a quarter (at least 256 B), rounded up
+to 256 B. A reading only covers the paths that ran, so it is a lower bound,
+and the margin is for the paths that didn't. The test fails if any thread
+used more than 80% of its stack. `cray-one` isn't covered, because it
+needs WiFi credentials in `config.txt` and peer nodes.
+
+Run `-k test_30` (add `--slow` for `scantest`) to get a complete report.
+`ctx.info()` is how a test adds lines like these under its result.
+
 ## Adding a test
 
 Add a function `test_<name>(ctx)` to a `test_NN_<area>.py` file. Files run in
@@ -121,7 +159,8 @@ def test_wifi_status(ctx):
 ```
 
 `ctx` carries `pico`, `kit`, `version`, `board`, `variant` and `features`
-(`wifi`, `bt`, `display`, `led`). Use `check()` rather than `assert`. Delete
+(`wifi`, `bt`, `display`, `led`, and `slow` with `--slow`), and
+`ctx.info(text)` prints a report under the test's result. Use `check()` rather than `assert`. Delete
 any files you create in a `finally:` block. If a test needs timing tighter
 than a shell round trip, add a mode to `hwtest.c` rather than adding sleeps
 on the host.

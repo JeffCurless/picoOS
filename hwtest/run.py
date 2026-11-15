@@ -10,10 +10,11 @@ Usage
   python3 hwtest/run.py                     # flash newest picowos_D kit, run all
   python3 hwtest/run.py --no-flash          # test whatever the board runs now
   python3 hwtest/run.py -k kill             # only tests whose name contains "kill"
-  python3 hwtest/run.py --kit kits/picowos_D-v0.4.6.uf2
+  python3 hwtest/run.py --kit kits/picowos_D-v0.4.7.uf2
   python3 hwtest/run.py --board pico2w --variant D2
   python3 hwtest/run.py --list              # list tests and exit
   python3 hwtest/run.py -v                  # show device output live
+  python3 hwtest/run.py --slow              # include slow tests (scantest, ~75 s)
 
 Build the kits first (./build, or ./build wifi).  Close any console.py on
 the port: the runner opens it exclusively.  The full device log goes to
@@ -53,7 +54,7 @@ def kit_features(board: str, variant: str) -> set:
 
 
 def parse_kit_name(path: str):
-    """kits/picowos_D-v0.4.6.uf2 -> ("picow", "D", "0.4.6")."""
+    """kits/picowos_D-v0.4.7.uf2 -> ("picow", "D", "0.4.7")."""
     m = re.match(r"(pico2?w?)os(?:_(D2?))?-v(\d+\.\d+\.\d+)(?:_INJ)?\.uf2$",
                  os.path.basename(path))
     if not m:
@@ -97,6 +98,8 @@ def main() -> int:
     ap.add_argument("--list", action="store_true", help="list tests and exit")
     ap.add_argument("-v", "--verbose", action="store_true", help="echo device output")
     ap.add_argument("-x", "--exitfirst", action="store_true", help="stop at first failure")
+    ap.add_argument("--slow", action="store_true",
+                    help="also run tests marked @requires(\"slow\") (minutes each)")
     args = ap.parse_args()
 
     tests = list(discover(args.pattern))
@@ -124,6 +127,8 @@ def main() -> int:
     pico = Pico(port=args.port, log_path=log_path, echo=args.verbose)
     ctx = Context(pico=pico, kit=kit, version=version, board=board,
                   variant=variant, features=kit_features(board, variant))
+    if args.slow:
+        ctx.features.add("slow")
 
     try:
         if kit:
@@ -163,6 +168,10 @@ def main() -> int:
         dt = time.monotonic() - t0
         results.append((full, status, dt, msg))
         print(f"{status:<5} {full}  ({dt:.1f} s)")
+        for note in ctx.notes:
+            for ln in note.rstrip().splitlines():
+                print(f"        {ln}")
+        ctx.notes.clear()
         if msg:
             for ln in msg.rstrip().splitlines():
                 print(f"        {ln}")

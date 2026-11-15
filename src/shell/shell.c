@@ -192,6 +192,69 @@ static int cmd_threads(int argc, char **argv)
     return 0;
 }
 
+/* --- stacks ------------------------------------------------------------- */
+/* Deepest stack use per thread name: threads that have exited (recorded by
+ * task_free_thread) merged with the threads alive now.  `stacks reset`
+ * forgets the exited ones. */
+static int cmd_stacks(int argc, char **argv)
+{
+    if (argc >= 2 && strcmp(argv[1], "reset") == 0) {
+        task_stack_stats_reset();
+        shell_println("stacks: exited-thread peaks cleared");
+        return 0;
+    }
+
+    /* Static: 24 entries of 28 B is too much for the shell's 2 KB stack. */
+    static stack_stat_t rows[STACK_STATS_MAX + MAX_THREADS];
+    static uint32_t     live[STACK_STATS_MAX + MAX_THREADS];
+    uint32_t dropped = 0u;
+    int n = task_stack_stats(rows, STACK_STATS_MAX, &dropped);
+    for (int i = 0; i < n; i++) {
+        live[i] = 0u;
+    }
+
+    /* Merge the live threads (unlocked, like `threads`). */
+    for (int s = 0; s < MAX_THREADS; s++) {
+        tcb_t *t = task_get_thread_slot(s);
+        if (t == NULL || t->stack_base == NULL) {
+            continue;
+        }
+        uint32_t used = task_stack_used(t);
+        int k = 0;
+        while (k < n && strncmp(rows[k].name, t->name, sizeof(rows[k].name)) != 0) {
+            k++;
+        }
+        if (k == n) {
+            if (n >= (int)(sizeof(rows) / sizeof(rows[0]))) {
+                continue;
+            }
+            memset(&rows[n], 0, sizeof(rows[n]));
+            memcpy(rows[n].name, t->name, sizeof(rows[n].name) - 1u);  /* both 16 B */
+            live[n] = 0u;
+            n++;
+        }
+        live[k]++;
+        if (used >= rows[k].peak) {
+            rows[k].peak = used;
+            rows[k].size = t->stack_size;
+        }
+    }
+
+    shell_println("NAME             PEAK   SIZE   USE%  EXITED  LIVE");
+    shell_println("---------------  -----  -----  ----  ------  ----");
+    for (int i = 0; i < n; i++) {
+        unsigned pct = rows[i].size ? (unsigned)((rows[i].peak * 100u) / rows[i].size) : 0u;
+        shell_print("%-16s %-6u %-6u %3u%%  %-7u %u\r\n",
+                    rows[i].name, (unsigned)rows[i].peak, (unsigned)rows[i].size,
+                    pct, (unsigned)rows[i].exits, (unsigned)live[i]);
+    }
+    if (dropped > 0u) {
+        shell_print("(%u exited thread name(s) not recorded: table full)\r\n",
+                    (unsigned)dropped);
+    }
+    return 0;
+}
+
 /* --- kill --------------------------------------------------------------- */
 static int cmd_kill(int argc, char **argv)
 {
@@ -707,6 +770,7 @@ static const shell_cmd_t builtin_cmds[] = {
     { "help",    "List all commands",                          cmd_help    },
     { "ps",      "Show processes",                             cmd_ps      },
     { "threads", "Show all threads with state and CPU time",   cmd_threads },
+    { "stacks",  "stacks [reset]  — deepest stack use per thread name, incl. exited", cmd_stacks },
     { "kill",    "kill <tid>  — kill a thread (not one in PIDs 1-9)", cmd_kill },
     { "killproc","killproc <pid>  — kill all threads in a process (not PIDs 1-9)", cmd_killproc },
     { "mem",     "Show heap usage and stack canary status",    cmd_mem     },

@@ -164,17 +164,23 @@ void demo_sensor(void *arg)
  * Application table
  * ========================================================================= */
 const app_entry_t app_table[] = {
-    /* name        entry          prio  stack (0 = DEFAULT_STACK_SIZE) */
-    { "producer",  demo_producer, 4u,   0u },
-    { "consumer",  demo_consumer, 4u,   0u },
-    { "sensor",    demo_sensor,   5u,   0u },
-    { "pi",        pi_estimate,   3u,   0u },
-    { "hwtest",    hwtest,        4u,   0u },
+    /* Stack sizes come from hwtest/test_30_stacks.py (Pico W + Display
+     * Pack, v0.4.6): the deepest use seen plus max(256 B, 25%), rounded up
+     * to 256 B.  The peak is in brackets.  Re-run it after changing an app:
+     *   python3 hwtest/run.py -k test_30 --slow
+     * 0 = DEFAULT_STACK_SIZE (2 KB), for apps not measured yet. */
+    /* name        entry          prio  stack */
+    { "producer",  demo_producer, 4u,   1024u },   /* [584]  */
+    { "consumer",  demo_consumer, 4u,   1024u },   /* [576]  */
+    { "sensor",    demo_sensor,   5u,   1024u },   /* [568]  */
+    { "pi",        pi_estimate,   3u,   1024u },   /* [608]  */
+    { "hwtest",    hwtest,        4u,   1024u },   /* [656]  */
 #if defined(PICOOS_WIFI_ENABLE) && defined(PICOOS_DISPLAY_ENABLE)
-    { "cray-one",  cray_one,      3u,   0u },
+    { "cray-one",  cray_one,      3u,   0u    },   /* not measured: needs
+                                                     * WiFi config + peers */
 #endif
 #ifdef PICOOS_WIFI_ENABLE
-    { "scantest",  scantest,      4u,   0u },
+    { "scantest",  scantest,      4u,   1792u },   /* [1264] */
 #endif
 };
 

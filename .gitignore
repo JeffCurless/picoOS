@@ -33,3 +33,6 @@ kits/*
 # Cache
 .cache/
 
+
+# Hardware test run logs and stack reports (hwtest/run.py)
+hwtest/logs/

@@ -46,8 +46,6 @@
 #ifndef MAX_PROCESSES
 #define MAX_PROCESSES      16
 #endif
-#define MAX_FDS            16
-#define MAX_OPEN_FILES     8
 #define DEFAULT_STACK_SIZE 2048    /* general-purpose threads       */
 #define DEEP_STACK_SIZE    3072    /* threads with deep call chains */
 #define IDLE_STACK_SIZE     512    /* idle thread                   */
@@ -173,17 +171,17 @@ typedef struct tcb {
 
 typedef struct pcb {
     uint32_t  pid;                      /* Unique process ID                 */
-    uint32_t  parent_pid;               /* Parent process ID (0 = none)      */
+    uint32_t  parent_pid;               /* Parent process ID (0 = none).
+                                         * Not tracked yet: always 0      */
     char      name[16];                 /* Human-readable process name       */
 
     tcb_t    *threads[MAX_THREADS];     /* Threads owned by this process     */
     uint32_t  thread_count;             /* Number of live threads            */
 
-    int       fd_table[MAX_FDS];        /* Open file descriptors (-1 = free) */
-    char      cwd[64];                  /* Current working directory         */
-
-    uint8_t  *heap_base;                /* Base of process heap region       */
-    uint32_t  heap_size;                /* Size of process heap in bytes     */
+    /* No open-file table here: the VFS keeps one fd table for the whole
+     * system and records each fd's owner as (pid, serial), closing a
+     * process's files once it is gone (vfs_reap_orphans).  All processes
+     * share the kernel heap, so there is no per-process heap either. */
 
     int       exit_code;                /* Exit code (valid when !alive)     */
     bool      alive;                    /* False once the process has exited */
@@ -269,6 +267,34 @@ void     task_kill_process(pcb_t *p);
  *                   for the first word that no longer holds it.  O(stack size).
  */
 uint32_t task_stack_used(const tcb_t *t);
+
+/*
+ * Stack peaks of threads that have exited
+ *
+ * task_stack_used() needs the thread to still exist, and a short-lived
+ * thread (a pi worker, an app that finishes in milliseconds) is gone
+ * before anyone can run `threads`.  So task_free_thread() measures the
+ * stack once more as it frees a thread and keeps the deepest value seen
+ * per thread name.  The shell `stacks` command shows these, merged with
+ * the live threads; the hardware test hwtest/test_30_stacks.py uses it to
+ * size app_table[] stacks.
+ *
+ * STACK_STATS_MAX names are kept; further names are counted in
+ * `dropped` and not recorded.
+ */
+#define STACK_STATS_MAX  24
+
+typedef struct {
+    char     name[16];   /* thread name (NUL-terminated)              */
+    uint32_t peak;       /* deepest stack use seen, bytes             */
+    uint32_t size;       /* stack size of the thread that hit `peak`  */
+    uint32_t exits;      /* threads of this name freed since reset    */
+} stack_stat_t;
+
+/* Copy up to max entries into out; returns how many.  *dropped (if not
+ * NULL) receives the number of names that did not fit. */
+int      task_stack_stats(stack_stat_t *out, int max, uint32_t *dropped);
+void     task_stack_stats_reset(void);
 
 int      task_thread_count(void);
 int      task_process_count(void);

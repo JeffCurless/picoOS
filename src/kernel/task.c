@@ -57,6 +57,12 @@ static bool pcb_used[MAX_PROCESSES];
 static uint32_t next_tid = 1;
 static uint32_t next_proc_serial = 1;   /* pcb_t.serial; 0 is never used */
 
+/* Stack peaks of exited threads, per name (see task.h).  Guarded by
+ * task_lock. */
+static stack_stat_t stack_stats[STACK_STATS_MAX];
+static int          stack_stats_count;
+static uint32_t     stack_stats_dropped;
+
 /* PID ranges handed out by task_alloc_pid(), indexed by pid_range_t.
  * next is the PID to try first; it starts at base. */
 typedef struct {
@@ -119,6 +125,9 @@ void task_init(void)
 
     next_tid = 1;
     next_proc_serial = 1;
+    memset(stack_stats, 0, sizeof(stack_stats));
+    stack_stats_count   = 0;
+    stack_stats_dropped = 0u;
     for (int i = 0; i < PID_RANGE_COUNT; i++) {
         pid_ranges[i].next = pid_ranges[i].base;
     }
@@ -387,8 +396,6 @@ pcb_t *task_create_process(const char *name, uint32_t pid)
     p->pid          = pid;
     p->parent_pid   = 0;
     p->thread_count = 0;
-    p->heap_base    = NULL;
-    p->heap_size    = 0;
     p->exit_code    = 0;
     p->alive        = true;
     p->serial       = next_proc_serial++;
@@ -398,14 +405,6 @@ pcb_t *task_create_process(const char *name, uint32_t pid)
 
     strncpy(p->name, name ? name : "process", sizeof(p->name) - 1);
     p->name[sizeof(p->name) - 1] = '\0';
-
-    strncpy(p->cwd, "/", sizeof(p->cwd) - 1);
-    p->cwd[sizeof(p->cwd) - 1] = '\0';
-
-    /* Initialise file descriptor table: -1 means unused. */
-    for (int i = 0; i < MAX_FDS; i++) {
-        p->fd_table[i] = -1;
-    }
 
     if (pid == PID_KERNEL) {
         s_kernel_proc = p;
@@ -538,14 +537,72 @@ uint32_t task_stack_used(const tcb_t *t)
  * Free / recycle
  * ------------------------------------------------------------------------- */
 
+/* Caller holds task_lock.  Keep the deepest stack use seen for this name. */
+static void stack_stats_record_locked(const char name[16], uint32_t used, uint32_t size)
+{
+    stack_stat_t *e = NULL;
+    for (int i = 0; i < stack_stats_count; i++) {
+        if (strncmp(stack_stats[i].name, name, sizeof(stack_stats[i].name)) == 0) {
+            e = &stack_stats[i];
+            break;
+        }
+    }
+    if (e == NULL) {
+        if (stack_stats_count >= STACK_STATS_MAX) {
+            stack_stats_dropped++;
+            return;
+        }
+        e = &stack_stats[stack_stats_count++];
+        /* name is a tcb_t.name: a 16-byte array, NUL-terminated. */
+        memcpy(e->name, name, sizeof(e->name) - 1u);
+        e->name[sizeof(e->name) - 1u] = '\0';
+    }
+    if (used >= e->peak) {
+        e->peak = used;
+        e->size = size;
+    }
+    e->exits++;
+}
+
+int task_stack_stats(stack_stat_t *out, int max, uint32_t *dropped)
+{
+    uint32_t save = spinlock_irq_acquire(&task_lock);
+    int n = (stack_stats_count < max) ? stack_stats_count : max;
+    for (int i = 0; i < n; i++) {
+        out[i] = stack_stats[i];
+    }
+    if (dropped != NULL) {
+        *dropped = stack_stats_dropped;
+    }
+    spinlock_irq_release(&task_lock, save);
+    return n;
+}
+
+void task_stack_stats_reset(void)
+{
+    uint32_t save = spinlock_irq_acquire(&task_lock);
+    memset(stack_stats, 0, sizeof(stack_stats));
+    stack_stats_count   = 0;
+    stack_stats_dropped = 0u;
+    spinlock_irq_release(&task_lock, save);
+}
+
 void task_free_thread(tcb_t *t)
 {
     if (t == NULL) {
         return;
     }
 
+    /* Measure before the lock: the scan is O(stack size), and nothing else
+     * touches a thread that is being freed. */
+    uint32_t used = task_stack_used(t);
+
     uint8_t *stack = NULL;
     uint32_t save = spinlock_irq_acquire(&task_lock);
+
+    if (t->stack_base != NULL) {
+        stack_stats_record_locked(t->name, used, t->stack_size);
+    }
 
     /* Remove this thread from the owning process's thread array. */
     pcb_t *proc = find_process_locked(t->pid);
