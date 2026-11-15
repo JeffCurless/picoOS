@@ -91,6 +91,13 @@ def list_serial_ports():
         print(f"{p.device:<20} {vid_pid:<12} {p.description or ''}")
 
 
+def _port_busy(e: Exception) -> bool:
+    """True if a serial open failed because another process holds the port
+    (flock from exclusive=True, or TIOCEXCL)."""
+    msg = str(e)
+    return "exclusively lock" in msg or "Errno 11" in msg or "Errno 16" in msg
+
+
 # ---------------------------------------------------------------------------
 # Log file helper
 # ---------------------------------------------------------------------------
@@ -156,20 +163,28 @@ def _wait_for_connection(port: "str | None", baud: int, stdin_fd: int,
     Uses select() directly on the raw stdin fd so Ctrl-C is detected even
     in raw terminal mode, where SIGINT is suppressed.
     """
+    busy_reported = False
     while True:
         if quit_event and quit_event.is_set():
             return None
         p = port or find_pico_port()
         if p:
             try:
-                ser = serial.Serial(p, baud, timeout=0.1)
+                # exclusive=True takes an flock on the device so a second
+                # console (another terminal, another checkout) can't open the
+                # same port and silently steal half the output.
+                ser = serial.Serial(p, baud, timeout=0.1, exclusive=True)
                 # Brief settle for the CDC stack — do NOT reset_input_buffer()
                 # here because the Pico may already be sending its boot banner
                 # and we would silently discard it.
                 time.sleep(0.05)
                 return ser
-            except serial.SerialException:
-                pass
+            except serial.SerialException as e:
+                if _port_busy(e) and not busy_reported:
+                    sys.stdout.write(f"\r\n[console] {p} is in use by another "
+                                     "process (another console?) — waiting...\r\n")
+                    sys.stdout.flush()
+                    busy_reported = True
         # Poll in short bursts so stdin (Ctrl-C) is checked every 0.1 s.
         deadline = time.monotonic() + poll_interval
         while time.monotonic() < deadline:
@@ -342,9 +357,13 @@ def open_connection(port: "str | None", baud: int) -> serial.Serial:
         print(f"[console] Using port {port}")
 
     try:
-        ser = serial.Serial(port, baud, timeout=0.1)
+        ser = serial.Serial(port, baud, timeout=0.1, exclusive=True)
     except serial.SerialException as e:
-        print(f"ERROR: Cannot open {port}: {e}")
+        if _port_busy(e):
+            print(f"ERROR: {port} is in use by another process "
+                  "(another console.py?).  Close it and try again.")
+        else:
+            print(f"ERROR: Cannot open {port}: {e}")
         sys.exit(1)
 
     print(f"[console] Port {port} opened at {baud} baud")
