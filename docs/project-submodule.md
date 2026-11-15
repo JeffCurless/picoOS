@@ -133,7 +133,7 @@ This file tells picoOS which applications exist and what priority to run them at
 #include "myapp.h"
 
 const app_entry_t app_table[] = {
-    { "myapp", myapp_entry, 4u },
+    { "myapp", myapp_entry, 4u, 0u },   /* name, entry, priority, stack (0 = 2 KB default) */
 };
 
 const int app_table_size = (int)(sizeof(app_table) / sizeof(app_table[0]));
@@ -385,7 +385,7 @@ esac
 2. **Create the header** — `apps/newapp.h` declaring `void newapp_entry(void *arg)`.
 3. **Register it** — add a row to `app_table[]` in `apps/app_table.c`:
    ```c
-   { "newapp", newapp_entry, 4u },
+   { "newapp", newapp_entry, 4u, 0u },
    ```
 4. **Add it to the build** — append the source file to `PICOOS_APP_SOURCES` in `CMakeLists.txt`:
    ```cmake

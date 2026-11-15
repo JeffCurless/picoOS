@@ -281,10 +281,9 @@ kernel range). `killproc`, `kill` and `SYS_KILL` refuse the kernel range with
 `PID_IS_KERNEL()`. That is the only protection: any code can still call
 `task_kill_thread()` or `task_kill_process()` directly, or write over a TCB,
 because nothing stops an app from reaching kernel functions and memory
-(see 6). The PCB pool, `task_alloc_pid()` and `task_create_process()` also
-run without a lock, so two cores creating processes at once can race; the
-duplicate-PID check in `task_create_process()` turns the second one away
-rather than letting two processes share a PID.
+(see 6). The TCB/PCB pools and PID allocation are guarded by `task_lock`
+(`task.c`), so two cores creating threads or processes at once no longer
+race, but that only makes the bookkeeping safe; it is not protection.
 
 **File:line**: `src/kernel/task.c` (`task_alloc_pid`, `task_create_process`),
 `src/shell/shell.c` (`cmd_kill`, `cmd_killproc`), `src/kernel/syscall.c`
@@ -295,7 +294,6 @@ rather than letting two processes share a PID.
   `task_kill_*()` so every path is covered, not just the shell and syscall.
 - With an MPU and SVC entry (6), apps can only reach the kernel through the
   syscall table, which makes the check a real boundary.
-- Take a spinlock around the PCB pool and PID allocation.
 
 **SRAM impact**: N/A
 
@@ -306,15 +304,15 @@ rather than letting two processes share a PID.
 ## SRAM Impact Summary
 
 None of the fixes above saves SRAM. Thread stacks are already `kmalloc`'d from
-the 64 KB heap at creation and `kfree`'d on exit, so an unused TCB slot costs
-only its TCB (about 72 bytes), and the TCB and PCB pools together are about
-3 KB.
+the kernel heap at creation and `kfree`'d on exit, so an unused TCB slot costs
+only its TCB (about 72 bytes), and a PCB about 300 bytes: with 32 threads and
+16 processes the pools together are about 7 KB.
 
 The large, adjustable items are:
 
 | Item | SRAM | How to change it |
 |------|------|------------------|
-| Kernel heap | 64 KB | `HEAP_SIZE` in `mem.h` — limits how many threads (2–3 KB stacks) can exist at once |
+| Kernel heap | 128 / 96 / 64 KB | `PICOOS_HEAP_KB` in `src/CMakeLists.txt` (RP2350 / RP2040 / pico_w + Display Pack 2) — limits how many threads (2–3 KB stacks) can exist at once. The `threads` STACK column shows each stack's high-water mark, so stacks can be sized from measurements |
 | Display framebuffer | ~32 KB (Display Pack) / ~75 KB (Display Pack 2) | Build with `-DPICOOS_DISPLAY_ENABLE=OFF` |
 | FS write buffer + superblock mirror | ~6 KB (RP2040) / ~8 KB (RP2350) | Fixed by `FS_BLOCK_SIZE` and `FS_MAX_FILES` |
 

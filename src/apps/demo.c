@@ -163,15 +163,16 @@ void demo_sensor(void *arg)
  * Application table
  * ========================================================================= */
 const app_entry_t app_table[] = {
-    { "producer",  demo_producer, 4u },
-    { "consumer",  demo_consumer, 4u },
-    { "sensor",    demo_sensor,   5u },
-    { "pi",        pi_estimate,   3u },
+    /* name        entry          prio  stack (0 = DEFAULT_STACK_SIZE) */
+    { "producer",  demo_producer, 4u,   0u },
+    { "consumer",  demo_consumer, 4u,   0u },
+    { "sensor",    demo_sensor,   5u,   0u },
+    { "pi",        pi_estimate,   3u,   0u },
 #if defined(PICOOS_WIFI_ENABLE) && defined(PICOOS_DISPLAY_ENABLE)
-    { "cray-one",  cray_one,      3u },
+    { "cray-one",  cray_one,      3u,   0u },
 #endif
 #ifdef PICOOS_WIFI_ENABLE
-    { "scantest",  scantest,      4u },
+    { "scantest",  scantest,      4u,   0u },
 #endif
 };
 

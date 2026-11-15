@@ -27,13 +27,18 @@
  * serving kernel object allocations.  Net SRAM saving: ~32 KB.
  * ------------------------------------------------------------------------- */
 /*
- * 64 KB kernel heap.
+ * Kernel heap size.
  *
- * Sized to cover dynamic thread stacks (up to 16 × DEFAULT_STACK_SIZE = 32 KB
- * at peak) plus kernel object allocations.  The former static stack_pool
- * (64 KB BSS) has been removed, so this growth is a net SRAM win.
+ * Holds every thread stack (MAX_THREADS x DEFAULT_STACK_SIZE = 64 KB at
+ * peak with 32 threads) plus kernel object allocations.  src/CMakeLists.txt
+ * sets it per variant (PICOOS_HEAP_KB): 128 KB on RP2350, 96 KB on RP2040,
+ * 64 KB on pico_w + Display Pack 2, where the framebuffer and the WiFi/BT
+ * stack leave little SRAM.  The default here is for builds that do not go
+ * through that file (the host unit tests).
  */
-#define HEAP_SIZE (64u * 1024u)   /* 64 KB — absorbs dynamic thread stacks */
+#ifndef HEAP_SIZE
+#define HEAP_SIZE (64u * 1024u)
+#endif
 
 /* -------------------------------------------------------------------------
  * Memory manager API

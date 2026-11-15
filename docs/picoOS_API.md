@@ -46,8 +46,16 @@ typedef struct {
     const char *name;          /* Name used with the 'run' shell command */
     void      (*entry)(void *); /* Thread entry function                  */
     uint8_t    priority;       /* Scheduling priority: 0 = highest        */
+    uint32_t   stack_size;     /* Stack bytes; 0 = DEFAULT_STACK_SIZE (2 KB) */
 } app_entry_t;
 ```
+
+`stack_size` sets the stack of the thread the shell starts for the app (`run`,
+`AUTORUN=`, `BUTTONx=`). Use 0 for the 2 KB default, or size it from the
+high-water mark in the `threads` STACK column (used/size) plus a margin.
+It is rounded up to a multiple of 8, and a value below `MIN_STACK_SIZE`
+(256 B) makes the launch fail. Worker threads the app creates pass their own
+size to `task_create_thread()`.
 
 ### Adding an app
 
@@ -65,10 +73,10 @@ void my_app(void *arg) {
 
 ```c
 const app_entry_t app_table[] = {
-    { "producer", demo_producer, 4u },
-    { "consumer", demo_consumer, 4u },
-    { "sensor",   demo_sensor,   5u },
-    { "myapp",    my_app,        4u },  /* <-- add your entry */
+    { "producer", demo_producer, 4u, 0u },
+    { "consumer", demo_consumer, 4u, 0u },
+    { "sensor",   demo_sensor,   5u, 0u },
+    { "myapp",    my_app,        4u, 0u },  /* <-- add your entry */
 };
 ```
 
@@ -119,7 +127,7 @@ pcb_t *task_create_process(const char *name, uint32_t pid);
 ```
 
 Allocates a PCB from the static pool. Returns `NULL` if the pool is full
-(`MAX_PROCESSES = 8`), if `pid` is 0, or if a live process already has `pid`.
+(`MAX_PROCESSES = 16`), if `pid` is 0, or if a live process already has `pid`.
 
 **`task_alloc_pid`**
 
@@ -157,7 +165,7 @@ tcb_t *task_create_thread(pcb_t      *proc,
 ```
 
 Allocates a TCB and a stack from the kernel heap. Returns `NULL` if the thread pool
-(`MAX_THREADS = 16`) or heap is exhausted. The new thread enters `THREAD_READY` and the
+(`MAX_THREADS = 32`) or heap is exhausted, or if `proc` has been killed. The new thread enters `THREAD_READY` and the
 scheduler will pick it up.
 
 To spawn via the syscall interface (e.g., from inside a running thread):
@@ -282,7 +290,7 @@ At boot, these threads are created before `sched_start()`:
 On pico_w / pico2_w builds `wifi_init()` runs first and creates `wifi-poll` (priority 6,
 any core) as TID 1, so `idle`, `idle1` and `shell` become TIDs 2–4.
 
-`MAX_THREADS = 16`, so **13 thread slots** are free at startup (12 on WiFi builds).
+`MAX_THREADS = 32`, so **29 thread slots** are free at startup (28 on WiFi builds).
 After the scheduler starts, the shell may add an AUTORUN app and, on display builds
 with button bindings, a `btn-mon` thread (priority 3).
 
@@ -1099,7 +1107,7 @@ kmem_stats(&used, &free_bytes, &largest);
 // largest  — largest single contiguous free allocation available
 ```
 
-Heap size: `HEAP_SIZE = 64 KB` (shared between dynamic thread stacks and kernel objects).
+Heap size: `HEAP_SIZE` is set per build variant by `PICOOS_HEAP_KB` in `src/CMakeLists.txt`: 128 KB on RP2350, 96 KB on RP2040, 64 KB on pico_w + Display Pack 2. It is shared between dynamic thread stacks and kernel objects.
 
 At peak (16 threads × `DEFAULT_STACK_SIZE`), thread stacks alone consume 32 KB of the
 heap, leaving ~32 KB for other allocations.
@@ -1198,8 +1206,8 @@ Set via `CURRENT_TCB->affinity = THREAD_AFFINITY_C1;` (etc.) at thread start.
 
 | Constant | Value | Meaning |
 |----------|-------|---------|
-| `MAX_THREADS` | 16 | Maximum live threads (3 used at boot: idle, idle1, shell → **13 free**; 4 on WiFi builds) |
-| `MAX_PROCESSES` | 8 | Maximum processes |
+| `MAX_THREADS` | 32 | Maximum live threads (3 used at boot: idle, idle1, shell → **29 free**; 4 on WiFi builds). CMake `PICOOS_MAX_THREADS` |
+| `MAX_PROCESSES` | 16 | Maximum processes (kernel and shell use 2). CMake `PICOOS_MAX_PROCESSES` |
 | `MQ_MAX_MSG` | 16 | Messages per queue |
 | `MQ_MSG_SIZE` | 64 | Max bytes per message |
 | `VFS_MAX_OPEN` | 16 | Max simultaneous open VFS fds |
@@ -1207,7 +1215,7 @@ Set via `CURRENT_TCB->affinity = THREAD_AFFINITY_C1;` (etc.) at thread start.
 | `FS_MAX_FILES` | 64 / 127 | Max files — 64 on RP2040, 127 on RP2350 |
 | `FS_MAX_FILE_DATA` | 4096 | Max bytes per file |
 | `SHELL_MAX_CMDS` | 32 | Max registered shell commands |
-| `HEAP_SIZE` | 65536 | Kernel heap in bytes (64 KB) |
+| `HEAP_SIZE` | 128 / 96 / 64 KB | Kernel heap: RP2350 / RP2040 / pico_w + Display Pack 2. CMake `PICOOS_HEAP_KB` |
 | `WIFI_MAX_SCAN_RESULTS` | 16 | Max WiFi scan results stored |
 | `BT_MAX_SCAN_RESULTS` | 20 | Max Bluetooth scan results stored |
 | `DISP_WIDTH` | 240 or 320 | Display width — 240 (Display Pack) / 320 (Display Pack 2) |

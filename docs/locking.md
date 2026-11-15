@@ -14,6 +14,7 @@ The one remaining exhaustion path is `spinlock_init()` itself. Each call claims 
 | Kernel spinlock | `spinlock_t` | `src/kernel/sync.c:190` | dedicated (claimed) or aliased to a stripe | spins, IRQs off |
 | Scheduler lock | `sched_lock` | `src/kernel/sched.c:97` | dedicated | spins |
 | Heap lock | `heap_lock` | `src/kernel/mem.c:60` | dedicated | spins |
+| Task pools | `task_lock` | `src/kernel/task.c` | dedicated | spins |
 | Event waiter pool | `event_pool_lock` | `src/kernel/sync.c:80` | dedicated | spins |
 | Mutex | `kmutex_t` | `src/kernel/sync.c:351` | stripe from `prim_pool` | blocks |
 | Semaphore | `ksemaphore_t` | `src/kernel/sync.c:451` | stripe from `prim_pool` | blocks |
@@ -36,7 +37,7 @@ The RP2040 SIO block has 32 spinlock registers, and only 8 of them can be handed
 | 16–23 | SDK striped pool for `mutex_init`, `sem_init`, `critical_section_init` (lwIP, BTstack, async_context) | No: shared, never claimed |
 | 24–31 | Claim-free range for `spin_lock_claim_unused()` | **Yes**: 8 slots, panics when empty |
 
-picoOS currently takes 5 of the 8 claim-free slots: `heap_lock`, `sched_lock`, `event_pool_lock` and `prim_pool[2..3]`. The remaining 3 are shared with anything else in the build that calls `spin_lock_claim_unused()`. The shell `info` command shows the live count through `sync_spinlock_report()`.
+picoOS currently takes 6 of the 8 claim-free slots: `heap_lock`, `sched_lock`, `event_pool_lock`, `task_lock` and `prim_pool[2..3]`. The remaining 2 are shared with anything else in the build that calls `spin_lock_claim_unused()`. The shell `info` command shows the live count through `sync_spinlock_report()`.
 
 ## Kernel spinlock (`spinlock_t`)
 
@@ -57,7 +58,7 @@ There are three ways a `spinlock_t` gets its `hw` pointer:
 
 Every kernel path uses the IRQ variant. That matters because PendSV (the context switch) is an interrupt: with IRQs off, the current thread cannot be switched out while it holds a hardware lock, so the other core never waits on a lock whose owner is asleep.
 
-Lock order, from `sched.c:90`: a primitive's stripe first, then `event_pool_lock`, then `sched_lock`, then `heap_lock`. No path takes them in reverse.
+Lock order, from `sched.c:90`: a primitive's stripe first, then `event_pool_lock`, then `sched_lock`, then `heap_lock`. No path takes them in reverse. `task_lock` (TCB/PCB pools, `next_tid`, PID ranges) nests inside `sched_lock`, because `task_free_thread()` runs from `sched_next_thread()` and `sched_unblock()`, and it is a leaf: `task.c` calls `kmalloc`, `kfree` and `sched_add_thread()` only outside it.
 
 ## Blocking primitives
 
