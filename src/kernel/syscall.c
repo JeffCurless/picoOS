@@ -301,8 +301,11 @@ int32_t syscall_dispatch(uint32_t num,
         bool self = (t == (tcb_t *)CURRENT_TCB);
         task_kill_thread(t);
         if (self) {
-            sched_yield();   /* does not return */
+            sched_yield();   /* does not return, unless we hold a kmutex:
+                              * then we die at its kmutex_unlock() */
+            return 0;
         }
+        vfs_reap_orphans();  /* files of a process that just went away */
         return 0;
     }
 

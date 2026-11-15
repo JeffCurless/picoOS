@@ -388,6 +388,7 @@ void kmutex_lock(kmutex_t *m)
             /* Mutex is free — claim it. */
             m->owner_tid = (int32_t)CURRENT_TCB->tid;
             m->count     = 1u;
+            CURRENT_TCB->mutex_depth++;   /* a kill now waits for unlock */
             spinlock_irq_release(&m->spin, irq_save);
             return;
         }
@@ -402,10 +403,18 @@ void kmutex_lock(kmutex_t *m)
     }
 }
 
+/* kmutex_unlock also ends a deferred kill.  sched_kill() does not free a
+ * thread that holds a kmutex — that would leave the mutex locked for good —
+ * it sets kill_pending instead.  So when the owner drops its last mutex,
+ * sched_kill_point() checks for that and, if set, the thread dies here.
+ * Only the owner's unlock counts: an unlock by another thread (L5, no
+ * owner check) leaves both threads' counts alone. */
 void kmutex_unlock(kmutex_t *m)
 {
+    tcb_t   *self     = CURRENT_TCB;
     uint32_t irq_save = spinlock_irq_acquire(&m->spin);
 
+    bool by_owner = self != NULL && m->owner_tid == (int32_t)self->tid;
     m->owner_tid = -1;
     m->count     = 0u;
 #ifdef PICOOS_LOCK_DEBUG
@@ -418,6 +427,10 @@ void kmutex_unlock(kmutex_t *m)
     wake_one(&m->waiters);
 
     spinlock_irq_release(&m->spin, irq_save);
+
+    if (by_owner && self->mutex_depth > 0u && --self->mutex_depth == 0u) {
+        sched_kill_point();   /* returns unless a kill was waiting on us */
+    }
 }
 
 #ifdef PICOOS_LOCK_DEBUG
@@ -435,6 +448,7 @@ void kmutex_lock_dbg(kmutex_t *m, const char *file, int line)
             /* Record location on the spinlock for spinlock-level diagnostics. */
             m->spin.acq_file = file;
             m->spin.acq_line = line;
+            CURRENT_TCB->mutex_depth++;   /* a kill now waits for unlock */
             spinlock_irq_release(&m->spin, irq_save);
             return;
         }

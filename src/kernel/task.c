@@ -55,6 +55,7 @@ static bool pcb_used[MAX_PROCESSES];
 
 /* monotonically increasing ID counters */
 static uint32_t next_tid = 1;
+static uint32_t next_proc_serial = 1;   /* pcb_t.serial; 0 is never used */
 
 /* PID ranges handed out by task_alloc_pid(), indexed by pid_range_t.
  * next is the PID to try first; it starts at base. */
@@ -117,6 +118,7 @@ void task_init(void)
     memset(pcb_used, 0, sizeof(pcb_used));
 
     next_tid = 1;
+    next_proc_serial = 1;
     for (int i = 0; i < PID_RANGE_COUNT; i++) {
         pid_ranges[i].next = pid_ranges[i].base;
     }
@@ -253,6 +255,7 @@ tcb_t *task_create_thread(pcb_t      *proc,
     t->affinity   = THREAD_AFFINITY_ANY; /* run on any core */
     t->state      = THREAD_NEW;          /* READY once the frame is built */
     t->kill_pending = false;
+    t->mutex_depth  = 0;
     t->wake_time_us = 0;
     t->cpu_time_us  = 0;
     t->next       = NULL;
@@ -388,6 +391,10 @@ pcb_t *task_create_process(const char *name, uint32_t pid)
     p->heap_size    = 0;
     p->exit_code    = 0;
     p->alive        = true;
+    p->serial       = next_proc_serial++;
+    if (next_proc_serial == 0u) {
+        next_proc_serial = 1u;   /* 0 means "no process" */
+    }
 
     strncpy(p->name, name ? name : "process", sizeof(p->name) - 1);
     p->name[sizeof(p->name) - 1] = '\0';
@@ -461,6 +468,17 @@ tcb_t *task_find_thread(uint32_t tid)
 pcb_t *task_find_process(uint32_t pid)
 {
     return find_process_locked(pid);
+}
+
+/* Locked, unlike the lookups above: the answer is a value, not a pointer,
+ * so it is exact at the moment it is taken. */
+uint32_t task_process_serial(uint32_t pid)
+{
+    uint32_t save = spinlock_irq_acquire(&task_lock);
+    pcb_t   *p    = find_process_locked(pid);
+    uint32_t s    = (p != NULL) ? p->serial : 0u;
+    spinlock_irq_release(&task_lock, save);
+    return s;
 }
 
 /* -------------------------------------------------------------------------
@@ -586,7 +604,9 @@ void task_free_process(pcb_t *p)
  * now.  A thread that is running (here or on the other core) or waiting on
  * a sync primitive cannot: freeing it would pull the stack out from under
  * a running CPU, or leave a dangling pointer in a waiter list.  Those are
- * freed later by sched_next_thread() or sched_unblock().
+ * freed later by sched_next_thread() or sched_unblock().  A thread holding
+ * a kmutex keeps running until it releases the last one, then dies in
+ * kmutex_unlock() (sched_kill_point).
  * ------------------------------------------------------------------------- */
 void task_kill_thread(tcb_t *t)
 {

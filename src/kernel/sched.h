@@ -94,10 +94,19 @@ bool sched_unblock(tcb_t *t);
  * sched_kill — mark t killed, under the scheduler lock.  Returns true if
  *              t is off-CPU and out of every queue, so the caller must
  *              task_free_thread() it now; false if it is freed later (it
- *              is the caller, is running on the other core, or is waiting
- *              on a primitive).  Use task_kill_thread() rather than this.
+ *              is the caller, is running on the other core, is waiting
+ *              on a primitive, or holds a kmutex).  Use task_kill_thread() rather than this.
  */
 bool sched_kill(tcb_t *t);
+
+/*
+ * sched_kill_point — called by kmutex_unlock() when the current thread has
+ *              just released its last kmutex.  If a kill was deferred
+ *              because it held one (kill_pending), the thread becomes a
+ *              ZOMBIE here and does not return; otherwise this returns at
+ *              once.  Thread context only.
+ */
+void sched_kill_point(void);
 
 /*
  * sched_sleep — put the current thread to sleep for (at least) ms

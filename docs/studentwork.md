@@ -30,15 +30,19 @@ source ~/.bashrc
 
 ## 2. Build picotool (optional — for scriptable flashing)
 
-`picotool` allows you to flash the Pico without pressing the BOOTSEL button each time. This step is optional — drag-and-drop flashing works without it.
+`picotool` allows you to flash the Pico without pressing the BOOTSEL button each time. The SDK also uses it to turn the firmware into a `.uf2`; if you skip this step, the first build of each variant downloads and builds its own copy (slower, and that copy can't flash).
+
+The SDK requires an **exact** picotool version — SDK 2.3.1 needs picotool 2.3.0 — so clone that tag, not the default branch. For another SDK release, the required version is in `grep -m1 picotool_VERSION_REQUIRED ~/pico-sdk/tools/CMakeLists.txt`.
 
 ```bash
-git clone https://github.com/raspberrypi/picotool.git ~/picotool
+git clone --branch 2.3.0 https://github.com/raspberrypi/picotool.git ~/picotool
 cd ~/picotool
 cmake -B build -DPICO_SDK_PATH="$HOME/pico-sdk"
 cmake --build build -j$(nproc)
-sudo cmake --install build          # installs to /usr/local/bin
+sudo cmake --install build          # binary in /usr/local/bin, CMake config in /usr/local/lib/cmake/picotool
 ```
+
+The SDK finds picotool through that CMake config, not through `PATH`. If `cmake` later stops with *"Incompatible picotool installation found"*, another picotool of the wrong version is installed (e.g. a `dnf` package); remove it, or see "Build picotool" in [fedora-build.md](fedora-build.md) for pointing the SDK at a specific copy with `PICOTOOL_FETCH_FROM_GIT_PATH`.
 
 ---
 
@@ -59,15 +63,10 @@ sudo usermod -aG dialout $USER
 
 Log out and back in for the group change to take effect.
 
-If you built `picotool` in step 2, also add a udev rule so it can access the Pico without `sudo`:
+If you built `picotool` in step 2, also install its udev rules so it can access the Pico without `sudo`. They cover the BOOTSEL IDs of both chips (`2E8A:0003` RP2040, `2E8A:000F` RP2350) as well as the running-picoOS IDs:
 
 ```bash
-sudo bash -c 'cat > /etc/udev/rules.d/99-pico.rules <<EOF
-# Raspberry Pi Pico — BOOTSEL mode
-SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="0003", MODE="0666"
-# Raspberry Pi Pico — CDC serial while running picoOS (any Raspberry Pi product ID)
-SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", MODE="0666", GROUP="dialout"
-EOF'
+sudo cp ~/picotool/udev/60-picotool.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 ```

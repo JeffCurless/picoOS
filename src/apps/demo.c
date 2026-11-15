@@ -14,6 +14,7 @@
 
 #include "demo.h"
 #include "pi.h"
+#include "hwtest.h"
 #ifdef PICOOS_WIFI_ENABLE
 #include "scantest.h"
 #endif
@@ -168,6 +169,7 @@ const app_entry_t app_table[] = {
     { "consumer",  demo_consumer, 4u,   0u },
     { "sensor",    demo_sensor,   5u,   0u },
     { "pi",        pi_estimate,   3u,   0u },
+    { "hwtest",    hwtest,        4u,   0u },
 #if defined(PICOOS_WIFI_ENABLE) && defined(PICOOS_DISPLAY_ENABLE)
     { "cray-one",  cray_one,      3u,   0u },
 #endif

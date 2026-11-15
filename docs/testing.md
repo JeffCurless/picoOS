@@ -79,14 +79,14 @@ The kernel modules under test (`mem.c`, `sync.c`, `fs.c`, `vfs.c`) are compiled 
 
 ---
 
-### 2 — `test_sync` (37 tests) — synchronisation primitives
+### 2 — `test_sync` (39 tests) — synchronisation primitives
 
 **Source**: `tests/sync/test_sync.c`  
 **Module under test**: `src/kernel/sync.c`  
 **Mock**: `tests/sync/mock_sched.c`  
 **Compile definitions**: `PICOOS_LOCK_DEBUG=1`, `PICOOS_LOCK_TIMEOUT_MS=100`
 
-The mock provides `current_tcb[2]` — a 2-element array matching the SMP kernel layout, where `current_tcb[0]` points to a static dummy `tcb_t` with `tid = 1` and `current_tcb[1]` is `NULL` — and stub implementations of `sched_block` (sets `THREAD_BLOCKED`), `sched_unblock` (sets `THREAD_READY`), and `sched_yield` (fires the `mock_yield_hook` callback once if set, then clears it).
+The mock provides `current_tcb[2]` — a 2-element array matching the SMP kernel layout, where `current_tcb[0]` points to a static dummy `tcb_t` with `tid = 1` and `current_tcb[1]` is `NULL` — and stub implementations of `sched_block` (sets `THREAD_BLOCKED`), `sched_unblock` (sets `THREAD_READY`), and `sched_yield` (fires the `mock_yield_hook` callback once if set, then clears it). `sched_kill_point` only counts its calls (`mock_kill_point_calls`). `task_process_serial` returns `mock_proc_serial`; `test_vfs` changes that value to make an fd's owning process look gone.
 
 The mock also provides `lock_deadlock_panic()`, which instead of halting captures the panic arguments into public globals (`mock_lock_panic_type`, `mock_lock_panic_wait_tid`, `mock_lock_panic_hold_tid`, …) and `longjmp`s back to the test's `setjmp` recovery point.
 
@@ -102,7 +102,7 @@ The mock also provides `lock_deadlock_panic()`, which instead of halting capture
 | `spinlock_irq_acquire_release_round_trip` | IRQ-save variant sets and clears `lock` correctly |
 | `spinlock_reacquire_after_release` | `acquire → release → acquire` succeeds |
 
-#### Mutex (4 tests)
+#### Mutex (6 tests)
 
 | Test | What it verifies |
 |---|---|
@@ -110,6 +110,8 @@ The mock also provides `lock_deadlock_panic()`, which instead of halting capture
 | `mutex_lock_when_free` | Lock a free mutex; `owner_tid` becomes `current_tcb->tid`; `count == 1` |
 | `mutex_unlock_clears_owner` | Unlock after lock; `owner_tid == -1`, `count == 0` |
 | `mutex_relock_after_unlock` | Lock → unlock → lock again sets `owner_tid` again |
+| `mutex_depth_and_kill_point` | `mutex_depth` counts held mutexes (1, 2, 1, 0); only the last unlock reaches `sched_kill_point()` |
+| `mutex_unlock_by_non_owner_keeps_depth` | An unlock by a thread that is not the owner leaves its `mutex_depth` alone and is no kill point |
 
 #### Semaphore (5 tests)
 
@@ -205,7 +207,7 @@ Each test calls `fs_reset()` (helper in the test file) which calls `mock_flash_i
 
 ---
 
-### 4 — `test_vfs` (10 tests) — VFS routing layer
+### 4 — `test_vfs` (14 tests) — VFS routing layer
 
 **Source**: `tests/vfs/test_vfs.c`  
 **Module under test**: `src/kernel/vfs.c`  
@@ -227,6 +229,10 @@ Each test calls `vfs_reset()` (helper in the test file) which calls `vfs_init()`
 | `dev_close_calls_device_layer` | `vfs_close` on a device fd increments `mock_dev_close_calls` |
 | `file_close_calls_fs_layer` | `vfs_close` on a file fd increments `mock_fs_close_calls` |
 | `mount_table_exhaustion` | Adding mounts up to `VFS_MAX_DEV_MOUNTS` succeeds; one more returns -1 |
+| `live_owner_fds_are_kept` | `vfs_reap_orphans()` leaves fds of a live process alone |
+| `dead_owner_fds_are_reaped` | Once the owner is gone, its file and device fds are closed through `fs_close`/`dev_close` and become invalid |
+| `reused_pid_fds_are_reaped` | Same PID with a new serial (the PID was reused) counts as gone |
+| `open_reaps_orphans_first` | A full table owned by a dead process does not block `vfs_open()` |
 
 ---
 
@@ -252,6 +258,17 @@ tests/
     ├── mock_fs.h / .c      Filesystem-layer call-counting stubs
     └── test_vfs.c          VFS routing tests
 ```
+
+---
+
+## Hardware test suite (`hwtest/`)
+
+`python3 hwtest/run.py` flashes a kit (`picotool load <kit> --force`, newest
+`kits/picowos_D-v*.uf2` by default) onto an attached board and runs the tests
+in `hwtest/test_*.py` through the USB shell. The device side is the `hwtest`
+app (`src/apps/hwtest.c`, `run hwtest <mode>`), which runs sequences too
+tight to time from the host. `hwtest/README.md` explains how the host stays
+in step with the shell, and how to add tests.
 
 ---
 

@@ -16,6 +16,7 @@
 #include "dev.h"
 #include "fs.h"
 #include "sync.h"
+#include "task.h"   /* CURRENT_TCB, task_process_serial */
 
 #include <string.h>
 #include <stddef.h>
@@ -132,6 +133,59 @@ static int dev_mount_find(const char *path)
 }
 
 /* -------------------------------------------------------------------------
+ * Orphaned fds
+ *
+ * fd_table[] is global, so nothing used to close a process's files when
+ * it went away.  A killed (or careless) app kept its fds forever, and if
+ * one was open for writing it kept fs.c's only write buffer too: no file
+ * could be written again until reboot.
+ *
+ * Each fd now records its owner as (pid, serial).  The process is gone
+ * when no live process has that PID — or one does, but with another
+ * serial, because the PID was handed out again.  Closing is left to here,
+ * in thread context, rather than done when the process dies: the last
+ * thread may be freed inside PendSV or an IRQ (sched_next_thread,
+ * sched_unblock), where neither vfs_lock nor a flash write is allowed.
+ * ------------------------------------------------------------------------- */
+
+/* Caller holds vfs_lock. */
+static void set_owner(vfs_fd_t *f)
+{
+    const tcb_t *self = CURRENT_TCB;
+    f->owner_pid    = (self != NULL) ? self->pid : 0u;
+    f->owner_serial = (f->owner_pid != 0u) ? task_process_serial(f->owner_pid) : 0u;
+}
+
+/* Caller holds vfs_lock. */
+static int reap_orphans_locked(void)
+{
+    int closed = 0;
+    for (uint32_t i = 0u; i < VFS_MAX_OPEN; i++) {
+        vfs_fd_t *f = &fd_table[i];
+        if (!f->used || f->owner_pid == 0u ||
+            task_process_serial(f->owner_pid) == f->owner_serial) {
+            continue;
+        }
+        if (f->type == VFS_TYPE_DEV) {
+            dev_close(f->dev_id);
+        } else {
+            (void)fs_close((int)f->fs_file_id);   /* commits pending writes */
+        }
+        f->used = false;
+        closed++;
+    }
+    return closed;
+}
+
+int vfs_reap_orphans(void)
+{
+    kmutex_lock(&vfs_lock);
+    int closed = reap_orphans_locked();
+    kmutex_unlock(&vfs_lock);
+    return closed;
+}
+
+/* -------------------------------------------------------------------------
  * vfs_open
  * ------------------------------------------------------------------------- */
 int vfs_open(const char *path, int mode)
@@ -141,6 +195,10 @@ int vfs_open(const char *path, int mode)
     }
 
     kmutex_lock(&vfs_lock);
+
+    /* Free what dead processes left open first: their slots, and the fs
+     * write buffer, which this open may need. */
+    reap_orphans_locked();
 
     int fd = fd_alloc();
     if (fd < 0) {
@@ -166,6 +224,7 @@ int vfs_open(const char *path, int mode)
         f->dev_id    = did;
         f->fs_file_id = 0u;
         f->mode      = mode;
+        set_owner(f);
         strncpy(f->path, path, VFS_PATH_MAX - 1u);
         f->path[VFS_PATH_MAX - 1u] = '\0';
 
@@ -186,6 +245,7 @@ int vfs_open(const char *path, int mode)
     f->dev_id     = DEV_COUNT;   /* invalid / unused */
     f->fs_file_id = (uint32_t)fs_fd;
     f->mode       = mode;
+    set_owner(f);
     strncpy(f->path, path, VFS_PATH_MAX - 1u);
     f->path[VFS_PATH_MAX - 1u] = '\0';
 

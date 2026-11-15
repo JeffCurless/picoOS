@@ -267,6 +267,12 @@ bool sched_unblock(tcb_t *t)
  * a thread that is not current on either core here cannot start running
  * before we are done, and a BLOCKED one has really switched out.
  *
+ *   holds a kmutex        kill_pending; it runs on until its last
+ *   (mutex_depth > 0)     kmutex_unlock(), which calls sched_kill_point()
+ *                         and dies there.  Freeing it now would leave the
+ *                         mutex locked forever — and fs_mutex/vfs_lock
+ *                         with it, hanging every file operation — with
+ *                         the data it guards half-updated.
  *   the caller itself     ZOMBIE; reaped by sched_next_thread() at its
  *                         next yield
  *   current on the other  kill_pending; that core's sched_next_thread()
@@ -277,6 +283,10 @@ bool sched_unblock(tcb_t *t)
  *   already ZOMBIE        nothing — someone else is freeing it
  *   READY / SLEEPING /    ZOMBIE, removed from the ready queue; the caller
  *   NEW                   frees it (returns true)
+ *
+ * mutex_depth is changed only by the thread itself.  It is read here for a
+ * thread that is not running, so it cannot change under us; a running one
+ * goes the kill_pending way and sched_next_thread() reads it at switch-out.
  * ------------------------------------------------------------------------- */
 bool sched_kill(tcb_t *t)
 {
@@ -290,13 +300,19 @@ bool sched_kill(tcb_t *t)
     if (trace_on && t->state != THREAD_ZOMBIE) {
         trace_record(TRACE_KILL, t->state, t->tid, t->name, 0u, NULL);
     }
-    if (t == current_tcb[core]) {
-        t->state = THREAD_ZOMBIE;
-    } else if (t == current_tcb[core ^ 1u]) {
+    if (t->state == THREAD_ZOMBIE) {
+        /* nothing — already dying */
+    } else if (t == current_tcb[core]) {
+        if (t->mutex_depth > 0u) {
+            t->kill_pending = true;   /* sched_kill_point() finishes it */
+        } else {
+            t->state = THREAD_ZOMBIE;
+        }
+    } else if (t == current_tcb[core ^ 1u] || t->mutex_depth > 0u) {
         t->kill_pending = true;
     } else if (t->state == THREAD_BLOCKED) {
         t->state = THREAD_ZOMBIE;
-    } else if (t->state != THREAD_ZOMBIE) {
+    } else {
         /* ZOMBIE before the free, so the SysTick wake loop (which reads
          * state without this lock) never re-queues a SLEEPING thread. */
         sched_remove_thread_raw(t);
@@ -305,6 +321,39 @@ bool sched_kill(tcb_t *t)
     }
     spinlock_irq_release(&sched_lock, save);
     return free_now;
+}
+
+/* -------------------------------------------------------------------------
+ * sched_kill_point
+ *
+ * The other half of a kill deferred because the thread held a kmutex.  The
+ * check and the state change are made under sched_lock, the same lock
+ * sched_kill() sets kill_pending under, so a kill that lands just after
+ * this check is still seen: by then mutex_depth is 0, so sched_kill() or
+ * sched_next_thread() finishes the thread instead.
+ * ------------------------------------------------------------------------- */
+void sched_kill_point(void)
+{
+    tcb_t *self = CURRENT_TCB;
+    if (self == NULL) {
+        return;
+    }
+
+    uint32_t save = spinlock_irq_acquire(&sched_lock);
+    bool die = self->kill_pending && self->mutex_depth == 0u;
+    if (die) {
+        self->kill_pending = false;
+        self->state        = THREAD_ZOMBIE;   /* the kill was traced by
+                                                 * sched_kill(); the switch
+                                                 * out shows it as ZOMBIE */
+    }
+    spinlock_irq_release(&sched_lock, save);
+
+    if (die) {
+        for (;;) {
+            sched_yield();   /* reaped by sched_next_thread(); no return */
+        }
+    }
 }
 
 /* -------------------------------------------------------------------------
@@ -424,9 +473,10 @@ tcb_t *sched_next_thread(void)
 
     /* Killed from the other core while it ran here (sched_kill).  If it
      * has just blocked it is in a primitive's waiter list: make it a ZOMBIE
-     * for sched_unblock() to free, but do not reap it here. */
+     * for sched_unblock() to free, but do not reap it here.  If it holds a
+     * kmutex, leave it be: it dies at its last kmutex_unlock(). */
     bool kill_deferred = false;
-    if (cur != NULL && cur->kill_pending) {
+    if (cur != NULL && cur->kill_pending && cur->mutex_depth == 0u) {
         cur->kill_pending = false;
         kill_deferred     = (cur->state == THREAD_BLOCKED);
         cur->state        = THREAD_ZOMBIE;

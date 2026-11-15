@@ -40,6 +40,7 @@
 
 /* External symbols provided by mock_sched.c -------------------------------- */
 extern void (*mock_yield_hook)(void);
+extern int    mock_kill_point_calls;
 
 #ifdef PICOOS_LOCK_DEBUG
 #include <setjmp.h>
@@ -159,6 +160,49 @@ static void test_mutex_relock_after_unlock(void)
     CHECK(m.owner_tid == (int32_t)CURRENT_TCB->tid,
           "owner_tid must be set again after second lock");
     kmutex_unlock(&m);
+    END_TEST();
+}
+
+/* A kill waits while the thread holds a kmutex (#26): mutex_depth counts
+ * held mutexes, and the last unlock reaches sched_kill_point(). */
+static void test_mutex_depth_and_kill_point(void)
+{
+    BEGIN_TEST(mutex_depth_and_kill_point);
+    kmutex_t a, b;
+    kmutex_init(&a);
+    kmutex_init(&b);
+    tcb_t *self = (tcb_t *)CURRENT_TCB;
+    self->mutex_depth = 0u;
+    mock_kill_point_calls = 0;
+
+    kmutex_lock(&a);
+    CHECK(self->mutex_depth == 1u, "depth must be 1 holding one mutex");
+    kmutex_lock(&b);
+    CHECK(self->mutex_depth == 2u, "depth must be 2 holding two mutexes");
+    kmutex_unlock(&b);
+    CHECK(self->mutex_depth == 1u, "depth must drop to 1");
+    CHECK(mock_kill_point_calls == 0, "no kill point while a mutex is held");
+    kmutex_unlock(&a);
+    CHECK(self->mutex_depth == 0u, "depth must be 0 after the last unlock");
+    CHECK(mock_kill_point_calls == 1, "last unlock must reach the kill point");
+    END_TEST();
+}
+
+/* An unlock by a thread that is not the owner must not touch its count. */
+static void test_mutex_unlock_by_non_owner_keeps_depth(void)
+{
+    BEGIN_TEST(mutex_unlock_by_non_owner_keeps_depth);
+    kmutex_t m;
+    kmutex_init(&m);
+    tcb_t *self = (tcb_t *)CURRENT_TCB;
+    self->mutex_depth = 0u;
+    mock_kill_point_calls = 0;
+
+    m.owner_tid = (int32_t)self->tid + 100;   /* held by someone else */
+    m.count     = 1u;
+    kmutex_unlock(&m);
+    CHECK(self->mutex_depth == 0u, "depth must not underflow");
+    CHECK(mock_kill_point_calls == 0, "non-owner unlock is no kill point");
     END_TEST();
 }
 
@@ -736,6 +780,8 @@ int main(void)
     test_mutex_lock_when_free();
     test_mutex_unlock();
     test_mutex_relock_after_unlock();
+    test_mutex_depth_and_kill_point();
+    test_mutex_unlock_by_non_owner_keeps_depth();
 
     /* Semaphore */
     test_semaphore_init_count();

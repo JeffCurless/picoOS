@@ -33,11 +33,14 @@
 #include "mock_fs.h"
 #include "../framework.h"
 
+extern uint32_t mock_proc_serial;   /* mock_sched.c: task_process_serial() */
+
 /* Per-test reset: re-initialise the VFS and zero the mock counters. */
 static void vfs_reset(void)
 {
     mock_dev_reset();
     mock_fs_reset();
+    mock_proc_serial = 1u;
     vfs_init();          /* re-registers the 4 standard device mounts */
     /* Re-initialising resets mock call counters; clear again after vfs_init
      * because vfs_init calls dev_open implicitly via vfs_mount_dev calls. */
@@ -269,6 +272,77 @@ static void test_mount_table_exhaustion(void)
 }
 
 /* -------------------------------------------------------------------------
+ * Orphaned fds (#26): files a dead process left open are closed for it.
+ * ------------------------------------------------------------------------- */
+static void test_live_owner_fds_are_kept(void)
+{
+    BEGIN_TEST(live_owner_fds_are_kept);
+    vfs_reset();
+
+    int fd = vfs_open("/a.txt", VFS_O_CREAT | VFS_O_WRONLY);
+    CHECK(fd >= 0, "open must succeed");
+    CHECK(vfs_reap_orphans() == 0, "a live owner's fd must not be reaped");
+    CHECK(mock_fs_close_calls == 0, "fs_close must not be called");
+    if (fd >= 0) vfs_close(fd);
+
+    END_TEST();
+}
+
+static void test_dead_owner_fds_are_reaped(void)
+{
+    BEGIN_TEST(dead_owner_fds_are_reaped);
+    vfs_reset();
+
+    int f1 = vfs_open("/a.txt", VFS_O_CREAT | VFS_O_WRONLY);
+    int f2 = vfs_open("/dev/console", VFS_O_RDWR);
+    CHECK(f1 >= 0 && f2 >= 0, "opens must succeed");
+
+    mock_proc_serial = 0u;   /* the owning process is gone */
+    CHECK(vfs_reap_orphans() == 2, "both fds must be reaped");
+    CHECK(mock_fs_close_calls == 1, "the file must go through fs_close");
+    CHECK(mock_dev_close_calls == 1, "the device must go through dev_close");
+    uint8_t b;
+    CHECK(vfs_read(f1, &b, 1u) == -1, "a reaped fd must be invalid");
+    CHECK(vfs_close(f2) == -1, "a reaped fd cannot be closed again");
+
+    END_TEST();
+}
+
+static void test_reused_pid_fds_are_reaped(void)
+{
+    BEGIN_TEST(reused_pid_fds_are_reaped);
+    vfs_reset();
+
+    int fd = vfs_open("/a.txt", VFS_O_CREAT | VFS_O_WRONLY);
+    CHECK(fd >= 0, "open must succeed");
+
+    mock_proc_serial = 2u;   /* same PID, but a different process now */
+    CHECK(vfs_reap_orphans() == 1, "the old process's fd must be reaped");
+
+    END_TEST();
+}
+
+static void test_open_reaps_orphans_first(void)
+{
+    BEGIN_TEST(open_reaps_orphans_first);
+    vfs_reset();
+
+    /* Fill the table as one process, which then dies. */
+    for (uint32_t i = 0u; i < VFS_MAX_OPEN; i++) {
+        CHECK(vfs_open("/f.txt", VFS_O_RDONLY) >= 0, "fill open must succeed");
+    }
+    CHECK(vfs_open("/f.txt", VFS_O_RDONLY) == -1, "table must be full");
+
+    mock_proc_serial = 2u;   /* owner gone; we are a new process */
+    int fd = vfs_open("/g.txt", VFS_O_RDONLY);
+    CHECK(fd >= 0, "open must succeed once the dead owner's fds are reaped");
+    CHECK(mock_fs_close_calls == (int)VFS_MAX_OPEN,
+          "every orphan must have been closed");
+
+    END_TEST();
+}
+
+/* -------------------------------------------------------------------------
  * main
  * ------------------------------------------------------------------------- */
 int main(void)
@@ -286,6 +360,10 @@ int main(void)
     test_dev_close_routes_to_device_layer();
     test_file_close_routes_to_fs_layer();
     test_mount_table_exhaustion();
+    test_live_owner_fds_are_kept();
+    test_dead_owner_fds_are_reaped();
+    test_reused_pid_fds_are_reaped();
+    test_open_reaps_orphans_first();
 
     SUMMARY();
 }

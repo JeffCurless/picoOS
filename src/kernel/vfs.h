@@ -52,6 +52,9 @@ typedef struct {
     dev_id_t dev_id;       /* valid when type == VFS_TYPE_DEV  */
     uint32_t fs_file_id;   /* valid when type == VFS_TYPE_FILE */
     int      mode;
+    uint32_t owner_pid;    /* process that opened it (0 = no thread, e.g.
+                            * before the scheduler starts: never reaped)  */
+    uint32_t owner_serial; /* that process's pcb_t.serial when it opened  */
 } vfs_fd_t;
 
 /* -------------------------------------------------------------------------
@@ -85,6 +88,18 @@ int vfs_write(int fd, const uint8_t *buf, uint32_t n);
  *   Returns 0 on success, or -1 on error.
  */
 int vfs_close(int fd);
+
+/*
+ * vfs_reap_orphans — close every fd whose owning process no longer exists
+ *                    (it exited without closing, or was killed).  A file
+ *                    open for writing is committed to flash, as a normal
+ *                    close would, and its write buffer is released.
+ *                    vfs_open() does this first, so a dead process's files
+ *                    never block a new open; call it after a kill to free
+ *                    them at once.  Thread context only (flash writes).
+ *                    Returns the number of fds closed.
+ */
+int vfs_reap_orphans(void);
 
 /*
  * vfs_mount_dev — register a device so it can be opened by path.

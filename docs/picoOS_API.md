@@ -255,6 +255,19 @@ A killed thread is freed only once nothing can still be using it:
 | BLOCKED on a mutex, semaphore, queue or event flags | when the primitive wakes it; the wake-up passes to the next waiter |
 | running on the other core | when it next switches out (within one 10 ms time slice) |
 | the caller | at its next yield — `SYS_KILL` and the shell yield for you |
+| holding a `kmutex` (in any state above) | when it releases the last one: `kmutex_unlock()` ends the thread instead of returning. Until then it keeps running |
+
+The `kmutex` rule comes first. Freeing a thread that holds a mutex would leave
+the mutex locked for good, with the data it guards half-updated. If the mutex
+is `fs_mutex` or the VFS lock, that hangs every file operation. The cost is
+that a thread which never releases its mutex (deadlocked, or blocked forever
+while holding it) cannot be killed. Each thread's `mutex_depth` counts the
+mutexes it holds.
+
+Open files belong to the process that opened them. Once that process is gone,
+its files are closed for it: any fd it left open, even one being written, is
+closed (and committed to flash) by the next `vfs_open()` from any thread, or
+right away by `kill`, `killproc` and `SYS_KILL`.
 
 `task_kill_process()` marks the process not alive at once, so a WiFi/BT
 continuous scan it owned is reclaimed even while a thread is still waiting to
@@ -453,6 +466,15 @@ vfs_close(fd);
 Maximum simultaneously open VFS descriptors: `VFS_MAX_OPEN = 16`, of which at most
 `FS_MAX_OPEN_FDS = 8` can be filesystem files.  Only one file can be open for writing
 at a time.
+
+Each fd records the process that opened it. When that process exits or is
+killed, its open fds are closed for it, so a dead app cannot keep the single
+write buffer. `vfs_open()` does this first. Kernel code can also call it
+directly:
+
+```c
+int vfs_reap_orphans(void);   // close fds whose owner process is gone; returns how many
+```
 
 ### Device Paths
 

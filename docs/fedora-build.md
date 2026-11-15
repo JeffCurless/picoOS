@@ -20,7 +20,7 @@ sudo dnf install -y \
     ninja-build
 ```
 
-`libusb1-devel` and `pkg-config` are needed to build `picotool` (the flash utility) from source in step 4.
+`libusb1-devel` and `pkg-config` are needed to build `picotool` with USB support from source in step 4.
 
 ---
 
@@ -98,80 +98,73 @@ source ~/.bashrc
 
 ---
 
-## 4. Build picotool (optional — for scriptable flashing)
+## 4. Build picotool (required — the SDK uses it to make the UF2)
 
-This step is optional — you can flash without it using BOOTSEL drag-and-drop (Method A in step 8).
-
-### Check the Fedora package first
-
-Recent Fedora releases may ship picotool directly:
+The pico-sdk converts every firmware ELF into a `.uf2` with `picotool uf2 convert`, so picotool is part of the build, not just a flashing tool.  The SDK insists on an **exact** picotool version: SDK 2.3.1 requires picotool 2.3.0.  For another SDK release, read the required version from the SDK:
 
 ```bash
-dnf info picotool 2>/dev/null && sudo dnf install -y picotool
+grep -m1 picotool_VERSION_REQUIRED ~/pico-sdk/tools/CMakeLists.txt
+#     set(picotool_VERSION_REQUIRED 2.3.0)
 ```
 
-If that succeeds, skip to step 5.  If the package is not found, build from source below.
+The SDK finds picotool through its CMake package config (`picotoolConfig.cmake`), **not** through `PATH`.  It looks in `$PICOTOOL_FETCH_FROM_GIT_PATH/picotool/` first, then the system CMake package paths (where a `dnf install picotool` puts it).  If neither has picotool at all, it downloads and builds one (without USB support) inside every build directory.  If it finds one of the wrong version, configuration stops with *"Incompatible picotool installation found"*.  A distro package only works if its version matches exactly (`dnf info picotool`); otherwise do not install it, and build from source below.
 
-### Build from source
+### Prerequisites
 
-#### Prerequisites
-
-Ensure the build dependencies from step 1 are installed (`libusb1-devel`, `pkg-config`), then initialize the pico-sdk's mbedtls submodule — picotool requires it for binary signing and hashing:
+The build dependencies from step 1 (`libusb1-devel`, `pkg-config`), and the pico-sdk's mbedtls submodule (already present if you cloned the SDK with `--recursive`) — picotool uses it for signing and hashing:
 
 ```bash
 cd ~/pico-sdk
 git submodule update --init lib/mbedtls
 ```
 
-#### Clone and build
+### Clone and build
 
 ```bash
-git clone https://github.com/raspberrypi/picotool.git ~/picotool
-cd ~/picotool
-cmake -B build \
+mkdir -p ~/workspace && cd ~/workspace
+git clone --branch 2.3.0 https://github.com/raspberrypi/picotool.git picotool-src
+cmake -S picotool-src -B picotool-src/build \
     -DPICO_SDK_PATH="$HOME/pico-sdk" \
     -DPICOTOOL_FLAT_INSTALL=1 \
-    -DCMAKE_INSTALL_PREFIX="$HOME/.local"
-cmake --build build -j$(nproc)
-cmake --install build
+    -DCMAKE_INSTALL_PREFIX="$HOME/workspace/picotool-install"
+cmake --build picotool-src/build -j$(nproc)
+cmake --install picotool-src/build
 ```
 
-`PICOTOOL_FLAT_INSTALL=1` places the binary and its CMake config file together under `$HOME/.local/picotool/`, which makes it straightforward to point the pico-sdk at it in the next step.
+`PICOTOOL_FLAT_INSTALL=1` puts the binary and its CMake config side by side in `~/workspace/picotool-install/picotool/`.
 
-#### Make picotool visible to the pico-sdk
+### Make picotool visible to the pico-sdk and your shell
 
-Add both of the following to `~/.bashrc`:
+Add to `~/.bash_profile` (environment variables belong in the login file):
 
 ```bash
-export PATH="$HOME/.local/picotool:$PATH"
-export PICOTOOL_DIR="$HOME/.local/picotool"
+export PICOTOOL_FETCH_FROM_GIT_PATH="$HOME/workspace/picotool-install"
 ```
 
-`PICOTOOL_DIR` tells the pico-sdk's `Findpicotool.cmake` exactly where to find the installed CMake config file, preventing it from auto-fetching a second copy during your firmware builds.
+`PICOTOOL_FETCH_FROM_GIT_PATH` names the directory that *contains* `picotool/`.  (Exporting `PICOTOOL_DIR` does nothing: the SDK does not read it.)  The `./build` script sets this variable itself when `~/workspace/picotool-install/picotool` exists; a manual `cmake -B …` needs the export.
 
-Reload:
+Put the binary on your `PATH` for flashing — Fedora already puts `~/.local/bin` on `PATH`:
 
 ```bash
-source ~/.bashrc
+mkdir -p ~/.local/bin
+ln -sf ~/workspace/picotool-install/picotool/picotool ~/.local/bin/picotool
+source ~/.bash_profile
+hash -r            # forget any old picotool location bash cached
+picotool version   # picotool v2.3.0 ...
 ```
 
-Verify:
+When you update the SDK, rebuild picotool at the matching tag and remove the old `builds/` directories (`./clean`).
+
+### Build without USB support (offline / CI)
+
+If `libusb1-devel` is unavailable, add `-DPICOTOOL_NO_LIBUSB=1`. The resulting binary can still inspect and convert ELF/UF2 files (enough for the firmware build) but cannot communicate with a connected Pico over USB (`load`, `save`, `reboot` commands will be absent).
 
 ```bash
-picotool version
-# picotool v2.x.x (x86_64-pc-linux-gnu, ...)
-```
-
-#### Build without USB support (offline / CI)
-
-If `libusb1-devel` is unavailable, add `-DPICOTOOL_NO_LIBUSB=1`. The resulting binary can still inspect and convert ELF/UF2 files but cannot communicate with a connected Pico over USB (`load`, `save`, `reboot` commands will be absent).
-
-```bash
-cmake -B build \
+cmake -S picotool-src -B picotool-src/build \
     -DPICO_SDK_PATH="$HOME/pico-sdk" \
     -DPICOTOOL_FLAT_INSTALL=1 \
     -DPICOTOOL_NO_LIBUSB=1 \
-    -DCMAKE_INSTALL_PREFIX="$HOME/.local"
+    -DCMAKE_INSTALL_PREFIX="$HOME/workspace/picotool-install"
 ```
 
 ---
@@ -193,18 +186,15 @@ sudo usermod -aG dialout $USER
 
 Log out and back in for the group change to take effect.
 
-If you installed `picotool`, also add a udev rule so it can access the Pico without `sudo`:
+So `picotool load`/`reboot` can reach the Pico without `sudo`, install picotool's own udev rules.  They cover the BOOTSEL product IDs of both chips (`2E8A:0003` RP2040, `2E8A:000F` RP2350) as well as the running-picoOS IDs:
 
 ```bash
-sudo bash -c 'cat > /etc/udev/rules.d/99-pico.rules <<EOF
-# Raspberry Pi Pico — BOOTSEL mode
-SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="0003", MODE="0666"
-# Raspberry Pi Pico — CDC serial while running picoOS (any Raspberry Pi product ID)
-SUBSYSTEM=="tty", ATTRS{idVendor}=="2e8a", MODE="0666", GROUP="dialout"
-EOF'
+sudo cp ~/workspace/picotool-src/udev/60-picotool.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 ```
+
+The rules grant access to the logged-in seat user (`uaccess`) and to the `plugdev` group.
 
 ---
 
@@ -286,7 +276,7 @@ make -j$(nproc) -C build_pico
 
    The Pico unmounts and reboots into picoOS automatically.
 
-### Method B — picotool (if built in step 4)
+### Method B — picotool (built in step 4)
 
 With the Pico in BOOTSEL mode:
 
@@ -353,5 +343,7 @@ ln -sf build_pico/compile_commands.json compile_commands.json
 | `cmake` version too old | Fedora version ships cmake < 3.13 | `sudo dnf install cmake` or use `dnf module enable cmake` |
 | Build fails: missing `libusb` | Only affects picotool build | `sudo dnf install libusb1-devel` |
 | `picotool` build: `mbedtls` errors | mbedtls submodule not fetched | `cd ~/pico-sdk && git submodule update --init lib/mbedtls` |
-| pico-sdk fetches picotool during build | `PICOTOOL_DIR` not set | Add `export PICOTOOL_DIR="$HOME/.local/picotool"` to `~/.bashrc` |
-| `picotool: command not found` after install | `~/.local/picotool` not in PATH | Add `export PATH="$HOME/.local/picotool:$PATH"` to `~/.bashrc` |
+| pico-sdk downloads and builds picotool during the firmware build | SDK found no picotool | Build picotool (step 4) and export `PICOTOOL_FETCH_FROM_GIT_PATH="$HOME/workspace/picotool-install"` in `~/.bash_profile` |
+| `cmake` stops with *Incompatible picotool installation found* | A picotool of the wrong version (e.g. a distro package) was found first | Build the version the SDK requires (step 4) and export `PICOTOOL_FETCH_FROM_GIT_PATH`, or remove the distro package |
+| `picotool: command not found` after install | Binary not linked into `~/.local/bin` | `ln -sf ~/workspace/picotool-install/picotool/picotool ~/.local/bin/picotool` |
+| `bash: …/picotool: No such file or directory` after moving or removing picotool | bash cached the old location | `hash -r`, or open a new terminal |

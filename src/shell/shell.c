@@ -220,6 +220,10 @@ static int cmd_kill(int argc, char **argv)
     if (self) {
         sched_yield();   /* reaped by the scheduler; does not return */
     }
+    /* If that was the process's last thread, close what it left open.
+     * A thread that holds a kmutex dies only when it releases it; its
+     * files are closed by the next vfs_open() instead. */
+    vfs_reap_orphans();
     return 0;
 }
 
@@ -248,6 +252,10 @@ static int cmd_killproc(int argc, char **argv)
     task_kill_process(p);
     if (CURRENT_TCB->state == THREAD_ZOMBIE) {
         sched_yield();   /* killed our own process: reaped, does not return */
+    }
+    int closed = vfs_reap_orphans();   /* its open files, if it is gone */
+    if (closed > 0) {
+        shell_print("killproc: closed %d open file(s)\r\n", closed);
     }
     return 0;
 }
@@ -305,7 +313,7 @@ static int cmd_cat(int argc, char **argv)
         return -1;
     }
 
-    int fd = fs_open(argv[1], VFS_O_RDONLY);
+    int fd = vfs_open(argv[1], VFS_O_RDONLY);
     if (fd < 0) {
         shell_print("cat: cannot open '%s'\r\n", argv[1]);
         return -1;
@@ -313,12 +321,12 @@ static int cmd_cat(int argc, char **argv)
 
     uint8_t buf[128];
     int n;
-    while ((n = fs_read(fd, buf, sizeof(buf) - 1u)) > 0) {
+    while ((n = vfs_read(fd, buf, sizeof(buf) - 1u)) > 0) {
         buf[n] = '\0';
         shell_print("%s", (char *)buf);
     }
     shell_println("");   /* newline after file content */
-    fs_close(fd);
+    vfs_close(fd);
     return 0;
 }
 
@@ -341,7 +349,9 @@ static int cmd_fs(int argc, char **argv)
             return -1;
         }
 
-        int fd = fs_open(argv[2], VFS_O_WRONLY | VFS_O_CREAT | VFS_O_TRUNC);
+        /* Through the VFS, not fs_open(): vfs_open() first closes files a
+         * dead process left open, one of which may hold the write buffer. */
+        int fd = vfs_open(argv[2], VFS_O_WRONLY | VFS_O_CREAT | VFS_O_TRUNC);
         if (fd < 0) {
             shell_print("fs write: cannot open '%s'\r\n", argv[2]);
             return -1;
@@ -358,7 +368,7 @@ static int cmd_fs(int argc, char **argv)
                 strncat(line, argv[i], sizeof(line) - strlen(line) - 1u);
             }
             strncat(line, "\n", sizeof(line) - strlen(line) - 1u);
-            total = fs_write(fd, (const uint8_t *)line, (uint32_t)strlen(line));
+            total = vfs_write(fd, (const uint8_t *)line, (uint32_t)strlen(line));
         } else {
             /* Multi-line interactive mode.  Read lines until '.' alone. */
             shell_print("Entering multi-line mode for '%s'.\r\n", argv[2]);
@@ -372,8 +382,8 @@ static int cmd_fs(int argc, char **argv)
                 }
                 /* Append newline so file has proper line endings. */
                 strncat(line, "\n", sizeof(line) - (size_t)n - 1u);
-                int w = fs_write(fd, (const uint8_t *)line,
-                                 (uint32_t)strlen(line));
+                int w = vfs_write(fd, (const uint8_t *)line,
+                                  (uint32_t)strlen(line));
                 if (w < 0) {
                     shell_println("fs write: write error (file full?)");
                     break;
@@ -382,7 +392,7 @@ static int cmd_fs(int argc, char **argv)
             }
         }
 
-        if (fs_close(fd) != 0) {
+        if (vfs_close(fd) != 0) {
             shell_print("fs write: flash commit failed for '%s'\r\n", argv[2]);
             return -1;
         }
@@ -401,7 +411,7 @@ static int cmd_fs(int argc, char **argv)
             return -1;
         }
 
-        int fd = fs_open(argv[2], VFS_O_WRONLY | VFS_O_CREAT | VFS_O_APPEND);
+        int fd = vfs_open(argv[2], VFS_O_WRONLY | VFS_O_CREAT | VFS_O_APPEND);
         if (fd < 0) {
             shell_print("fs append: cannot open '%s'\r\n", argv[2]);
             return -1;
@@ -415,9 +425,9 @@ static int cmd_fs(int argc, char **argv)
         }
         strncat(line, "\n", sizeof(line) - strlen(line) - 1u);
 
-        int written = fs_write(fd, (const uint8_t *)line,
-                               (uint32_t)strlen(line));
-        if (fs_close(fd) != 0) {
+        int written = vfs_write(fd, (const uint8_t *)line,
+                                (uint32_t)strlen(line));
+        if (vfs_close(fd) != 0) {
             shell_print("fs append: flash commit failed for '%s'\r\n", argv[2]);
             return -1;
         }

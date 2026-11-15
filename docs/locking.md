@@ -185,7 +185,7 @@ Both locks are needed because the async-context lock is a recursive mutex owned 
 
 Waking up: `*_scan_wait()` waits on `CONT_EV_READY | CONT_EV_STOP`, then, under the kmutex, clears `READY` *before* it calls `take`. A publish that lands after the take sets the flag again, so no window is missed. A wake-up that finds nothing fresh just waits again.
 
-Known hazard: if a subscriber thread is killed while it holds `g_cont_lock` (a few instructions inside `*_scan_wait()`), the mutex is never released and `wifi-poll` blocks on it. This is the general picoOS problem of killing a thread that holds a kernel mutex (see `docs/imperfections.md` §11).
+Killing a subscriber thread while it holds `g_cont_lock` (a few instructions inside `*_scan_wait()`) is safe. A kill never frees a thread that holds a `kmutex_t`: `sched_kill()` sets `kill_pending` when the thread's `mutex_depth` is non-zero, and the thread dies in its last `kmutex_unlock()` (`sched_kill_point()`, which takes `sched_lock` only after the mutex's own stripe is released, so no lock nests). The same rule protects `fs_mutex` and the VFS lock.
 
 ## Review findings and recommendations
 

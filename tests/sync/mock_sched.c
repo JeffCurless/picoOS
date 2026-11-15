@@ -90,6 +90,18 @@ void    sched_start(void)              {}
 void    sched_tick(void)               {}
 void    sched_sleep(uint32_t ms)       { (void)ms; }
 tcb_t  *sched_next_thread(void)        { return NULL; }
+
+/* sched_kill_point: count the calls kmutex_unlock() makes when the current
+ * thread's mutex_depth reaches 0.  The real one never returns if a kill
+ * is pending; tests only check that it is reached. */
+int  mock_kill_point_calls = 0;
+void sched_kill_point(void)            { mock_kill_point_calls++; }
+
+/* task_process_serial: vfs.c records (pid, serial) per fd and treats the
+ * owner as gone when they stop matching.  Tests "kill" the process by
+ * changing mock_proc_serial (0 = no such process, other = PID reused). */
+uint32_t mock_proc_serial = 1u;
+uint32_t task_process_serial(uint32_t pid) { (void)pid; return mock_proc_serial; }
 void    sched_add_thread(tcb_t *t)     { (void)t; }
 void    sched_remove_thread(tcb_t *t)  { (void)t; }
 

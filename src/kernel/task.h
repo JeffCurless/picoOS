@@ -132,8 +132,15 @@ typedef struct tcb {
     uint8_t         priority;       /* Scheduling priority: 0 = highest      */
     int8_t          affinity;       /* 0 = core 0, 1 = core 1, -1 = any     */
     thread_state_t  state;          /* Current lifecycle state               */
-    bool            kill_pending;   /* Killed while running on the other core:
-                                     * reaped when it next switches out      */
+    bool            kill_pending;   /* Killed, but not yet safe to free: it
+                                     * was running on the other core, or it
+                                     * holds a kmutex.  It dies at its next
+                                     * switch-out with mutex_depth == 0, or
+                                     * at its last kmutex_unlock().          */
+    uint16_t        mutex_depth;    /* kmutexes this thread holds now.  A
+                                     * kill waits for 0: freeing a holder
+                                     * would leave the mutex locked forever
+                                     * and the data it guards half-updated.  */
     uint64_t        wake_time_us;   /* Absolute wake time (us) when sleeping */
     uint64_t        cpu_time_us;    /* Accumulated CPU time in microseconds  */
     char            name[16];       /* Human-readable name (NUL-terminated)  */
@@ -180,6 +187,10 @@ typedef struct pcb {
 
     int       exit_code;                /* Exit code (valid when !alive)     */
     bool      alive;                    /* False once the process has exited */
+    uint32_t  serial;                   /* Unique per process ever created
+                                         * (never 0).  A PID is reused; a
+                                         * serial is not — see
+                                         * task_process_serial().            */
 } pcb_t;
 
 /* -------------------------------------------------------------------------
@@ -217,6 +228,16 @@ uint32_t task_alloc_pid(pid_range_t range);
 
 tcb_t   *task_find_thread(uint32_t tid);
 pcb_t   *task_find_process(uint32_t pid);
+
+/*
+ * task_process_serial — the serial of the live process with this PID, or 0
+ *                       if there is none.  Record (pid, serial) to refer to
+ *                       a process later: if the process exits and its PID
+ *                       is handed out again, the serial no longer matches.
+ *                       The VFS uses this to find files left open by a
+ *                       process that is gone.
+ */
+uint32_t task_process_serial(uint32_t pid);
 
 void     task_free_thread(tcb_t *t);
 void     task_free_process(pcb_t *p);

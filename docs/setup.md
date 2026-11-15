@@ -27,8 +27,12 @@ sudo apt install -y \
     libstdc++-arm-none-eabi-newlib \
     build-essential \
     python3 \
-    git
+    git \
+    libusb-1.0-0-dev \
+    pkg-config
 ```
+
+`libusb-1.0-0-dev` and `pkg-config` are only needed to build `picotool` with USB support (section 3).  Do **not** `apt install picotool`: see [Install a matching picotool](#install-a-matching-picotool).
 
 Verify the compiler is reachable:
 
@@ -62,17 +66,73 @@ cd ~/pico-sdk
 git submodule update --init --recursive
 ```
 
-Set the environment variable so CMake and the SDK import script can find it.  Add this line to your `~/.bashrc` (or `~/.zshrc`):
+Set the environment variable so CMake and the SDK import script can find it.  Add this line to your `~/.profile` (environment variables belong in the login file, which every program you start inherits; `~/.bashrc` is for aliases and prompt settings):
 
 ```bash
 export PICO_SDK_PATH="$HOME/pico-sdk"
 ```
 
-Reload your shell:
+Load it into the current shell (new logins pick it up automatically):
 
 ```bash
-source ~/.bashrc
+source ~/.profile
 ```
+
+### Install a matching picotool
+
+The SDK turns every firmware ELF into a `.uf2` with `picotool uf2 convert`, so the build needs picotool even if you never flash with it.  The SDK insists on an **exact** version: SDK 2.3.1 requires picotool 2.3.0 (`picotool_VERSION_REQUIRED` in `$PICO_SDK_PATH/tools/CMakeLists.txt`).  For another SDK release, check that line for the version to build:
+
+```bash
+grep -m1 picotool_VERSION_REQUIRED "$PICO_SDK_PATH/tools/CMakeLists.txt"
+#     set(picotool_VERSION_REQUIRED 2.3.0)
+```
+
+The SDK finds picotool through its CMake package config (`picotoolConfig.cmake`), **not** through `PATH`.  It looks in, in order:
+
+1. `$PICOTOOL_FETCH_FROM_GIT_PATH/picotool/` (environment or `-D` variable)
+2. the system CMake package paths (e.g. `/usr/lib/cmake/picotool/` from a distro package)
+3. if nothing was found at all: it downloads and builds picotool into each build directory (without USB support), which is slow and repeated for every variant
+
+If step 2 finds the wrong version, configuration stops with *"Incompatible picotool installation found: Requires version 2.3.0, you have version 2.1.1"*.  The Debian / Raspberry Pi OS `picotool` package is 2.1.1, so remove it if it is installed (`sudo apt remove picotool`) and build the matching version:
+
+```bash
+cd ~/workspace
+git clone --branch 2.3.0 https://github.com/raspberrypi/picotool.git picotool-src
+cmake -S picotool-src -B picotool-src/build \
+      -DPICO_SDK_PATH="$PICO_SDK_PATH" \
+      -DPICOTOOL_FLAT_INSTALL=1 \
+      -DCMAKE_INSTALL_PREFIX="$HOME/workspace/picotool-install"
+make -j$(nproc) -C picotool-src/build install
+```
+
+`PICOTOOL_FLAT_INSTALL=1` puts the binary and its CMake config side by side in `~/workspace/picotool-install/picotool/`.
+
+Tell the SDK where it is, and put the binary on your `PATH` for flashing (section 7).  Add to `~/.profile`:
+
+```bash
+export PICOTOOL_FETCH_FROM_GIT_PATH="$HOME/workspace/picotool-install"
+```
+
+and link the binary into `~/.local/bin` (Debian's default `~/.profile` already adds that directory to `PATH` when it exists):
+
+```bash
+mkdir -p ~/.local/bin
+ln -sf ~/workspace/picotool-install/picotool/picotool ~/.local/bin/picotool
+source ~/.profile
+hash -r            # forget any old /usr/bin/picotool location bash cached
+picotool version   # picotool v2.3.0 ...
+```
+
+The `./build` script exports `PICOTOOL_FETCH_FROM_GIT_PATH` itself when `~/workspace/picotool-install/picotool` exists, so `./build` works without the `~/.profile` line; a manual `cmake -B …` does not.
+
+So `picotool load`/`reboot` can reach a Pico without `sudo`, install picotool's udev rules (they cover the RP2040 and RP2350 BOOTSEL and runtime product IDs):
+
+```bash
+sudo cp ~/workspace/picotool-src/udev/60-picotool.rules /etc/udev/rules.d/
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+When you update the SDK, rebuild picotool at the matching tag and run `./clean` so no build directory keeps the old one cached.
 
 ---
 
@@ -287,12 +347,7 @@ cp builds/pico/src/picoos_D-v0.3.9.uf2 /media/$USER/RPI-RP2/
 
 ### Method B — picotool (scriptable, no button required if already running picoOS)
 
-Install `picotool`:
-
-```bash
-sudo apt install picotool
-# or build from source: https://github.com/raspberrypi/picotool
-```
+Use the picotool built in [Install a matching picotool](#install-a-matching-picotool) (on your `PATH` through `~/.local/bin`).
 
 With the Pico in BOOTSEL mode:
 
@@ -450,6 +505,9 @@ arm-none-eabi-gdb builds/pico/src/picoos_D-v0.3.9.elf
 | Console output is garbled | Baud rate mismatch | picoOS uses 115200 — set your terminal to match |
 | `make` fails on `arm-none-eabi-gcc` not found | Toolchain not installed | Follow step 2 |
 | `picotool` can't find device | Pico not in BOOTSEL mode | Hold BOOTSEL while plugging in, or use `update` shell command |
+| `picotool` finds the device but gets a permission error | No udev rule for the Pico | Install `60-picotool.rules` — see [Install a matching picotool](#install-a-matching-picotool) |
+| `cmake` stops with *Incompatible picotool installation found* | A distro picotool of the wrong version is installed and `PICOTOOL_FETCH_FROM_GIT_PATH` is not set | Build the matching picotool and export `PICOTOOL_FETCH_FROM_GIT_PATH` — see [Install a matching picotool](#install-a-matching-picotool) |
+| `bash: /usr/bin/picotool: No such file or directory` after removing the distro package | bash cached the old location | `hash -r`, or open a new terminal |
 | No USB input on pico2_w | Stale build without M33 FPU fix | Ensure you are on the current branch and rebuild |
 | `cmake -B build` fails, or `build` vanished | `build` is the build script, not a directory | Use another directory name (`builds/pico`) or `./build`; restore the script with `git checkout build` |
 | AUTORUN app does not start | Name mismatch or line past byte 255 of `config.txt` | See [application.md](application.md#launching-an-app-automatically) |
