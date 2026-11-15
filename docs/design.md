@@ -388,7 +388,6 @@ Built-in apps included with picoOS:
 * **producer / consumer / sensor** — cross-core IPC demo using semaphores and message queues
 * **pi** — Monte Carlo π estimation; `run pi` uses all four workers split across both cores,
   `run pi single` pins all workers to Core 0 for a single-core baseline comparison
-* **cray-one** — multi-node WiFi multicast colour-grid demo (pico_w / pico2_w with a display)
 * **scantest** — on-device stress test for the WiFi/BT scan-result buffers (pico_w / pico2_w)
 
 Besides `run`, an app can be started at boot with `AUTORUN=<name>` in `config.txt`, or

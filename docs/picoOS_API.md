@@ -839,8 +839,7 @@ if (sock >= 0) {
 | `WIFI_ERR_STOPPED` | -8 | `wifi_scan_wait()`: continuous scanning is not running |
 
 Sockets are not owned by a process.  An app that may be killed should keep its handle
-in a `static int` initialised to `-1` and close it on its next start (see
-`src/apps/cray_one.c`).
+in a `static int` initialised to `-1` and close it on its next start.
 
 ### 6.6 Bluetooth (requires `PICOOS_BT_ENABLE` — pico_w / pico2_w builds only)
 
@@ -1122,8 +1121,7 @@ used, and the value must match the app name exactly (no trailing spaces).  See
 [application.md](application.md#launching-an-app-automatically) for details.
 
 Apps can read their own keys from `config.txt` with `vfs_open` / `vfs_read`.
-`cray-one` reads `SSID`, `PASSWORD`, `SSIDALT`, `PASSWORDALT`, `NODEID` and
-`MAXNODES`.  The full list of keys is in
+The full list of keys is in
 [application.md](application.md#configtxt-reference).
 
 ---

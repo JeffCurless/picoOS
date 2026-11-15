@@ -354,7 +354,7 @@ When `MYPROJECT_DEMO=ON`:
 - Your project's `apps/app_table.c` is **not** compiled — `PICOOS_APP_SOURCES` is not set.
 - The shell `run` command offers `producer`, `consumer`, `sensor` and `pi`.
 
-On WiFi boards (`picow`, `pico2w`) the `scantest` on-device test is also included, and with a display enabled the `cray-one` WiFi+display demo is too.
+On WiFi boards (`picow`, `pico2w`) the `scantest` on-device test is also included.
 
 To add a `demo` target to your `build` script:
 

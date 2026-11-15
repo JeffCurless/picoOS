@@ -137,9 +137,6 @@ const app_entry_t app_table[] = {
     { "sensor",    demo_sensor,   5u,   1024u },   /* [568]  */
     { "pi",        pi_estimate,   3u,   1024u },   /* [608]  */
     { "hwtest",    hwtest,        4u,   1024u },   /* [656]  */
-#if defined(PICOOS_WIFI_ENABLE) && defined(PICOOS_DISPLAY_ENABLE)
-    { "cray-one",  cray_one,      3u,   0u    },   /* not measured */
-#endif
 #ifdef PICOOS_WIFI_ENABLE
     { "scantest",  scantest,      4u,   1792u },   /* [1264] */
 #endif
@@ -160,8 +157,9 @@ const app_entry_t app_table[] = {
 };
 ```
 
-If the app needs WiFi or the display, wrap its entry in the same `#if` as
-`cray-one` / `scantest`, so builds without that hardware still link.
+If the app needs WiFi or the display, wrap its entry in an `#if` (as
+`scantest` is wrapped in `#ifdef PICOOS_WIFI_ENABLE`), so builds without
+that hardware still link.
 
 The four fields are:
 
@@ -592,8 +590,8 @@ Apps can store their own settings in the same file. See
 ### Setting up AUTORUN
 
 `fs append` adds a line and creates the file if needed; it keeps any lines
-already there (for example `cray-one`'s `SSID=` settings).  `fs write` replaces
-the whole file.
+already there (for example `BUTTONx=` bindings).  `fs write` replaces the whole
+file.
 
 ```
 pico> fs append config.txt AUTORUN=myapp
@@ -632,7 +630,7 @@ upload a new copy with `tools/console.py --upload config.txt config.txt`), or
   autorun one that starts the others with `task_create_process` /
   `task_create_thread`.
 - **No argument.**  The app is started with `arg = NULL`.  Read settings from
-  `config.txt` yourself if it needs them (as `cray-one` does).
+  `config.txt` yourself if it needs them (see "config.txt reference").
 - **Exact match.**  `AUTORUN=myapp ` with a trailing space looks for an app
   called `myapp ` and fails with `[shell] autorun: app 'myapp ' not found`.
   `fs append` does not add trailing spaces; watch for them in uploaded files.
@@ -663,35 +661,21 @@ running is ignored.  App names for buttons are limited to 15 characters.
 ## config.txt reference
 
 `config.txt` is a plain text file in the picoOS filesystem, one `KEY=value`
-per line.  Several readers parse it independently: the shell at boot, and some
-apps when they start.  This table lists every key the firmware reads:
+per line.  Several readers can parse it independently: the shell at boot, and
+any app that keeps its own settings there.  This table lists every key the
+firmware reads:
 
 | Key | Read by | Value | Default if absent |
 |-----|---------|-------|-------------------|
 | `AUTORUN` | shell, at boot (all builds) | App name from `app_table[]`, up to 31 chars | No app is started |
 | `BUTTONA`, `BUTTONB`, `BUTTONX`, `BUTTONY` | shell, at boot (display builds) | App name, up to 15 chars | Button is unbound; `btn-mon` thread is not created if no button is bound |
-| `SSID` | `cray-one` (WiFi + display builds) | WiFi network name, up to 63 chars | **Required** — `cray-one` exits with `SSID= not found` |
-| `PASSWORD` | `cray-one` | WiFi passphrase for `SSID`, up to 63 chars | Open network (no password) |
-| `SSIDALT` | `cray-one` | Fallback network, tried if connecting to `SSID` fails | No fallback |
-| `PASSWORDALT` | `cray-one` | Passphrase for `SSIDALT` | Open network |
-| `NODEID` | `cray-one` | This board's node number, `0` … `MAXNODES-1` | `0` |
-| `MAXNODES` | `cray-one` | Number of boards in the cluster, `1` … `16` | `1` |
-
-Example for one node of a three-board `cray-one` cluster that starts the
-demo at boot and binds button A to `pi`:
+Example that starts `sensor` at boot and binds buttons A and B:
 
 ```
-AUTORUN=cray-one
+AUTORUN=sensor
 BUTTONA=pi
-SSID=MyNetwork
-PASSWORD=secret123
-SSIDALT=MyPhoneHotspot
-PASSWORDALT=hotspot-pass
-NODEID=0
-MAXNODES=3
+BUTTONB=producer
 ```
-
-Give each board a different `NODEID` and the same `MAXNODES`.
 
 Parsing rules (the same for every reader):
 
@@ -703,14 +687,11 @@ Parsing rules (the same for every reader):
 - **Lines may end in `\n` or `\r\n`.**  Blank lines are skipped.
 - **Unknown lines are ignored**, so a line such as `# comment` is harmless,
   and each reader skips the other readers' keys.
-- **Duplicates:** the shell uses the first `AUTORUN=`; `cray-one` uses the
-  *last* value of each of its keys.
-- **Numbers** (`NODEID`, `MAXNODES`) are read as leading decimal digits;
-  anything that isn't a digit stops the number, so `NODEID=x` reads as `0`.
+- **Duplicates:** the shell uses the first `AUTORUN=`.
 - Values longer than the limit are truncated silently.
 
-`src/apps/wifi_test.c` also reads `SSID` and `PASSWORD`, but it is not part of
-the build.  If you add an app that reads its own keys, add them to this table.
+`src/apps/wifi_test.c` reads `SSID` and `PASSWORD`, but it is not part of the
+build.  If you add an app that reads its own keys, add them to this table.
 
 ---
 

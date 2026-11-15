@@ -33,7 +33,7 @@ def requires(*features: str):
 class Context:
     pico: Pico
     kit: str | None            # path of the flashed kit, None with --no-flash
-    version: str | None        # "0.4.7", parsed from the kit name
+    version: str | None        # "0.4.8", parsed from the kit name
     board: str                 # pico | picow | pico2 | pico2w
     variant: str               # ND | D | D2
     features: set = field(default_factory=set)   # wifi, bt, display, led, slow

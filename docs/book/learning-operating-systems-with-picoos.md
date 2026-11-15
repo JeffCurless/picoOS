@@ -1,6 +1,6 @@
 # Learning Operating Systems with picoOS
 
-Jeff Curless · October 2026 · local copy of the [online edition](https://claude.ai/code/artifact/dac58cfd-0013-4df3-931a-9dfa92107735)
+Jeff Curless · November 2026 · local copy of the [online edition](https://claude.ai/code/artifact/dac58cfd-0013-4df3-931a-9dfa92107735)
 
 <!-- toc:start -->
 
@@ -162,6 +162,10 @@ You should be comfortable with C: pointers, structs, and the difference between 
 
 Real operating systems are too big to hold in your head. Linux's scheduler alone is larger than all of picoOS. A small system lets you follow a thread from creation to death without losing the trail.
 
+Small is also a requirement of the hardware, not only a convenience for the reader. A Pico has 264 KB of RAM and 2 MB of flash, and a Pico 2 has 520 KB and 4 MB. Everything shares that space: the kernel, every thread's stack, the file system, the display's frame buffer, and the program you actually want to run. An operating system that used most of it would leave nothing for applications. picoOS is built to leave most of the chip to them.
+
+That small kernel still does real work for you. Without an operating system, a Pico program that reads a sensor, updates a display, saves to flash and talks over WiFi at the same time has to interleave all of that by hand in one loop. picoOS already provides threads on both cores, a scheduler, locks and message queues, a file system in flash, a device layer and a shell. You write each part of the application as its own thread and let picoOS share the processor between them, so a small application with several moving parts is easier to build.
+
 picoOS is also **deliberately imperfect**. Its heap fragments, its scheduler scans queues one by one, and it trusts every pointer a program hands it. These are not oversights. Each one is a place where you can measure the cost of a simple design, then replace it with a better one. Chapter 16 collects them as projects.
 
 <a id="s-p-3"></a>
@@ -185,7 +189,7 @@ Keep a Pico plugged in and a terminal open while you read. An operating system i
 - `$ ./build pico` — a command typed on your computer.
 - **RP2040** means the original Pico and Pico W; **RP2350** means the Pico 2 and Pico 2 W.
 
-This edition describes picoOS v0.4.4.
+This edition describes picoOS v0.4.8.
 
 <a id="ch-1"></a>
 ## Chapter 1 — Getting Started
@@ -238,7 +242,7 @@ From the picoOS directory:
 ./build             # builds all 12 variants
 ```
 
-`build` is a script, not a folder. Never delete it. picoOS treats every compiler warning in its own code as an error, so a build either finishes cleanly or stops at the first variant with a problem and prints `BUILD FAILED`. Each board is compiled in its own `builds/<board>_<variant>/` directory, and the finished images are copied to `kits/`. A file name such as `picoos_D-v0.4.4.uf2` means: pico board, Display Pack build (`_D`), version 0.4.4. `_D2` means Display Pack 2; no suffix means no display.
+`build` is a script, not a folder. Never delete it. picoOS treats every compiler warning in its own code as an error, so a build either finishes cleanly or stops at the first variant with a problem and prints `BUILD FAILED`. Each board is compiled in its own `builds/<board>_<variant>/` directory, and the finished images are copied to `kits/`. A file name such as `picoos_D-v0.4.8.uf2` means: pico board, Display Pack build (`_D`), version 0.4.8. `_D2` means Display Pack 2; no suffix means no display.
 
 <a id="s-1-4"></a>
 ### 1.4 Flash
@@ -261,7 +265,7 @@ The script finds the Pico by its USB ID. You should see a banner like this:
 
 ```
 =======================================================
-picoOS  v0.4.4
+picoOS  v0.4.8
 
   Platform : RP2040, dual ARM Cortex-M0+ (133 MHz max)
   Options  : DISPLAY_PACK
@@ -908,7 +912,7 @@ Both cores call `kmalloc()`. If both walked and split the same free block at the
 - `pico> mem`, then `run producer`, `run consumer`, `run sensor`, and `mem` again. How much did each thread cost?
 - Kill one in the middle (`kill <tid>`), start a different one, and look at "Largest free".
 - Run the host tests with `./build tests`. Read `tests/mem/` to see a fragmentation test that needs no hardware.
-- Run `python3 tools/mem_report.py builds/pico_D/src/picoos_D-v0.4.4.elf.map` and find the heap array.
+- Run `python3 tools/mem_report.py builds/pico_D/src/picoos_D-v0.4.8.elf.map` and find the heap array.
 
 <a id="s-7-10"></a>
 ### 7.10 Think about it
@@ -1476,7 +1480,7 @@ The built-in commands are a table of these. Other modules add their own at start
 
 When the shell starts it reads `config.txt` from the filesystem (only its first 255 bytes). `AUTORUN=<app>` starts an app at every boot, with a PID from 50. On display builds, `BUTTONA=`, `BUTTONB=`, `BUTTONX=` and `BUTTONY=` bind each Display Pack button to an app, which starts with a PID from 200. This is how a picoOS board can run a program on its own, with no computer attached.
 
-Apps can keep their own settings in the same file. The `cray-one` demo reads `SSID=` and `PASSWORD=` (and a fallback `SSIDALT=` / `PASSWORDALT=`) to join WiFi, and `NODEID=` and `MAXNODES=` to find its place in the cluster. Each reader scans the file for its own keys and skips the rest. `docs/application.md` lists every key.
+Apps can keep their own settings in the same file — a WiFi app might read `SSID=` and `PASSWORD=` from it. Each reader scans the file for its own keys and skips the rest. `docs/application.md` lists every key.
 
 <a id="s-13-5"></a>
 ### 13.5 Try this
@@ -1918,7 +1922,7 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 - memory management unit (MMU) — [2.3](#s-2-3)
 - memory map — [7.1](#s-7-1)
 - memory protection unit (MPU) — [2.3](#s-2-3), [16.2](#s-16-2)
-- message queue (`mqueue_t`) — [8.5](#s-8-5), [9.1](#s-9-1), [9.2](#s-9-2), [9.3](#s-9-3), [10.3](#s-10-3), [10.4](#s-10-4), [14.2](#s-14-2), [14.6](#s-14-6)
+- message queue (`mqueue_t`) — [P.2](#s-p-2), [8.5](#s-8-5), [9.1](#s-9-1), [9.2](#s-9-2), [9.3](#s-9-3), [10.3](#s-10-3), [10.4](#s-10-4), [14.2](#s-14-2), [14.6](#s-14-6)
 - multicore lockout — [3.2](#s-3-2), [3.5](#s-3-5), [12.5](#s-12-5)
 - mutex — [8.5](#s-8-5), [8.8](#s-8-8), [8.11](#s-8-11), [11.3](#s-11-3), [12.6](#s-12-6), [15.4](#s-15-4)
 - mutual exclusion — [8.1](#s-8-1), [8.9](#s-8-9)

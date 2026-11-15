@@ -247,7 +247,7 @@ cmake -B builds/pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico \
 | `PICOOS_LED_ENABLE` | ON | RGB LED driver + `/dev/led` |
 | `PICOOS_LED_SHELL` | ON | `led` shell command |
 | `PICOOS_BT_ENABLE` | ON | Bluetooth scanning on pico_w / pico2_w; ignored on boards without a CYW43 |
-| `PICOOS_INCLUDE_DEMO_APPS` | ON | Built-in apps (`producer`, `consumer`, `sensor`, `pi`, plus `cray-one` and `scantest` on WiFi boards); set `OFF` to supply your own app table |
+| `PICOOS_INCLUDE_DEMO_APPS` | ON | Built-in apps (`producer`, `consumer`, `sensor`, `pi`, `hwtest`, plus `scantest` on WiFi boards); set `OFF` to supply your own app table |
 | `PICOOS_LOCK_DEBUG` | OFF | Deadlock detection for blocking locks (timeout `PICOOS_LOCK_TIMEOUT_MS`, default 5000) — see [testing.md](testing.md) |
 | `PICOOS_SCAN_RACE_INJECT` | OFF | **Test only** — re-opens the scan-buffer race for `scantest`; never flash these images for normal use |
 

@@ -10,7 +10,7 @@ Usage
   python3 hwtest/run.py                     # flash newest picowos_D kit, run all
   python3 hwtest/run.py --no-flash          # test whatever the board runs now
   python3 hwtest/run.py -k kill             # only tests whose name contains "kill"
-  python3 hwtest/run.py --kit kits/picowos_D-v0.4.7.uf2
+  python3 hwtest/run.py --kit kits/picowos_D-v0.4.8.uf2
   python3 hwtest/run.py --board pico2w --variant D2
   python3 hwtest/run.py --list              # list tests and exit
   python3 hwtest/run.py -v                  # show device output live
@@ -54,7 +54,7 @@ def kit_features(board: str, variant: str) -> set:
 
 
 def parse_kit_name(path: str):
-    """kits/picowos_D-v0.4.7.uf2 -> ("picow", "D", "0.4.7")."""
+    """kits/picowos_D-v0.4.8.uf2 -> ("picow", "D", "0.4.8")."""
     m = re.match(r"(pico2?w?)os(?:_(D2?))?-v(\d+\.\d+\.\d+)(?:_INJ)?\.uf2$",
                  os.path.basename(path))
     if not m:

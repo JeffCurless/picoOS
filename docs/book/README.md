@@ -6,7 +6,7 @@
 | `thread-states.svg` | Thread-state diagram used in section 4.5 |
 | `build_toc_index.py` | Numbers the sections and rebuilds the contents and index |
 | `build_pdf.py` | Typesets the book as a print-ready PDF with LaTeX (contents and index with page numbers) |
-| `learning-operating-systems-with-picoos.pdf` | The typeset book, US Letter (`-a4.pdf` and `-6x9.pdf` are the other paper sizes) |
+| `learning-operating-systems-with-picoos.pdf` | The typeset book, US Letter (`-6x9.pdf` is the 6 × 9 in paperback size) |
 | `latex/` | Intermediate LaTeX files from `build_pdf.py`; ignored by git and safe to delete |
 | `book-outline.md`, `investigation-notes.md` | Earlier planning notes; not part of the book |
 
@@ -62,7 +62,6 @@ From the repository root:
 ```bash
 python3 docs/book/build_toc_index.py          # 1. after editing: refresh numbering and Markdown index
 python3 docs/book/build_pdf.py                # 2. US Letter -> docs/book/learning-operating-systems-with-picoos.pdf
-python3 docs/book/build_pdf.py --paper a4     #    A4       -> ...-a4.pdf
 python3 docs/book/build_pdf.py --paper 6x9    #    6 x 9 in trade paperback -> ...-6x9.pdf
 python3 docs/book/build_pdf.py --tex-only     #    write latex/*.tex only, without compiling
 ```
@@ -74,7 +73,7 @@ The script builds the PDF from the text, so always run `build_toc_index.py` firs
 ### Printing and binding
 
 - **Print double-sided.** The layout is two-sided: inside and outside margins alternate and chapters open on right-hand pages, with blank left pages where needed. In the print dialog choose *two-sided, flip on long edge* and *actual size* (100%), not *fit to page*. Fitting to the page would shift the binding margin.
-- **Pick the paper size before building.** Use `letter` for a US print shop or office printer, `a4` elsewhere, and `6x9` for a print-on-demand paperback. Most such services accept a 6 × 9 in PDF directly.
+- **Pick the paper size before building.** Use `letter` for a print shop or office printer and `6x9` for a print-on-demand paperback. Most such services accept a 6 × 9 in PDF directly.
 - **Page count.** Some binders want a multiple of 4 pages; check the count printed by the build (or `pdfinfo <file>.pdf`) and ask the printer whether they pad it.
 - **Links.** Links in the PDF are clickable but not coloured, so the printed page shows plain text.
 - **Spiral or comb binding** works with the default margins. For perfect (glued) binding of a thick copy, widen `inner=` in `PAPERS` at the top of `build_pdf.py`.

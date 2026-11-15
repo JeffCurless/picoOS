@@ -17,7 +17,7 @@ the kit lacks are skipped.
 python3 hwtest/run.py                # flash the newest picowos_D kit, run everything
 python3 hwtest/run.py --no-flash     # test what the board already runs
 python3 hwtest/run.py -k kill        # only tests whose name contains "kill"
-python3 hwtest/run.py --kit kits/picowos_D-v0.4.7.uf2
+python3 hwtest/run.py --kit kits/picowos_D-v0.4.8.uf2
 python3 hwtest/run.py -v             # echo the device output live
 python3 hwtest/run.py --slow         # also run slow tests (scantest, ~75 s)
 python3 hwtest/run.py --list
@@ -138,8 +138,7 @@ the live threads.
 The suggested size is the peak plus a quarter (at least 256 B), rounded up
 to 256 B. A reading only covers the paths that ran, so it is a lower bound,
 and the margin is for the paths that didn't. The test fails if any thread
-used more than 80% of its stack. `cray-one` isn't covered, because it
-needs WiFi credentials in `config.txt` and peer nodes.
+used more than 80% of its stack.
 
 Run `-k test_30` (add `--slow` for `scantest`) to get a complete report.
 `ctx.info()` is how a test adds lines like these under its result.

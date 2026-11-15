@@ -238,7 +238,6 @@ picoOS/
 │   │   ├── app_table.h     Stable app registration ABI (app_entry_t, app_table extern)
 │   │   ├── demo.[ch]       Built-in producer/consumer/sensor demo threads + app_table[]
 │   │   ├── pi.[ch]         Monte Carlo π estimation — SMP worker threads, run-time arg
-│   │   ├── cray_one.c      Multi-node WiFi multicast color-grid demo (pico_w/pico2_w + display)
 │   │   ├── scantest.[ch]   On-device WiFi/BT scan-buffer race test (pico_w/pico2_w)
 │   │   └── wifi_test.c     WiFi multicast test (not currently built)
 │   └── drivers/

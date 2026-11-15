@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------------------
 set(PICOOS_VERSION_MAJOR 0)
 set(PICOOS_VERSION_MINOR 4)
-set(PICOOS_VERSION_EDIT  7)
+set(PICOOS_VERSION_EDIT  8)
 
 message(STATUS "picoOS version        : ${PICOOS_VERSION_MAJOR}.${PICOOS_VERSION_MINOR}.${PICOOS_VERSION_EDIT}")
 
@@ -186,7 +186,7 @@ message(STATUS "picoOS pools          : ${PICOOS_MAX_THREADS} threads, ${PICOOS_
 # External application injection
 #
 # When picoOS is used as a git submodule, the parent project sets:
-#   PICOOS_INCLUDE_DEMO_APPS=OFF   — exclude demo.c (and cray_one.c); the
+#   PICOOS_INCLUDE_DEMO_APPS=OFF   — exclude the demo apps; the
 #                                    parent provides its own app_table[] via
 #                                    PICOOS_APP_SOURCES.
 #   PICOOS_APP_SOURCES             — list of absolute paths to extra .c files
@@ -242,9 +242,6 @@ if(PICOOS_HAS_WIFI)
     list(APPEND PICOOS_SOURCES kernel/wifi.c kernel/scanbuf.c)
     if(PICOOS_INCLUDE_DEMO_APPS)
         list(APPEND PICOOS_SOURCES apps/scantest.c)
-    endif()
-    if(PICOOS_DISPLAY_ENABLE AND PICOOS_INCLUDE_DEMO_APPS)
-        list(APPEND PICOOS_SOURCES apps/cray_one.c)
     endif()
 endif()
 

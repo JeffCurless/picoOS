@@ -918,7 +918,7 @@ static void shell_btn_init(void)
     if (btn_binding_count == 0) return;
 
     /* Ensure GPIO pull-ups are configured — display_open() sets them.
-     * Safe to call multiple times; cray_one.c does the same after WiFi. */
+     * Safe to call multiple times. */
     dev_open(DEV_DISPLAY);
     dev_ioctl(DEV_DISPLAY, IOCTL_DISP_CLEAR,  NULL);
     dev_ioctl(DEV_DISPLAY, IOCTL_DISP_FLUSH,  NULL);

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Typeset the picoOS book as a print-ready PDF with LaTeX.
 
-Usage:  python3 docs/book/build_pdf.py [--paper letter|a4|6x9] [--tex-only]
+Usage:  python3 docs/book/build_pdf.py [--paper letter|6x9] [--tex-only]
 
 Reads learning-operating-systems-with-picoos.md, converts it to LaTeX, and
 compiles it with LuaLaTeX and makeindex. The PDF has a title page, a table
@@ -10,7 +10,7 @@ set for two-sided printing and binding. The index uses the same terms as the
 Markdown index (INDEX_TERMS in build_toc_index.py); each term is indexed at
 its first mention in every section that build_toc_index.py cites.
 
-Output:  learning-operating-systems-with-picoos[-a4|-6x9].pdf next to this
+Output:  learning-operating-systems-with-picoos[-6x9].pdf next to this
 script. Intermediate files go to latex/ (safe to delete).
 
 The converter handles only the Markdown this book uses: headings, paragraphs,
@@ -39,11 +39,10 @@ _spec.loader.exec_module(toc)
 # Page geometry per paper size. inner > outer leaves room for the binding.
 PAPERS = {
     "letter": "letterpaper, inner=1.1in, outer=0.85in, top=1in, bottom=1in",
-    "a4": "a4paper, inner=28mm, outer=22mm, top=25mm, bottom=27mm",
     "6x9": "paperwidth=6in, paperheight=9in, inner=0.8in, outer=0.55in, "
            "top=0.75in, bottom=0.8in",
 }
-BASE_FONT = {"letter": "11pt", "a4": "11pt", "6x9": "10pt"}
+BASE_FONT = {"letter": "11pt", "6x9": "10pt"}
 
 # ---------------------------------------------------------------------------
 # Inline Markdown -> LaTeX

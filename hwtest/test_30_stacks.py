@@ -9,8 +9,7 @@ records each thread's high-water mark as it frees it, and the shell
 
 A reading is the deepest path that actually ran.  Error paths that were not
 taken add nothing, so treat the numbers as lower bounds; the suggested
-sizes add a margin for that.  Not covered: cray-one (needs SSID= etc. in
-config.txt and peer nodes).  scantest runs only with --slow (~75 s).
+sizes add a margin for that.  scantest runs only with --slow (~75 s).
 
 The workload tests below only drive apps; test_stack_report reads the
 result.  Run the whole file (-k test_30) for a complete report.
