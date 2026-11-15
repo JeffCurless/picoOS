@@ -307,7 +307,11 @@ void spinlock_release(spinlock_t *s)
  * Internal helpers
  * =========================================================================
  *
- * Waiter queues are singly-linked lists through tcb_t.next.
+ * Waiter queues are singly-linked lists through tcb_t.wait_next, never
+ * tcb_t.next: that one links the ready queues, and a thread that blocks is
+ * still in its ready queue when it is enqueued here.  Clearing next at that
+ * point used to drop every thread queued behind it at the same priority —
+ * they stayed READY but were never scheduled again.
  * These helpers must be called with the relevant spinlock already held.
  * ========================================================================= */
 
@@ -315,24 +319,24 @@ void spinlock_release(spinlock_t *s)
  *
  * Waiters are kept in FIFO order so that the first thread to block is the
  * first to be woken (fair scheduling).  The list is singly-linked through
- * tcb_t.next.  Must be called with the owning spinlock already held. */
+ * tcb_t.wait_next.  Must be called with the owning spinlock already held. */
 static void waiter_enqueue(tcb_t **head, tcb_t *t)
 {
-    t->next = NULL;
+    t->wait_next = NULL;
     if (*head == NULL) {
         *head = t;
         return;
     }
     tcb_t *cur = *head;
-    while (cur->next != NULL) {
-        cur = cur->next;
+    while (cur->wait_next != NULL) {
+        cur = cur->wait_next;
     }
-    cur->next = t;
+    cur->wait_next = t;
 }
 
 /* waiter_dequeue — remove and return the head of the waiter list.
  *
- * Returns NULL if the list is empty.  The returned TCB's next pointer is
+ * Returns NULL if the list is empty.  The returned TCB's wait_next pointer is
  * cleared so it does not dangle.  Must be called with the owning spinlock
  * already held. */
 static tcb_t *waiter_dequeue(tcb_t **head)
@@ -341,8 +345,8 @@ static tcb_t *waiter_dequeue(tcb_t **head)
         return NULL;
     }
     tcb_t *t = *head;
-    *head = t->next;
-    t->next = NULL;
+    *head = t->wait_next;
+    t->wait_next = NULL;
     return t;
 }
 
@@ -606,7 +610,7 @@ void event_flags_set(event_flags_t *e, uint32_t mask)
     tcb_t  *cur      = e->waiters;
 
     while (cur != NULL) {
-        tcb_t *next = cur->next;
+        tcb_t *next = cur->wait_next;
 
         /* Find this thread's wait parameters under the pool lock. */
         bool   satisfied    = false;
@@ -634,11 +638,11 @@ void event_flags_set(event_flags_t *e, uint32_t mask)
         if (satisfied) {
             /* Remove from list. */
             *prev_ptr = next;
-            cur->next = NULL;
+            cur->wait_next = NULL;
             event_waiter_free(cur);
             sched_unblock(cur);
         } else {
-            prev_ptr = &cur->next;
+            prev_ptr = &cur->wait_next;
         }
 
         cur = next;

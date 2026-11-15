@@ -256,6 +256,7 @@ tcb_t *task_create_thread(pcb_t      *proc,
     t->wake_time_us = 0;
     t->cpu_time_us  = 0;
     t->next       = NULL;
+    t->wait_next  = NULL;
 
     strncpy(t->name, name ? name : "thread", sizeof(t->name) - 1);
     t->name[sizeof(t->name) - 1] = '\0';
