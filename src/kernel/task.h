@@ -137,7 +137,12 @@ typedef struct tcb {
     uint64_t        wake_time_us;   /* Absolute wake time (us) when sleeping */
     uint64_t        cpu_time_us;    /* Accumulated CPU time in microseconds  */
     char            name[16];       /* Human-readable name (NUL-terminated)  */
-    struct tcb     *next;           /* Intrusive linked-list pointer         */
+    struct tcb     *next;           /* Ready-queue link (sched.c only)       */
+    struct tcb     *wait_next;      /* Waiter-list link (sync.c only).  Kept
+                                     * apart from next: a thread is still in
+                                     * its ready queue when it joins a waiter
+                                     * list, and sharing one link cut the
+                                     * ready queue behind it.                */
 
 #ifdef PICOOS_LOCK_DEBUG
     /* -----------------------------------------------------------------------
