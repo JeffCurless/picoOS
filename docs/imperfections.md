@@ -236,8 +236,8 @@ before publishing it by bumping the count. Exercises for students:
   the race, and which kinds of tearing does publish-after-fill already prevent?
 - `cyw43_arch_lwip_begin()` is a recursive mutex owned by a *core*, not a
   thread. Two picoOS threads on the same core do not exclude each other
-  through it. Find the places where that matters (lwIP calls from several
-  threads) and fix them with a picoOS mutex taken around the lwIP lock.
+  through it. (Fixed in 0.4.9: `wifi_lwip_begin()` takes a picoOS mutex
+  around the lwIP lock. See `docs/locking.md` for how it showed up.)
 
 **SRAM impact**: None. Callers need their own result buffer (704 B for WiFi,
 about 1 KB for BT), which should be `static`.

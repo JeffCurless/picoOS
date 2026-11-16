@@ -57,6 +57,30 @@ typedef struct {
 } wifi_scan_result_t;
 
 void         wifi_init(void);
+
+/*
+ * Thread-safe access to lwIP and the CYW43 driver.
+ *
+ * Thread code must call lwIP (udp_*, pbuf_*, igmp_*, netif) and CYW43
+ * (cyw43_wifi_*, cyw43_ioctl, ...) only between wifi_lwip_begin() and
+ * wifi_lwip_end(), never with cyw43_arch_lwip_begin/end directly.
+ *
+ * The CYW43 async-context lock that cyw43_arch_lwip_begin() takes is owned by
+ * a *core*, not a thread: two picoOS threads on the same core both "own" it,
+ * so a thread preempted inside the driver lets another thread on that core
+ * in too.  Two SPI conversations with the chip at once wedge it (sends stop,
+ * then a send never returns).  wifi_lwip_begin() first takes a picoOS mutex,
+ * which orders threads, then the async-context lock, which keeps the CYW43
+ * IRQ out.  The caller is also kept on core 0 (the async context's core)
+ * until wifi_lwip_end(): the SDK assumes the lock holder does not change
+ * cores, and a thread moved mid-way through driver work wedges the driver.
+ *
+ * Not recursive.  Do not call from IRQ context or from lwIP/CYW43 callbacks
+ * (they already run under the lock).  wifi_lwip_end() may run pending driver
+ * work, including receive callbacks, before it returns.
+ */
+void         wifi_lwip_begin(void);
+void         wifi_lwip_end(void);
 wifi_state_t wifi_get_state(void);
 /* Start a scan.  0, WIFI_ERR_BUSY if one is already running, or a CYW43
  * error code. */
