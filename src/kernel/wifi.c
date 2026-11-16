@@ -19,6 +19,7 @@
 #include "kernel/scanbuf.h"
 #include "kernel/sync.h"
 #include "kernel/task.h"
+#include "kernel/sched.h"     /* sched_yield: move to core 0 for the driver */
 #include "kernel/syscall.h"
 #include "shell/shell.h"
 #ifdef PICOOS_BT_ENABLE
@@ -62,6 +63,50 @@ static volatile bool          g_scan_done  = false;
 static wifi_scan_list_t g_lists[3];
 static scanbuf_t        g_sb;
 static kmutex_t         g_cont_lock;
+
+/* Orders threads around the async-context lock (see wifi_lwip_begin in
+ * wifi.h).  Lock order: g_cont_lock, then g_lwip_lock. */
+static kmutex_t         g_lwip_lock;
+static int8_t           g_lwip_saved_affinity;   /* holder's, under g_lwip_lock */
+
+/* wifi-poll's priority (see wifi_init).  Overridable for testing. */
+#ifndef WIFI_POLL_PRIO
+#define WIFI_POLL_PRIO  6u
+#endif
+
+/*
+ * The holder is also pinned to core 0, the core the CYW43 async context
+ * was set up on, for the whole section.  The SDK assumes the lock holder
+ * stays on one core: cyw43_arch_lwip_end() on core 0 runs the driver's
+ * pending work in the calling thread, and that work re-enables the CYW43
+ * GPIO interrupt through a per-core register (cyw43_post_poll_hook).  A
+ * picoOS thread preempted there and resumed on core 1 finishes the work on
+ * the wrong core: core 1 spins in the driver for ever and the interrupt is
+ * never re-armed on core 0.  Same idea as fs_flash_safe() in fs.c.
+ */
+void wifi_lwip_begin(void)
+{
+    kmutex_lock(&g_lwip_lock);
+    tcb_t *self = CURRENT_TCB;
+    if (self != NULL) {
+        g_lwip_saved_affinity = self->affinity;
+        self->affinity = THREAD_AFFINITY_C0;
+        while (get_core_num() != 0u) {
+            sched_yield();              /* core 0 picks us up at its next switch */
+        }
+    }
+    cyw43_arch_lwip_begin();
+}
+
+void wifi_lwip_end(void)
+{
+    cyw43_arch_lwip_end();
+    tcb_t *self = CURRENT_TCB;
+    if (self != NULL) {
+        self->affinity = g_lwip_saved_affinity;
+    }
+    kmutex_unlock(&g_lwip_lock);
+}
 static event_flags_t    g_cont_ev;
 static volatile bool    g_cont         = false;  /* continuous mode on     */
 static volatile bool    g_pass_cont    = false;  /* IRQ target: g_lists     */
@@ -215,12 +260,12 @@ wifi_state_t wifi_get_state(void) { return g_state; }
 int wifi_scan(void)
 {
     cyw43_wifi_scan_options_t opts = {0};
-    cyw43_arch_lwip_begin();
+    wifi_lwip_begin();
 
     /* Refuse rather than reset the buffer under a scan someone else started
      * (e.g. "wifi scan" at the shell while an app is scanning). */
     if (g_cont || cyw43_wifi_scan_active(&cyw43_state)) {
-        cyw43_arch_lwip_end();
+        wifi_lwip_end();
         return WIFI_ERR_BUSY;
     }
 
@@ -232,7 +277,7 @@ int wifi_scan(void)
     /* Enter SCANNING only once the scan is active, so wifi-poll never sees
      * SCANNING with no scan running and reports it done too early. */
     g_state = (rc == 0) ? WIFI_STATE_SCANNING : WIFI_STATE_DOWN;
-    cyw43_arch_lwip_end();
+    wifi_lwip_end();
     return rc;
 }
 
@@ -248,12 +293,12 @@ int wifi_connect(const char *ssid, const char *password)
      * first join attempt even with correct credentials — a known transient
      * in the driver.  Retry up to 3 times with a short back-off. */
     for (int attempt = 1; attempt <= 3; attempt++) {
-        cyw43_arch_lwip_begin();
+        wifi_lwip_begin();
         int rc = cyw43_wifi_join(&cyw43_state,
                                  ssid_len, (const uint8_t *)ssid,
                                  key_len,  (const uint8_t *)password,
                                  auth, NULL, 0);
-        cyw43_arch_lwip_end();
+        wifi_lwip_end();
         if (rc != 0) {
             g_state = WIFI_STATE_ERROR;
             return rc;
@@ -263,9 +308,9 @@ int wifi_connect(const char *ssid, const char *password)
          * 200 iterations × 50 ms = 10 s per attempt. */
         int status = CYW43_LINK_DOWN;
         for (int i = 0; i < 200; i++) {
-            cyw43_arch_lwip_begin();
+            wifi_lwip_begin();
             status = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
-            cyw43_arch_lwip_end();
+            wifi_lwip_end();
             if (status == CYW43_LINK_UP) {
                 g_state = WIFI_STATE_UP;
                 return 0;
@@ -280,9 +325,9 @@ int wifi_connect(const char *ssid, const char *password)
                attempt, status, attempt < 3 ? " — retrying..." : "");
 
         /* Leave the network before re-joining to reset chip state. */
-        cyw43_arch_lwip_begin();
+        wifi_lwip_begin();
         cyw43_wifi_leave(&cyw43_state, CYW43_ITF_STA);
-        cyw43_arch_lwip_end();
+        wifi_lwip_end();
         sys_sleep(500);
     }
 
@@ -292,9 +337,9 @@ int wifi_connect(const char *ssid, const char *password)
 
 int wifi_disconnect(void)
 {
-    cyw43_arch_lwip_begin();
+    wifi_lwip_begin();
     cyw43_wifi_leave(&cyw43_state, CYW43_ITF_STA);
-    cyw43_arch_lwip_end();
+    wifi_lwip_end();
     g_state = WIFI_STATE_DOWN;
     return 0;
 }
@@ -307,10 +352,10 @@ int wifi_scan_is_done(void)
 int wifi_copy_scan_results(wifi_scan_result_t *buf, int max)
 {
     if (buf == NULL || max < 0) return WIFI_ERR_ARG;
-    cyw43_arch_lwip_begin();
+    wifi_lwip_begin();
     int n = g_scan_count < max ? g_scan_count : max;
     memcpy(buf, g_scan, (size_t)n * sizeof(buf[0]));
-    cyw43_arch_lwip_end();
+    wifi_lwip_end();
     return n;
 }
 
@@ -402,12 +447,12 @@ static bool listener_alive(void)
  * fill list, which nobody reads until the next start resets it. */
 static void cont_stop_locked(void)
 {
-    cyw43_arch_lwip_begin();
+    wifi_lwip_begin();
     if (g_cont) {
         g_cont = false;
         dwell_restore();
     }
-    cyw43_arch_lwip_end();
+    wifi_lwip_end();
     event_flags_set(&g_cont_ev, CONT_EV_STOP);
 }
 
@@ -435,12 +480,12 @@ int wifi_scan_start(wifi_scan_cb_t cb, void *ctx)
         return WIFI_ERR_BUSY;
     }
 
-    cyw43_arch_lwip_begin();
+    wifi_lwip_begin();
     /* A one-shot scan owns the radio until it finishes.  A continuous pass
      * left over from an earlier stop is fine: it runs into the new lists. */
     if (g_state == WIFI_STATE_SCANNING ||
         (cyw43_wifi_scan_active(&cyw43_state) && !g_pass_cont)) {
-        cyw43_arch_lwip_end();
+        wifi_lwip_end();
         kmutex_unlock(&g_cont_lock);
         return WIFI_ERR_BUSY;
     }
@@ -454,7 +499,7 @@ int wifi_scan_start(wifi_scan_cb_t cb, void *ctx)
         int rc = cyw43_wifi_scan(&cyw43_state, &opts, NULL, scan_result_cb);
         if (rc != 0) {
             dwell_restore();
-            cyw43_arch_lwip_end();
+            wifi_lwip_end();
             kmutex_unlock(&g_cont_lock);
             return rc;
         }
@@ -466,7 +511,7 @@ int wifi_scan_start(wifi_scan_cb_t cb, void *ctx)
     g_cb_ctx          = ctx;
     g_cont            = true;
     event_flags_clear(&g_cont_ev, CONT_EV_READY | CONT_EV_STOP);
-    cyw43_arch_lwip_end();
+    wifi_lwip_end();
 
     if (cb != NULL) {
         pcb_t *proc = task_find_process(me);
@@ -533,7 +578,7 @@ static void cont_poll(void)
     if (g_cont && owner_gone()) cont_stop_locked();
 
     uint64_t now = time_us_64();
-    cyw43_arch_lwip_begin();
+    wifi_lwip_begin();
     bool active = cyw43_wifi_scan_active(&cyw43_state);
     bool ended  = g_pass_running && !active;
     if (ended) g_pass_running = false;
@@ -556,7 +601,7 @@ static void cont_poll(void)
                 g_pass_running = true;
         }
     }
-    cyw43_arch_lwip_end();
+    wifi_lwip_end();
     kmutex_unlock(&g_cont_lock);
 
     if (published) event_flags_set(&g_cont_ev, CONT_EV_READY);
@@ -579,9 +624,9 @@ int wifi_get_mac(uint8_t mac[6])
 {
     if (mac == NULL) return WIFI_ERR_ARG;
 #ifdef __arm__
-    cyw43_arch_lwip_begin();
+    wifi_lwip_begin();
     int rc = cyw43_wifi_get_mac(&cyw43_state, CYW43_ITF_STA, mac);
-    cyw43_arch_lwip_end();
+    wifi_lwip_end();
     return rc == 0 ? 0 : WIFI_ERR_ARG;
 #else
     memset(mac, 0, 6);
@@ -633,31 +678,31 @@ int wifi_mcast_open(const char *group, uint16_t port,
     if (group == NULL || !ip4addr_aton(group, &grp)) return WIFI_ERR_ARG;
     if (g_state != WIFI_STATE_UP) return WIFI_ERR_ARG;
 
-    cyw43_arch_lwip_begin();
+    wifi_lwip_begin();
 
     int sock = -1;
     for (int i = 0; i < WIFI_MCAST_MAX_SOCKETS; i++) {
         if (g_mcast[i].pcb == NULL) { sock = i; break; }
     }
     if (sock < 0) {
-        cyw43_arch_lwip_end();
+        wifi_lwip_end();
         return WIFI_ERR_NOSOCK;
     }
 
     struct udp_pcb *pcb = udp_new();
     if (pcb == NULL) {
-        cyw43_arch_lwip_end();
+        wifi_lwip_end();
         return WIFI_ERR_NOMEM;
     }
     if (udp_bind(pcb, IP_ADDR_ANY, port) != ERR_OK) {
         udp_remove(pcb);
-        cyw43_arch_lwip_end();
+        wifi_lwip_end();
         return WIFI_ERR_BIND;
     }
     const ip4_addr_t *me = netif_ip4_addr(&cyw43_state.netif[CYW43_ITF_STA]);
     if (igmp_joingroup(me, &grp) != ERR_OK) {
         udp_remove(pcb);
-        cyw43_arch_lwip_end();
+        wifi_lwip_end();
         return WIFI_ERR_JOIN;
     }
 
@@ -669,7 +714,7 @@ int wifi_mcast_open(const char *group, uint16_t port,
     ms->ctx   = ctx;
     udp_recv(pcb, mcast_recv, ms);
 
-    cyw43_arch_lwip_end();
+    wifi_lwip_end();
     return sock;
 }
 
@@ -679,21 +724,21 @@ int wifi_mcast_send(int sock, const void *data, uint16_t len)
         return WIFI_ERR_ARG;
     }
 
-    cyw43_arch_lwip_begin();
+    wifi_lwip_begin();
     mcast_sock_t *ms = &g_mcast[sock];
     if (ms->pcb == NULL) {
-        cyw43_arch_lwip_end();
+        wifi_lwip_end();
         return WIFI_ERR_ARG;
     }
     struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, len, PBUF_RAM);
     if (p == NULL) {
-        cyw43_arch_lwip_end();
+        wifi_lwip_end();
         return WIFI_ERR_NOMEM;
     }
     memcpy(p->payload, data, len);
     err_t err = udp_sendto(ms->pcb, p, (const ip_addr_t *)&ms->group, ms->port);
     pbuf_free(p);
-    cyw43_arch_lwip_end();
+    wifi_lwip_end();
 
     return err == ERR_OK ? 0 : WIFI_ERR_SEND;
 }
@@ -702,7 +747,7 @@ void wifi_mcast_close(int sock)
 {
     if (sock < 0 || sock >= WIFI_MCAST_MAX_SOCKETS) return;
 
-    cyw43_arch_lwip_begin();
+    wifi_lwip_begin();
     mcast_sock_t *ms = &g_mcast[sock];
     if (ms->pcb != NULL) {
         const ip4_addr_t *me = netif_ip4_addr(&cyw43_state.netif[CYW43_ITF_STA]);
@@ -712,7 +757,7 @@ void wifi_mcast_close(int sock)
         ms->cb  = NULL;
         ms->ctx = NULL;
     }
-    cyw43_arch_lwip_end();
+    wifi_lwip_end();
 }
 #else  /* host / LSP build — no network stack */
 int wifi_mcast_open(const char *group, uint16_t port,
@@ -736,7 +781,7 @@ static void wifi_poll_thread(void *arg)
     for (;;) {
         cyw43_arch_poll();
 
-        cyw43_arch_lwip_begin();
+        wifi_lwip_begin();
         /* If scan was active and is now done, update state. */
         if (g_state == WIFI_STATE_SCANNING &&
             !cyw43_wifi_scan_active(&cyw43_state)) {
@@ -748,7 +793,7 @@ static void wifi_poll_thread(void *arg)
             cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA) != CYW43_LINK_UP) {
             g_state = WIFI_STATE_DOWN;
         }
-        cyw43_arch_lwip_end();
+        wifi_lwip_end();
 
         cont_poll();
 #ifdef PICOOS_BT_ENABLE
@@ -892,6 +937,7 @@ void wifi_init(void)
     initialized = true;
 
     kmutex_init(&g_cont_lock);
+    kmutex_init(&g_lwip_lock);
     event_flags_init(&g_cont_ev);
     event_flags_set(&g_cont_ev, CONT_EV_STOP);   /* not running yet */
 
@@ -902,11 +948,15 @@ void wifi_init(void)
     cyw43_arch_enable_sta_mode();
     g_state = WIFI_STATE_DOWN;
 
-    /* Create the poll thread in the kernel process at low priority (6). */
+    /* Create the poll thread in the kernel process at low priority (6).
+     * Priority 2 was tried (0.4.9 development) so that busy app threads
+     * could not starve it while it holds g_lwip_lock: with it, boards
+     * powered without a USB host never finished joining WiFi.  The cause
+     * was not found; see docs/locking.md. */
     pcb_t *kproc = task_get_kernel_proc();
     task_create_thread(kproc, "wifi-poll",
                        wifi_poll_thread, NULL,
-                       6u, DEFAULT_STACK_SIZE);
+                       WIFI_POLL_PRIO, DEFAULT_STACK_SIZE);
 
     shell_register_cmd(&wifi_cmd);
     printf("[wifi] CYW43 initialized (STA mode)\r\n");

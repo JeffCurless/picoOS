@@ -170,6 +170,25 @@ Cost: an uncontended acquire adds one stripe acquire/release and a load and stor
 
 A cheap first step that delivers the "slow down rather than crash" goal: make `spinlock_init()` call `spin_lock_claim_unused(false)`, and when it returns -1, fall back to the pooled memory-word lock instead of panicking.
 
+## lwIP and the CYW43 driver (`wifi_lwip_begin`)
+
+The CYW43 async-context lock (`cyw43_arch_lwip_begin/end`) is a recursive mutex whose owner is a **core**, not a thread. It keeps the async-context IRQ out, and keeps the other core out, but two picoOS threads on the same core both pass it. If one is preempted inside lwIP or the driver, for example while `cyw43_arch_lwip_end()` is running pending driver work over SPI, a second thread on that core gets in as well. Two SPI conversations with the chip at once wedge it: sends stop being acknowledged, then a send never returns.
+
+`wifi_lwip_begin()` / `wifi_lwip_end()` (`kernel/wifi.c`) close this. They take `g_lwip_lock`, a kmutex, before the async-context lock and release it after.
+
+They also pin the calling thread to core 0, the core the async context was set up on, until `wifi_lwip_end()` (the same idea as `fs_flash_safe()`). The SDK assumes the lock holder never changes cores. On core 0, `cyw43_arch_lwip_end()` runs the driver's pending work in the calling thread, and that work ends by re-enabling the CYW43 GPIO interrupt through a per-core register (`cyw43_post_poll_hook`). Without the pin, a thread preempted there could resume on core 1. Core 1 then spun in the driver for ever (its idle thread's time stopped while the app thread's grew), the interrupt was never re-armed on core 0, and the network went dead. Every thread-side lwIP or CYW43 call in picoOS (`wifi.c`, `bluetooth.c`) goes through them, and apps that call lwIP directly must as well.
+
+| Rule | Why |
+| --- | --- |
+| Never call `cyw43_arch_lwip_begin()` directly from a thread | It does not order threads on the same core |
+| Not recursive | A kmutex; holding it while calling a `wifi_*` function that takes it deadlocks |
+| Never from IRQ context or from lwIP/CYW43 callbacks | They already run under the async-context lock, and may run inside a `wifi_lwip_end()` |
+| Keep `g_lwip_lock` sections short | kmutexes have no priority inheritance. `wifi-poll` runs at priority 6, so busy app threads at 4–5 can starve it while it holds `g_lwip_lock`, and every network user waits until they yield |
+
+Raising `wifi-poll` to priority 2 to avoid that starvation was tried and backed out: boards powered without a USB host (power-only cable) then never finished joining WiFi, while boards with a host connected were fine. The cause was not found. Possibly an SDK wait that only wakes on an interrupt, which a connected USB host supplies every millisecond. An open question for a student.
+
+Found in picoCluster (picoOS 0.4.8), where several threads (the cluster daemon, an app sending requests, `wifi-poll`) used the network at once. After a few minutes under load the chip stopped acknowledging sends, and the next send never returned.
+
 ## Continuous scan buffers (WiFi and BT)
 
 `wifi_scan_start()` and `bt_scan_start()` hand scan windows to an app through a triple buffer (`src/kernel/scanbuf.[ch]`): three lists take turns as *fill* (written by the CYW43 async-context IRQ), *ready* (the newest finished window) and *held* (owned by the app until its next `*_scan_wait()`). Roles move and no data is copied.
@@ -181,7 +200,7 @@ A cheap first step that delivers the "slow down rather than crash" goal: make `s
 | `scanbuf_take()` (ready ↔ held) | subscriber thread | `g_cont_lock` only | Never touches `fill`, so the IRQ is not involved |
 | wake the subscriber | `wifi-poll` thread | `event_flags_set()` after both locks are dropped | Scheduler calls stay out of the IRQ |
 
-Both locks are needed because the async-context lock is a recursive mutex owned by a **core**. Two picoOS threads on the same core would both get in through it, so the kmutex orders threads and the async lock keeps the IRQ out. Lock order is always kmutex → async lock. The subscriber reads its held list with no lock at all, since neither the IRQ nor publish can reach it.
+Both locks are needed because the async-context lock is a recursive mutex owned by a **core**. Two picoOS threads on the same core would both get in through it, so the kmutex orders threads and the async lock keeps the IRQ out. Lock order is always `g_cont_lock` → `g_lwip_lock` → async lock (the last two taken together by `wifi_lwip_begin()`). The subscriber reads its held list with no lock at all, since neither the IRQ nor publish can reach it.
 
 Waking up: `*_scan_wait()` waits on `CONT_EV_READY | CONT_EV_STOP`, then, under the kmutex, clears `READY` *before* it calls `take`. A publish that lands after the take sets the flag again, so no window is missed. A wake-up that finds nothing fresh just waits again.
 

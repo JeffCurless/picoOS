@@ -16,6 +16,7 @@
 
 #include "kernel/arch.h"
 #include "kernel/bluetooth.h"
+#include "kernel/wifi.h"       /* wifi_lwip_begin/end */
 #include "kernel/scanbuf.h"
 #include "kernel/sync.h"
 #include "kernel/task.h"
@@ -575,14 +576,14 @@ int bt_scan(void)
 {
     /* Check, reset and start in one locked section so the buffer is never
      * reset under a scan that is still delivering results. */
-    cyw43_arch_lwip_begin();
+    wifi_lwip_begin();
     if (g_state == BT_STATE_OFF || g_state == BT_STATE_SCANNING) {
-        cyw43_arch_lwip_end();
+        wifi_lwip_end();
         return -1;
     }
 
     if (g_cont) {
-        cyw43_arch_lwip_end();
+        wifi_lwip_end();
         return -1;
     }
 
@@ -599,7 +600,7 @@ int bt_scan(void)
      * response get one: interval 48 slots (30 ms), window 30 (18.75 ms). */
     gap_set_scan_parameters(1, 48, 30);
     gap_start_scan();
-    cyw43_arch_lwip_end();
+    wifi_lwip_end();
 
     return 0;
 }
@@ -612,10 +613,10 @@ int bt_scan_is_done(void)
 int bt_copy_scan_results(bt_scan_result_t *buf, int max)
 {
     if (buf == NULL || max < 0) return -1;
-    cyw43_arch_lwip_begin();
+    wifi_lwip_begin();
     int n = g_scan_count < max ? g_scan_count : max;
     memcpy(buf, g_scan, (size_t)n * sizeof(buf[0]));
-    cyw43_arch_lwip_end();
+    wifi_lwip_end();
     return n;
 }
 
@@ -645,14 +646,14 @@ static bool listener_alive(void)
 /* Caller holds g_cont_lock. */
 static void cont_stop_locked(void)
 {
-    cyw43_arch_lwip_begin();
+    wifi_lwip_begin();
     if (g_cont) {
         g_cont = false;
         gap_stop_scan();
         gap_inquiry_stop();     /* its INQUIRY_COMPLETE takes the one-shot path */
         if (g_state == BT_STATE_SCANNING) g_state = BT_STATE_IDLE;
     }
-    cyw43_arch_lwip_end();
+    wifi_lwip_end();
     event_flags_set(&g_cont_ev, CONT_EV_STOP);
 }
 
@@ -679,14 +680,14 @@ int bt_scan_start(bt_scan_cb_t cb, void *ctx)
         return BT_ERR_BUSY;
     }
 
-    cyw43_arch_lwip_begin();
+    wifi_lwip_begin();
     if (g_state == BT_STATE_OFF || g_state == BT_STATE_ERROR) {
-        cyw43_arch_lwip_end();
+        wifi_lwip_end();
         kmutex_unlock(&g_cont_lock);
         return BT_ERR_NOTREADY;
     }
     if (g_state == BT_STATE_SCANNING) {     /* one-shot bt_scan() running */
-        cyw43_arch_lwip_end();
+        wifi_lwip_end();
         kmutex_unlock(&g_cont_lock);
         return BT_ERR_BUSY;
     }
@@ -714,7 +715,7 @@ int bt_scan_start(bt_scan_cb_t cb, void *ctx)
     g_cb_ctx          = ctx;
     g_cont            = true;
     event_flags_clear(&g_cont_ev, CONT_EV_READY | CONT_EV_STOP);
-    cyw43_arch_lwip_end();
+    wifi_lwip_end();
 
     if (cb != NULL) {
         pcb_t *proc = task_find_process(me);
@@ -742,14 +743,14 @@ void bt_scan_stop(void)
     } else {
         /* One-shot: stop the BLE scan bt_scan() leaves running, and cut the
          * inquiry short if it is still going. */
-        cyw43_arch_lwip_begin();
+        wifi_lwip_begin();
         gap_stop_scan();
         if (g_state == BT_STATE_SCANNING) {
             gap_inquiry_stop();
             g_scan_done = true;
             g_state     = BT_STATE_IDLE;
         }
-        cyw43_arch_lwip_end();
+        wifi_lwip_end();
     }
     kmutex_unlock(&g_cont_lock);
 }
@@ -789,7 +790,7 @@ void bt_scan_poll(void)
 
     if (g_cont) {
         uint64_t now = time_us_64();
-        cyw43_arch_lwip_begin();
+        wifi_lwip_begin();
         /* Start the next Classic inquiry here rather than in packet_handler,
          * so a refused start (e.g. HCI busy) is simply retried 10 ms later. */
         if (!g_inq_active &&
@@ -809,7 +810,7 @@ void bt_scan_poll(void)
             g_window_start_us = now;
             published = true;
         }
-        cyw43_arch_lwip_end();
+        wifi_lwip_end();
     }
     kmutex_unlock(&g_cont_lock);
 

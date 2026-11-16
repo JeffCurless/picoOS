@@ -841,6 +841,20 @@ if (sock >= 0) {
 Sockets are not owned by a process.  An app that may be killed should keep its handle
 in a `static int` initialised to `-1` and close it on its next start.
 
+**Calling lwIP or the CYW43 driver directly.**  Wrap every lwIP call (`udp_*`,
+`pbuf_*`, `igmp_*`, `netif`) and every CYW43 call (`cyw43_wifi_*`, `cyw43_ioctl`, ...)
+made from a thread in `wifi_lwip_begin()` / `wifi_lwip_end()`.  Do not use
+`cyw43_arch_lwip_begin()` / `cyw43_arch_lwip_end()` on their own: that lock is owned
+by a *core*, so two threads on the same core both get in, and two threads talking to
+the chip at once wedge it.  `wifi_lwip_begin()` takes a picoOS mutex first, then the
+core lock, and keeps the caller on core 0 until `wifi_lwip_end()`.  It is not recursive, and must not be called from IRQ context or from
+lwIP/CYW43 callbacks, which already run under the lock.
+
+| Function | Returns |
+|----------|---------|
+| `wifi_lwip_begin()` | — (blocks until no other thread is inside) |
+| `wifi_lwip_end()` | — (may run pending driver work, including receive callbacks) |
+
 ### 6.6 Bluetooth (requires `PICOOS_BT_ENABLE` — pico_w / pico2_w builds only)
 
 Include: `src/kernel/bluetooth.h`
