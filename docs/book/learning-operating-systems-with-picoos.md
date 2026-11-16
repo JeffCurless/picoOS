@@ -24,9 +24,10 @@ Jeff Curless · November 2026 · local copy of the [online edition](https://clau
     - [2.2 The four jobs of an operating system](#s-2-2)
     - [2.3 What picoOS leaves out](#s-2-3)
     - [2.4 A tour of the source tree](#s-2-4)
-    - [2.5 Three words you will meet everywhere](#s-2-5)
-    - [2.6 Try this](#s-2-6)
-    - [2.7 Think about it](#s-2-7)
+    - [2.5 One OS, many builds](#s-2-5)
+    - [2.6 Three words you will meet everywhere](#s-2-6)
+    - [2.7 Try this](#s-2-7)
+    - [2.8 Think about it](#s-2-8)
 - [Chapter 3 — Booting: From Reset to the Scheduler](#ch-3)
     - [3.1 Before main()](#s-3-1)
     - [3.2 The boot sequence](#s-3-2)
@@ -150,7 +151,18 @@ Jeff Curless · November 2026 · local copy of the [online edition](https://clau
 <a id="ch-p"></a>
 ## Preface
 
-This book teaches how an operating system works by taking one apart: picoOS, a small dual-core OS for the Raspberry Pi Pico that fits in about 12,000 lines of C and one short file of assembly. Every idea in the book is something you can read in the source, run on a $5 board, and break on purpose.
+picoOS is a small dual-core operating system for the Raspberry Pi Pico family. It fits in about 13,500 lines of C and one short file of assembly. It was written with two goals in mind.
+
+The first is practical. picoOS is the operating system its author uses for personal Pico projects. Two of them run on it today:
+
+- **A network monitor.** A Pico W with a Display Pack 2 screen scans continuously for nearby WiFi networks and Bluetooth devices. It lists them with their signal strength and details, and graphs a chosen network's or device's signal over time. The buttons move through the menus.
+- **A small computing cluster.** Several Pico W boards find each other over WiFi and act as one cluster. A program on one board can launch a thread on any connected board, which runs it and sends the result back.
+
+Pico projects like these, and simpler ones, need several things to happen at once, such as reading sensors, drawing on a display, saving to flash and talking over WiFi or Bluetooth. Writing that plumbing again for every project was wasteful, so picoOS does it once. Each project includes picoOS as a submodule and adds its own apps on top. Because it runs real projects, its parts have to work on real hardware: two cores, real flash, USB and a radio.
+
+The second goal is teaching. An operating system is easiest to understand when you can see all of it, and picoOS is small enough to read in full. This book teaches how an operating system works by taking picoOS apart. Every idea in the book is something you can read in the source, run on a $5 board, and break on purpose.
+
+The two goals pull in the same direction. A system small enough to leave room for applications on a Pico is also small enough to study, and an OS used for real work gives you real problems to study.
 
 <a id="s-p-1"></a>
 ### P.1 Who this book is for
@@ -355,20 +367,65 @@ src/
 The kernel is layered. Apps call picoOS functions such as `sys_sleep()` and `vfs_open()`. The kernel calls the Pico SDK. The SDK pokes the hardware registers. One rule keeps the layers honest: **apps never call the Pico SDK directly.** An app uses `sys_sleep()`, never `sleep_ms()`, and `shell_print()`, never `printf()`. If an app needs something the kernel does not offer, you add a small kernel function first.
 
 <a id="s-2-5"></a>
-### 2.5 Three words you will meet everywhere
+### 2.5 One OS, many builds
+
+The source tree holds more than any one Pico runs. A plain Pico has no radio, so the WiFi and Bluetooth code would be dead weight on it. A board without a Display Pack has no use for a 32 KB framebuffer. A desktop OS settles this at run time: it ships every driver and loads the ones that match the hardware it finds. picoOS has no disk to load drivers from and only 264 KB of SRAM to share, so it settles it at **build time**. You choose the features when you compile, and code you leave out is never compiled: it costs no flash and no RAM.
+
+The choices are CMake options, declared and explained at the top of `src/CMakeLists.txt`:
+
+| Option | Default | What it controls |
+| --- | --- | --- |
+| `PICO_BOARD` | — | `pico`, `picow`, `pico2` or `pico2w`. Picks the chip, the memory sizes and whether the CYW43 radio is there. WiFi is built in exactly when the board has the radio. |
+| `PICOOS_BT_ENABLE` | ON | Bluetooth scanning on a W board. OFF keeps WiFi and drops Bluetooth and its BTstack library. |
+| `PICOOS_DISPLAY_ENABLE` | ON | The Display Pack driver: screen, four buttons and `/dev/display`. OFF removes everything below it. |
+| `PICOOS_DISPLAY_PACK2` | OFF | Drive the 320×240 Display Pack 2 instead of the 240×135 Display Pack. |
+| `PICOOS_LED_ENABLE` | ON | The pack's RGB LED and `/dev/led`. |
+| `PICOOS_DISPLAY_SHELL`, `PICOOS_LED_SHELL` | ON | The `display` and `led` shell commands. OFF keeps the driver for apps but drops the command. |
+| `PICOOS_INCLUDE_DEMO_APPS` | ON | The built-in apps: `producer`, `consumer`, `sensor`, `pi`, `hwtest` and, on W boards, `scantest`. A project that supplies its own apps turns this off. |
+
+The options depend on each other, and `src/CMakeLists.txt` enforces the rules. Turning the display off turns off the LED and both shell commands, because they all live on the same pack. The `led` command needs the LED driver. Bluetooth needs the radio and shares the WiFi driver's connection to it, so a W board can have WiFi without Bluetooth but not Bluetooth without WiFi.
+
+A few more options tune the kernel itself rather than the hardware: `PICOOS_HEAP_KB`, `PICOOS_MAX_THREADS` and `PICOOS_MAX_PROCESSES` size the heap and the thread and process tables (Chapters 4 and 7), and `PICOOS_LOCK_DEBUG` adds a deadlock detector (Chapter 8).
+
+Each option reaches the code in two ways. First, it decides which files are compiled at all: `wifi.c` is added only for a W board, `bluetooth.c` only when Bluetooth is on, `display.c` only with a Display Pack. Second, it becomes a C macro that the shared files test with `#ifdef`. Here is the start-up code in `main.c`:
+
+```c
+#ifdef PICOOS_WIFI_ENABLE
+    wifi_init();
+#endif
+#ifdef PICOOS_BT_ENABLE
+    bt_init();
+#endif
+```
+
+On a plain Pico neither macro is defined, so the compiler never sees either call. The same pattern adds `/dev/display` to the device table in `dev.c` and the WiFi, Bluetooth and display lines to the report the `info` command prints.
+
+`./build` covers the common cases: each board with no display, a Display Pack and a Display Pack 2. For anything else, give CMake the options yourself. This builds a Pico W image with WiFi but no Bluetooth and no display:
+
+```bash
+cmake -B builds/picow_nobt -DPICO_BOARD=picow \
+      -DPICOOS_BT_ENABLE=OFF -DPICOOS_DISPLAY_ENABLE=OFF
+make -j4 -C builds/picow_nobt
+```
+
+CMake prints a summary of the options it settled on, and the boot banner's `Options` line shows what the image contains. Check it, because the file name records only the board and the display: this image is called `picowos-v0.4.8.uf2`, the same as the standard Pico W build with Bluetooth.
+
+<a id="s-2-6"></a>
+### 2.6 Three words you will meet everywhere
 
 - **Thread** — one stream of instructions with its own stack. This is what the CPU actually runs.
 - **Process** — a container that owns one or more threads, plus their open files. It has a number, the PID.
 - **Kernel** — the code that creates threads, picks which one runs, and owns the shared tables. In picoOS the kernel is ordinary C functions that threads call directly.
 
-<a id="s-2-6"></a>
-### 2.6 Try this
+<a id="s-2-7"></a>
+### 2.7 Try this
 
 - `pico> ps` lists processes. `pico> threads` lists threads. Compare the two lists: which process owns `idle`?
+- `pico> info` ends with one line for each optional feature built into the image. Which lines does your board show, and which option put each one there?
 - `pico> run producer` then `pico> run consumer`. Two independent programs now pass messages to each other while you keep typing.
 
-<a id="s-2-7"></a>
-### 2.7 Think about it
+<a id="s-2-8"></a>
+### 2.8 Think about it
 
 If any thread can write to any address, what stops a buggy app from corrupting the scheduler's tables? (Nothing does. What would you need to add?)
 
@@ -1824,14 +1881,15 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 **B**
 
 - back-pressure — [9.1](#s-9-1)
-- banner, boot — [1.5](#s-1-5), [1.6](#s-1-6), [1.7](#s-1-7), [3.2](#s-3-2), [3.5](#s-3-5)
+- banner, boot — [1.5](#s-1-5), [1.6](#s-1-6), [1.7](#s-1-7), [2.5](#s-2-5), [3.2](#s-3-2), [3.5](#s-3-5)
 - BLOCKED state — [4.5](#s-4-5), [8.5](#s-8-5), [8.9](#s-8-9), [9.1](#s-9-1), [9.2](#s-9-2), [16.2](#s-16-2)
-- Bluetooth — [1.1](#s-1-1), [2.2](#s-2-2), [6.2](#s-6-2), [13.2](#s-13-2), [15](#ch-15), [15.1](#s-15-1), [15.6](#s-15-6)
+- Bluetooth — [P](#ch-p), [1.1](#s-1-1), [2.2](#s-2-2), [2.5](#s-2-5), [6.2](#s-6-2), [13.2](#s-13-2), [15](#ch-15), [15.1](#s-15-1), [15.6](#s-15-6)
 - boot sequence — [3](#ch-3), [3.1](#s-3-1), [3.2](#s-3-2), [3.4](#s-3-4)
 - BOOTSEL — [1.4](#s-1-4), [13.3](#s-13-3)
 - boundary-tag allocator — [7.5](#s-7-5)
 - buddy allocator — [7.7](#s-7-7), [16.2](#s-16-2)
-- `build` script — [P.4](#s-p-4), [1.3](#s-1-3), [7.9](#s-7-9), [12.8](#s-12-8), [14.4](#s-14-4), [15.5](#s-15-5)
+- build options — [2.5](#s-2-5), [4.3](#s-4-3), [7.5](#s-7-5), [8.9](#s-8-9), [8.12](#s-8-12), [15.5](#s-15-5)
+- `build` script — [P.4](#s-p-4), [1.3](#s-1-3), [2.5](#s-2-5), [7.9](#s-7-9), [12.8](#s-12-8), [14.4](#s-14-4), [15.5](#s-15-5)
 - `BUTTONA=` … `BUTTONY=` — [13.4](#s-13-4)
 
 **C**
@@ -1839,6 +1897,7 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 - canary, stack — [3.3](#s-3-3), [4.4](#s-4-4), [4.6](#s-4-6), [4.7](#s-4-7), [5.3](#s-5-3), [7.4](#s-7-4)
 - client–server design — [9.3](#s-9-3)
 - coalescing — [7.5](#s-7-5)
+- conditional compilation (`#ifdef`) — [2.5](#s-2-5), [16.1](#s-16-1)
 - `config.txt` — [4.2](#s-4-2), [13.4](#s-13-4), [13.5](#s-13-5)
 - `console.py` — [1.5](#s-1-5), [12.8](#s-12-8)
 - context switch — [3.3](#s-3-3), [4.1](#s-4-1), [5.5](#s-5-5), [6.1](#s-6-1)
@@ -1849,16 +1908,16 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 - critical section — [8.1](#s-8-1), [8.2](#s-8-2), [8.4](#s-8-4), [8.9](#s-8-9)
 - cross-compiler — [1.2](#s-1-2)
 - `current_tcb[]`, `CURRENT_TCB` — [3.4](#s-3-4), [5.5](#s-5-5), [6.1](#s-6-1), [8.5](#s-8-5), [9.2](#s-9-2)
-- CYW43 radio — [15](#ch-15)
+- CYW43 radio — [2.5](#s-2-5), [15](#ch-15)
 
 **D**
 
-- deadlock — [8.9](#s-8-9)
+- deadlock — [2.5](#s-2-5), [8.9](#s-8-9)
 - `dev_console_poll()` — [5.4](#s-5-4), [6.2](#s-6-2)
 - `device_t` — [11.1](#s-11-1)
 - `dev_ioctl()` — [8.12](#s-8-12), [10.4](#s-10-4), [11.2](#s-11-2), [14.1](#s-14-1), [14.2](#s-14-2)
 - Dijkstra, Edsger — [8.6](#s-8-6)
-- Display Pack — [1.1](#s-1-1), [1.3](#s-1-3), [2.4](#s-2-4), [4.2](#s-4-2), [7.3](#s-7-3), [7.5](#s-7-5), [7.10](#s-7-10), [11.1](#s-11-1), [13.3](#s-13-3), [13.4](#s-13-4), [A.2](#s-a-2)
+- Display Pack — [P](#ch-p), [1.1](#s-1-1), [1.3](#s-1-3), [2.4](#s-2-4), [2.5](#s-2-5), [4.2](#s-4-2), [7.3](#s-7-3), [7.5](#s-7-5), [7.10](#s-7-10), [11.1](#s-11-1), [13.3](#s-13-3), [13.4](#s-13-4), [A.2](#s-a-2)
 - `dropped` counter — [15.3](#s-15-3), [15.7](#s-15-7)
 
 **E**
@@ -1931,7 +1990,7 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 
 - PCB (process control block) — [4.2](#s-4-2), [6.1](#s-6-1), [7.3](#s-7-3), [7.7](#s-7-7), [8.4](#s-8-4), [14.2](#s-14-2)
 - PendSV — [5.5](#s-5-5), [5.7](#s-5-7), [6.1](#s-6-1), [8.2](#s-8-2), [A.3](#s-a-3)
-- `pi` app — [1.6](#s-1-6), [5.7](#s-5-7), [5.8](#s-5-8), [6.3](#s-6-3), [6.5](#s-6-5)
+- `pi` app — [1.6](#s-1-6), [2.5](#s-2-5), [5.7](#s-5-7), [5.8](#s-5-8), [6.3](#s-6-3), [6.5](#s-6-5)
 - Pico SDK — [1.2](#s-1-2), [2.4](#s-2-4), [7.3](#s-7-3), [10.4](#s-10-4), [14.1](#s-14-1)
 - picoOS API — [10.4](#s-10-4), [14.1](#s-14-1), [14.6](#s-14-6), [A.3](#s-a-3)
 - PID ranges — [4.2](#s-4-2), [13.4](#s-13-4)
@@ -1941,8 +2000,8 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 - priorities — [5](#ch-5), [5.2](#s-5-2), [5.3](#s-5-3), [8.10](#s-8-10), [14.3](#s-14-3)
 - priority inheritance — [8.10](#s-8-10), [8.13](#s-8-13), [16.2](#s-16-2)
 - priority inversion — [8.10](#s-8-10)
-- process — [2.3](#s-2-3), [2.5](#s-2-5), [4](#ch-4), [4.2](#s-4-2)
-- producer and consumer demo — [2.4](#s-2-4), [2.6](#s-2-6), [7.9](#s-7-9), [8.6](#s-8-6), [9.1](#s-9-1), [9.2](#s-9-2), [9.4](#s-9-4), [14.3](#s-14-3)
+- process — [2.3](#s-2-3), [2.6](#s-2-6), [4](#ch-4), [4.2](#s-4-2)
+- producer and consumer demo — [2.4](#s-2-4), [2.5](#s-2-5), [2.7](#s-2-7), [7.9](#s-7-9), [8.6](#s-8-6), [9.1](#s-9-1), [9.2](#s-9-2), [9.4](#s-9-4), [14.3](#s-14-3)
 - PSP and MSP — [3.4](#s-3-4)
 
 **R**
@@ -1959,7 +2018,7 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 **S**
 
 - `scanbuf.c` — [15.3](#s-15-3)
-- scantest — [15.5](#s-15-5), [15.6](#s-15-6)
+- scantest — [2.5](#s-2-5), [15.5](#s-15-5), [15.6](#s-15-6)
 - `sched_lock` — [6.4](#s-6-4), [8.4](#s-8-4), [8.9](#s-8-9), [8.11](#s-8-11)
 - `sched_next_thread()` — [5.3](#s-5-3), [5.5](#s-5-5), [6.1](#s-6-1), [8.11](#s-8-11), [A.3](#s-a-3)
 - `sched_start()` — [3](#ch-3), [3.2](#s-3-2), [3.4](#s-3-4)
@@ -1990,9 +2049,9 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 
 - TCB (thread control block) — [4.1](#s-4-1), [4.3](#s-4-3), [5.5](#s-5-5), [8.5](#s-8-5)
 - tests, host-native — [7.9](#s-7-9), [12.6](#s-12-6), [12.8](#s-12-8), [16.1](#s-16-1)
-- thread — [2.5](#s-2-5), [3.3](#s-3-3), [4](#ch-4), [4.1](#s-4-1)
+- thread — [2.6](#s-2-6), [3.3](#s-3-3), [4](#ch-4), [4.1](#s-4-1)
 - thread states — [4.5](#s-4-5), [5.3](#s-5-3)
-- `threads` command — [1.6](#s-1-6), [2.6](#s-2-6), [4.4](#s-4-4), [4.6](#s-4-6), [5.8](#s-5-8), [6.5](#s-6-5), [7.10](#s-7-10), [8.5](#s-8-5), [13.3](#s-13-3)
+- `threads` command — [1.6](#s-1-6), [2.7](#s-2-7), [4.4](#s-4-4), [4.6](#s-4-6), [5.8](#s-5-8), [6.5](#s-6-5), [7.10](#s-7-10), [8.5](#s-8-5), [13.3](#s-13-3)
 - time slice — [5](#ch-5), [5.1](#s-5-1), [5.3](#s-5-3), [5.6](#s-5-6), [5.8](#s-5-8), [6.1](#s-6-1), [6.4](#s-6-4), [8.4](#s-8-4), [A.2](#s-a-2)
 - torn read — [15.2](#s-15-2)
 - `trace` command — [5.7](#s-5-7), [5.8](#s-5-8), [5.9](#s-5-9), [13.3](#s-13-3)
@@ -2001,7 +2060,7 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 
 **U**
 
-- UF2 file — [1.3](#s-1-3), [1.4](#s-1-4)
+- UF2 file — [1.3](#s-1-3), [1.4](#s-1-4), [2.5](#s-2-5)
 - `update` command — [1.4](#s-1-4), [13.3](#s-13-3)
 
 **V**
