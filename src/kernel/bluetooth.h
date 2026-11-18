@@ -128,7 +128,7 @@ const char   *bt_devclass_str(bt_devclass_t cls);
 
 /* --- Continuous scanning --------------------------------------------------
  *
- * bt_scan_start() keeps BLE passive scanning on continuously (100% duty) and
+ * bt_scan_start() keeps BLE active scanning on continuously (100% duty) and
  * runs a Classic inquiry of BT_INQUIRY_LEN x 1.28 s at the start of every
  * BT_INQUIRY_PERIOD_MS, until bt_scan_stop().  Every BT_WINDOW_MS the list of
  * every device heard in that window is handed to the subscriber by swapping

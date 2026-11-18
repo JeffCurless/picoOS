@@ -869,7 +869,7 @@ events are delivered from the same async-context IRQ as WiFi (see §6.5).
 bt_state_t s = bt_get_state();
 // Returns: BT_STATE_OFF, BT_STATE_IDLE, BT_STATE_SCANNING, or BT_STATE_ERROR
 
-// Start a simultaneous Classic inquiry (~6.4 s) + BLE passive scan.
+// Start a simultaneous Classic inquiry (~6.4 s) + BLE active scan.
 // Returns -1 if the radio is off or a scan is already running.
 bt_scan();
 
@@ -955,7 +955,7 @@ the radio keeps receiving BLE reports until the next `bt_scan()`.
 until then.
 
 **Continuous scanning (list swap).**  `bt_scan_start()` works like `wifi_scan_start()`
-(§6.5): BLE passive scanning stays on at 100% duty, a 2.56 s Classic inquiry
+(§6.5): BLE active scanning stays on at 100% duty, a 2.56 s Classic inquiry
 (`BT_INQUIRY_LEN` 2, both inquiry trains) starts every `BT_INQUIRY_PERIOD_MS`
 (10.24 s), and every `BT_WINDOW_MS` (1000 ms) the list of every device heard in that
 window is swapped to the subscriber.

@@ -313,7 +313,7 @@ picoOS links `pico_cyw43_arch_lwip_threadsafe_background`, so the CYW43 driver, 
 
 When `PICOOS_BT_ENABLE` is also on (the default for CYW43 boards), `kernel/bluetooth.c` is compiled in and `bt_init()` is called immediately after `wifi_init()`.  It hooks BTstack into the same async context that WiFi uses, so no extra thread is needed.  `bt_init()` registers the `bt` shell command and powers on the BT radio asynchronously.
 
-The `bt scan` command runs a simultaneous Classic BR/EDR inquiry (~6.4 s) and BLE passive scan, then prints a table of discovered devices:
+The `bt scan` command runs a simultaneous Classic BR/EDR inquiry (~6.4 s) and BLE active scan, then prints a table of discovered devices:
 
 ```
 Address            RSSI  Type     Class       Name

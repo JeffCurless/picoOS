@@ -239,7 +239,7 @@ The `vfs_fd_t` struct tracks: used flag, type (device or file), path, position, 
 
 - **Shares the CYW43 async context** with WiFi — BTstack events arrive from the same core-0 IRQ. BT must be initialized after WiFi.  Results are read with `bt_copy_scan_results()`.
 - **Classic inquiry:** 5 × 1.28 s = ~6.4 s window; results include address, Class of Device, RSSI.
-- **BLE passive scan:** 48-slot interval (~30 ms), 30-slot window (~18.75 ms); runs simultaneously with Classic inquiry.
+- **BLE active scan:** 48-slot interval (~30 ms), 30-slot window (~18.75 ms); runs simultaneously with Classic inquiry.
 - **AD parsing:** `extract_ble_adv_data()` parses standard AD types: name (0x08/0x09), flags (0x01), TX power (0x0A), manufacturer specific (0xFF → company ID).
 - **BTstack configuration (`src/btstack_config.h`):** Scan-only — `MAX_NR_HCI_CONNECTIONS = 0`, no L2CAP, no RFCOMM, no pairing/bonding.
 
