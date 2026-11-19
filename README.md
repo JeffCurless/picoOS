@@ -206,6 +206,7 @@ picoOS/
 │   ├── application.md         How to write and register a new app
 │   ├── picoOS_API.md          Developer API reference
 │   ├── imperfections.md       Catalogue of deliberate teaching imperfections
+│   ├── issues.md              Outstanding bugs and loose ends (tracked by number)
 │   ├── locking.md             How the locking mechanisms work (HW spinlocks, striping, primitives)
 │   ├── testing.md             Host unit tests, on-device scantest, PICOOS_LOCK_DEBUG
 │   ├── studentwork.md         Student build guide (Fedora)
@@ -340,6 +341,7 @@ Several parts of v1 are intentionally suboptimal — these are teaching opportun
 | Single concurrent writer | One 4 KB write buffer | Per-file buffer pool |
 
 The full list, with file locations and suggested fixes, is in [docs/imperfections.md](docs/imperfections.md).
+Known bugs that are not deliberate are tracked separately in [docs/issues.md](docs/issues.md).
 
 ### Memory budget
 

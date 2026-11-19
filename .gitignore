@@ -36,3 +36,6 @@ kits/*
 
 # Hardware test run logs and stack reports (hwtest/run.py)
 hwtest/logs/
+
+# Commit message drafts (git commit -F commit.txt)
+/commit.txt
