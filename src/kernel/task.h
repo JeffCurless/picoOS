@@ -296,9 +296,6 @@ typedef struct {
 int      task_stack_stats(stack_stat_t *out, int max, uint32_t *dropped);
 void     task_stack_stats_reset(void);
 
-int      task_thread_count(void);
-int      task_process_count(void);
-
 /* Iterate over every allocated TCB/PCB slot (used by shell 'ps'/'threads').
  * Returns the slot pointer or NULL when idx is out of range.              */
 tcb_t   *task_get_thread_slot(int idx);

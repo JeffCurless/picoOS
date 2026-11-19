@@ -31,6 +31,7 @@
 #include "arch.h"   /* HOST_TEST prototypes for flash_range_erase/program */
 #include "fs.h"     /* FS_FLASH_OFFSET, FS_BLOCK_SIZE, FS_MAX_FILES */
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -72,12 +73,31 @@ void mock_flash_teardown(void)
  * The FS region starts at FS_FLASH_OFFSET, so subtract that to get the index
  * into mock_flash_buf. */
 
+/* Behave like the real NOR flash, so the tests catch what it would punish:
+ * erase works on whole 4 KB sectors, program on whole 256-byte pages, and
+ * programming can only clear bits (an AND), so data written over unerased
+ * flash comes out corrupted rather than looking fine. */
+static void check_range(const char *what, uint32_t offset, size_t count, size_t unit)
+{
+    if (offset < FS_FLASH_OFFSET || (offset - FS_FLASH_OFFSET) + count > MOCK_FLASH_BYTES ||
+        offset % unit != 0u || count % unit != 0u) {
+        fprintf(stderr, "mock_flash: bad %s offset 0x%X count %zu\n",
+                what, (unsigned)offset, count);
+        abort();
+    }
+}
+
 void flash_range_erase(uint32_t offset, size_t count)
 {
+    check_range("erase", offset, count, FS_BLOCK_SIZE);
     memset(mock_flash_buf + (offset - FS_FLASH_OFFSET), 0xFF, count);
 }
 
 void flash_range_program(uint32_t offset, const uint8_t *data, size_t count)
 {
-    memcpy(mock_flash_buf + (offset - FS_FLASH_OFFSET), data, count);
+    check_range("program", offset, count, FLASH_PAGE_SIZE);
+    uint8_t *dst = mock_flash_buf + (offset - FS_FLASH_OFFSET);
+    for (size_t i = 0; i < count; i++) {
+        dst[i] &= data[i];
+    }
 }

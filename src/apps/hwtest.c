@@ -31,6 +31,8 @@
  *   run hwtest                 list the modes
  *   run hwtest kill-mutex      self-checking: a kill waits for kmutex_unlock (#26)
  *   run hwtest kill-file       self-checking: a killed process's files are closed (#26)
+ *   run hwtest fs-longname     self-checking: an over-long file name is refused (#7)
+ *   run hwtest fs-fds          self-checking: readers during a write, deleted-file fds (#31, #8)
  *   run hwtest holdmutex       holder: lock a mutex for HOLD_MS, then unlock
  *   run hwtest holdfile        holder: keep hwt_hold.txt open for writing, forever
  *   run hwtest leakfile        holder: write hwt_leak.txt and exit without closing
@@ -42,6 +44,7 @@
 #include "../kernel/task.h"
 #include "../kernel/mem.h"
 #include "../kernel/vfs.h"
+#include "../kernel/fs.h"
 #include "../shell/shell.h"
 
 #include <stdint.h>
@@ -227,6 +230,90 @@ static void mode_kill_file(void)
     }
 }
 
+/* -------------------------------------------------------------------------
+ * fs-longname (#7) — straight through the VFS, past the shell's own length
+ * check.  A name of FS_NAME_MAX characters used to be stored cut to 15, so
+ * every create made another entry under the short name.
+ * ------------------------------------------------------------------------- */
+#define LONG_NAME   "hwt_longname_16c"   /* FS_NAME_MAX (16) chars */
+#define SHORT_NAME  "hwt_longname_16"    /* its first 15 */
+
+_Static_assert(sizeof(LONG_NAME) - 1u == FS_NAME_MAX, "LONG_NAME must be FS_NAME_MAX chars");
+
+static void mode_fs_longname(void)
+{
+    fs_delete(SHORT_NAME);   /* leftovers from an older build */
+
+    for (int i = 0; i < 2; i++) {
+        int fd = vfs_open(LONG_NAME, VFS_O_WRONLY | VFS_O_CREAT | VFS_O_TRUNC);
+        check(fd < 0, "create with a 16-char name is refused");
+        if (fd >= 0) { vfs_close(fd); }
+    }
+    int fd = vfs_open(SHORT_NAME, VFS_O_RDONLY);
+    check(fd < 0, "no entry was made under the 15-char prefix");
+    if (fd >= 0) { vfs_close(fd); }
+
+    fd = vfs_open(SHORT_NAME, VFS_O_WRONLY | VFS_O_CREAT | VFS_O_TRUNC);
+    check(fd >= 0, "the 15-char prefix is a valid name");
+    if (fd >= 0) { vfs_close(fd); }
+    fd = vfs_open(LONG_NAME, VFS_O_RDONLY);
+    check(fd < 0, "the 16-char name does not open the 15-char file");
+    if (fd >= 0) { vfs_close(fd); }
+
+    check(fs_delete(LONG_NAME) == -1, "delete with the 16-char name finds nothing");
+    check(fs_delete(SHORT_NAME) == 0, "the 15-char file deletes");
+}
+
+/* -------------------------------------------------------------------------
+ * fs-fds (#31, #8) — what other descriptors see.
+ *   #31  While a write is pending, another fd reads the committed file: it
+ *        used to get the writer's new size, and 0xFF from flash past the
+ *        old end.
+ *   #8   An fd left open on a deleted file used to point at a freed fs
+ *        slot; the next file opened got that slot, and the old fd read it.
+ * ------------------------------------------------------------------------- */
+#define FDS_A  "hwt_fds_a.txt"
+#define FDS_B  "hwt_fds_b.txt"
+
+static void mode_fs_fds(void)
+{
+    uint8_t buf[32];
+    fs_delete(FDS_A);
+    fs_delete(FDS_B);
+
+    int w = vfs_open(FDS_A, VFS_O_WRONLY | VFS_O_CREAT | VFS_O_TRUNC);
+    check(w >= 0 && vfs_write(w, (const uint8_t *)"old", 3u) == 3, "write 3 bytes");
+    check(vfs_close(w) == 0, "commit them");
+
+    /* #31 */
+    w = vfs_open(FDS_A, VFS_O_WRONLY | VFS_O_APPEND);
+    check(w >= 0 && vfs_write(w, (const uint8_t *)"-and-more", 9u) == 9, "pending append of 9");
+    int r = vfs_open(FDS_A, VFS_O_RDONLY);
+    memset(buf, 0, sizeof(buf));
+    int n = vfs_read(r, buf, sizeof(buf));
+    check(n == 3 && memcmp(buf, "old", 3) == 0, "another fd reads the committed 3 bytes");
+    vfs_close(r);
+    check(vfs_close(w) == 0, "commit the append");
+    r = vfs_open(FDS_A, VFS_O_RDONLY);
+    memset(buf, 0, sizeof(buf));
+    n = vfs_read(r, buf, sizeof(buf));
+    check(n == 12 && memcmp(buf, "old-and-more", 12) == 0, "then all 12 bytes");
+
+    /* #8: r stays open across the delete */
+    check(fs_delete(FDS_A) == 0, "delete the file while an fd is open on it");
+    int b = vfs_open(FDS_B, VFS_O_WRONLY | VFS_O_CREAT | VFS_O_TRUNC);
+    check(b >= 0 && vfs_write(b, (const uint8_t *)"bbbb", 4u) == 4, "write another file");
+    check(vfs_close(b) == 0, "commit it");
+    b = vfs_open(FDS_B, VFS_O_RDONLY);
+    check(vfs_read(r, buf, sizeof(buf)) == -1, "the old fd fails instead of reading the new file");
+    memset(buf, 0, sizeof(buf));
+    check(vfs_read(b, buf, sizeof(buf)) == 4 && memcmp(buf, "bbbb", 4) == 0,
+          "the new file reads back intact");
+    check(vfs_close(r) == 0, "the stale fd closes");
+    vfs_close(b);
+    check(fs_delete(FDS_B) == 0, "clean up");
+}
+
 /* =========================================================================
  * Holder modes — the host acts while these hold a state
  * ========================================================================= */
@@ -284,6 +371,8 @@ typedef struct {
 static const hwtest_mode_t modes[] = {
     { "kill-mutex", mode_kill_mutex, true,  "kill waits for kmutex_unlock (#26)" },
     { "kill-file",  mode_kill_file,  true,  "killed process's files are closed (#26)" },
+    { "fs-longname", mode_fs_longname, true, "over-long file name is refused (#7)" },
+    { "fs-fds",     mode_fs_fds,     true,  "readers during a write, deleted-file fds (#31, #8)" },
     { "holdmutex",  mode_holdmutex,  false, "hold a mutex for 3 s" },
     { "holdfile",   mode_holdfile,   false, "keep hwt_hold.txt open for writing" },
     { "leakfile",   mode_leakfile,   false, "exit with hwt_leak.txt still open" },

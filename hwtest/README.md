@@ -46,7 +46,7 @@ The tests create files named `hwt_*.txt` and delete them afterwards. A
 | `pico.py` | `Pico`: flash, connect/reconnect, `cmd()`, `expect()`, parsed `threads()`/`ps()` |
 | `harness.py` | `check()`, `@requires(...)`, the `Context` each test gets |
 | `test_00_smoke.py` | Version matches the kit, commands present, core threads running |
-| `test_10_fs.py` | `fs write`/`append`/`cat`/`rm`, multi-line write, a file surviving `reboot` |
+| `test_10_fs.py` | `fs write`/`append`/`cat`/`rm`, multi-line write, a file surviving `reboot`, over-long names refused (#7), truncation surviving a reboot (#18), a full-length line keeping its newline (#39), other fds during a write and after a delete (#31, #8) |
 | `test_20_kill.py` | Issue #26: a kill does not leak a held mutex or open files |
 | `test_30_stacks.py` | Runs every app that can run unattended, then reports each thread's peak stack use and a suggested `stack_size` |
 | `../src/apps/hwtest.c` | Device side: `run hwtest <mode>` |
@@ -102,6 +102,8 @@ apps) handles those in two ways:
 |------|------|------|
 | `kill-mutex` | self-checking | a kill waits for `kmutex_unlock`; the mutex is free afterwards |
 | `kill-file` | self-checking | a killed process's open file is committed and the write buffer freed |
+| `fs-longname` | self-checking | `vfs_open` refuses a 16-char name and makes no entry under its 15-char prefix (#7) |
+| `fs-fds` | self-checking | another fd reads the committed file during a pending write; an fd left open on a deleted file fails instead of reading the next file (#31, #8) |
 | `holdmutex` | holder | holds a mutex for 3 s, then releases it |
 | `holdfile` | holder | keeps `hwt_hold.txt` open for writing, forever |
 | `leakfile` | holder | writes `hwt_leak.txt` and exits without closing it |

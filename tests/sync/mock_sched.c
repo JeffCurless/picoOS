@@ -87,7 +87,6 @@ void sched_yield(void)
  * ========================================================================= */
 void    sched_init(void)               {}
 void    sched_start(void)              {}
-void    sched_tick(void)               {}
 void    sched_sleep(uint32_t ms)       { (void)ms; }
 tcb_t  *sched_next_thread(void)        { return NULL; }
 

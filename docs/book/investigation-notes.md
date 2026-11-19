@@ -193,9 +193,9 @@ Sector 2:     File 1 data
 ...
 ```
 
-**Superblock structure** (`fs_superblock_t`, fs.h lines 72–77): magic (0x50494353 = "PICS"), version, file_count, array of `fs_entry_t` (used, name, size, start_block, block_count).
+**Superblock structure** (`fs_superblock_t`, fs.h lines 72–77): magic (0x50494353 = "PICS"), version (2), file_count, max_files (added in 0.5.1), array of `fs_entry_t` (used, name, size, start_block, block_count).
 
-**Maximum superblock size constraint:** 12 + N × 32 ≤ 4096. For N = 127 files: 12 + 127×32 = 4076 bytes — just fits in one sector. This constraint is noted in CLAUDE.md and documented in `docs/expandfilesystem.md`.
+**Maximum superblock size constraint:** 16 + N × 32 ≤ 4096. For N = 127 files: 16 + 127×32 = 4080 bytes — just fits in one sector. This constraint is noted in CLAUDE.md and documented in `docs/expandfilesystem.md`.
 
 **Read path:** Straight from XIP. `fs_read()` `memcpy`s from the XIP flash address space (`XIP_BASE + FS_FLASH_OFFSET + sector * FS_BLOCK_SIZE`) into the caller's buffer — no RAM cache — except for a file currently open for writing, which is read from `fs_buffer`.
 
@@ -226,7 +226,7 @@ The device table is a static array of `device_t` structs, each containing functi
 
 VFS maintains a global fd table (`vfs_fd_t` array, `VFS_MAX_OPEN = 16`) and a device mount table (`vfs_dev_mount_t` array, max 8 entries). `vfs_open()` checks device mounts first; if path starts with `/dev/`, it routes to the device layer. Otherwise it routes to `fs_open()`.
 
-The `vfs_fd_t` struct tracks: used flag, type (device or file), path, position, device ID (if device), and fs_file_id (if file). Position tracking for devices is vestigial — devices don't use it meaningfully.
+The `vfs_fd_t` struct tracks: used flag, type (device or file), device ID (if device), fs_file_id (if file), and the owner (PID and process serial, for closing a dead process's files). It used to keep a copy of the path, a position and the open mode too; nothing read them (the fs layer keeps the position and enforces the mode), so 0.5.1 dropped them.
 
 ### WiFi Driver (`src/kernel/wifi.c`)
 

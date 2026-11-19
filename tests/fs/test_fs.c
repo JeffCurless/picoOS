@@ -29,6 +29,7 @@
 #include <string.h>
 
 #include "fs.h"
+#include "arch.h"   /* FLASH_PAGE_SIZE (host stubs) */
 #include "vfs.h"    /* VFS_O_* flags */
 #include "mock_flash.h"
 #include "../framework.h"
@@ -97,8 +98,9 @@ static void test_format_creates_valid_superblock(void)
     /* Verify the raw superblock in mock flash (at offset 0 = superblock sector). */
     const uint32_t *raw = (const uint32_t *)mock_flash_buf;
     CHECK(raw[0] == FS_SUPERBLOCK_MAGIC, "magic must be FS_SUPERBLOCK_MAGIC");
-    CHECK(raw[1] == 1u,                  "version must be 1");
+    CHECK(raw[1] == FS_VERSION,          "version must be FS_VERSION (2)");
     CHECK(raw[2] == 0u,                  "file_count must be 0 in on-flash superblock");
+    CHECK(raw[3] == FS_MAX_FILES,        "max_files must be this build's FS_MAX_FILES");
 
     END_TEST();
 }
@@ -384,6 +386,47 @@ static void test_file_name_boundary(void)
 }
 
 /* -------------------------------------------------------------------------
+ * test_file_name_too_long_rejected  (issue #7)
+ * A name of FS_NAME_MAX or more characters cannot be stored whole.  It used
+ * to be stored cut to FS_NAME_MAX - 1, which the lookup never matched: each
+ * create made a duplicate, and fs_delete() with the full name found none.
+ * Now open fails and nothing is created.  Empty names fail too.
+ * ------------------------------------------------------------------------- */
+static void test_file_name_too_long_rejected(void)
+{
+    BEGIN_TEST(file_name_too_long_rejected);
+    fs_reset();
+
+    char long_name[FS_NAME_MAX + 1u];
+    memset(long_name, 'y', FS_NAME_MAX);
+    long_name[FS_NAME_MAX] = '\0';   /* FS_NAME_MAX chars: one too many */
+
+    for (int i = 0; i < 2; i++) {
+        int fd = fs_open(long_name, VFS_O_CREAT | VFS_O_WRONLY | VFS_O_TRUNC);
+        CHECK(fd < 0, "create with an over-long name must fail");
+        if (fd >= 0) { fs_close(fd); }
+    }
+    CHECK(count_files() == 0, "no entry (truncated or not) is created");
+    CHECK(fs_delete(long_name) == -1, "delete of an over-long name reports not found");
+
+    /* The cut-down name is an ordinary file, unrelated to the long one. */
+    char short_name[FS_NAME_MAX];
+    memcpy(short_name, long_name, FS_NAME_MAX - 1u);
+    short_name[FS_NAME_MAX - 1u] = '\0';
+    int fd = fs_open(short_name, VFS_O_CREAT | VFS_O_WRONLY);
+    CHECK(fd >= 0, "the 15-char prefix is still a valid name");
+    fs_close(fd);
+    CHECK(fs_open(long_name, VFS_O_RDONLY) < 0, "long name does not alias its prefix");
+    CHECK(count_files() == 1, "exactly one file exists");
+
+    CHECK(fs_open("", VFS_O_CREAT | VFS_O_WRONLY) < 0, "empty name must fail");
+    CHECK(fs_open("/", VFS_O_CREAT | VFS_O_WRONLY) < 0, "\"/\" alone must fail");
+    CHECK(count_files() == 1, "failed opens created nothing");
+
+    END_TEST();
+}
+
+/* -------------------------------------------------------------------------
  * test_trunc_zeroes_content
  * Writing data, closing, reopening with VFS_O_TRUNC, then closing without
  * writing must produce a zero-length file.
@@ -407,6 +450,11 @@ static void test_trunc_zeroes_content(void)
     fs_close(t);
 
     CHECK(file_size("trunc.txt") == 0, "file must be 0 bytes after truncate close");
+
+    /* #18: the truncation used to live in RAM only; a reboot (fs_init)
+     * brought the 64 bytes back. */
+    fs_init();
+    CHECK(file_size("trunc.txt") == 0, "file must still be 0 bytes after re-init");
 
     END_TEST();
 }
@@ -488,11 +536,8 @@ static void test_scratch_owner_enforces_single_writer(void)
     CHECK(fd_b < 0,
           "second write open while first is active must fail (scratch buffer busy)");
 
-    /* Write at least one byte so dirty=true on fd_a; fs_close then flushes the
-     * data to flash and releases scratch_owner.  Without a write, fs_close
-     * skips the flush path and scratch_owner remains set — a known limitation. */
+    /* Close without writing: fs_close releases the write buffer anyway. */
     uint8_t d = 0x55;
-    fs_write(fd_a, &d, 1u);
     fs_close(fd_a);
 
     /* Scratch buffer is now free; opening b.txt for write must succeed. */
@@ -541,6 +586,190 @@ static void test_metadata_change_keeps_pending_write(void)
     fs_close(rfd);
 
     CHECK(fs_open("new.txt", VFS_O_RDONLY) >= 0, "new.txt must exist");
+
+    END_TEST();
+}
+
+
+/* -------------------------------------------------------------------------
+ * Helpers for the raw superblock in mock flash
+ * ------------------------------------------------------------------------- */
+#define RAW_SB  ((uint32_t *)mock_flash_buf)   /* superblock sector, as words */
+
+/* Rewrite the on-flash superblock in the version-1 layout (no max_files:
+ * entries start at byte 12) with an erased tail, as an older build left it. */
+static void make_v1_superblock(void)
+{
+    uint8_t sector[FS_BLOCK_SIZE];
+    memset(sector, 0xFF, sizeof(sector));
+    memcpy(sector, mock_flash_buf, 12u);                    /* magic, version, count */
+    memcpy(sector + 12u, mock_flash_buf + 16u,
+           sizeof(fs_entry_t) * FS_MAX_FILES - sizeof(fs_entry_t));  /* all but the last */
+    ((uint32_t *)sector)[1] = 1u;
+    memcpy(mock_flash_buf, sector, sizeof(sector));
+}
+
+/* -------------------------------------------------------------------------
+ * test_v1_superblock_converted  (#31)
+ * A version-1 table has no max_files field.  It mounts with its files and
+ * is written back as version 2.
+ * ------------------------------------------------------------------------- */
+static void test_v1_superblock_converted(void)
+{
+    BEGIN_TEST(v1_superblock_converted_in_place);
+    fs_reset();
+
+    const uint8_t data[5] = { 'h','e','l','l','o' };
+    int w = fs_open("old.txt", VFS_O_CREAT | VFS_O_WRONLY | VFS_O_TRUNC);
+    fs_write(w, data, 5u);
+    fs_close(w);
+    make_v1_superblock();
+
+    fs_init();
+    CHECK(count_files() == 1, "the v1 file must survive the conversion");
+    CHECK(file_size("old.txt") == 5, "with its size");
+    uint8_t buf[5] = {0};
+    int r = fs_open("old.txt", VFS_O_RDONLY);
+    CHECK(fs_read(r, buf, 5u) == 5 && memcmp(buf, data, 5) == 0, "and its data");
+    fs_close(r);
+    CHECK(RAW_SB[1] == FS_VERSION && RAW_SB[3] == FS_MAX_FILES,
+          "the table must be written back as version 2");
+
+    END_TEST();
+}
+
+/* -------------------------------------------------------------------------
+ * test_other_max_files_converted  (#31)
+ * A table written with a larger FS_MAX_FILES (garbage past our end) or a
+ * smaller one keeps only the entries that are valid here.
+ * ------------------------------------------------------------------------- */
+static void test_other_max_files_converted(void)
+{
+    BEGIN_TEST(other_max_files_table_converted);
+    fs_reset();
+
+    const char *names[3] = { "f0", "f1", "f2" };
+    for (int i = 0; i < 3; i++) {
+        fs_close(fs_open(names[i], VFS_O_CREAT | VFS_O_WRONLY));
+    }
+
+    /* As if written by a build with 2 slots: f2 (slot 2) is past its end. */
+    RAW_SB[3] = 2u;
+    fs_init();
+    CHECK(count_files() == 2, "entries past the old table end are dropped");
+    CHECK(file_size("f2") == -1, "f2 is gone");
+    CHECK(RAW_SB[3] == FS_MAX_FILES, "the table is written back with our size");
+
+    /* As if written by a build with more slots than ours: the extra
+     * entries (here: erased 0xFF bytes) must not be read as files. */
+    RAW_SB[3] = FS_MAX_FILES + 16u;
+    fs_init();
+    CHECK(count_files() == 2, "a larger table keeps the valid entries only");
+    CHECK(RAW_SB[3] == FS_MAX_FILES, "and is written back with our size");
+
+    END_TEST();
+}
+
+/* -------------------------------------------------------------------------
+ * test_reader_sees_committed_file  (#31)
+ * While a write is pending, other fds and fs_list see the file as it is on
+ * flash; the writer's own fd sees its pending data.
+ * ------------------------------------------------------------------------- */
+static void test_reader_sees_committed_file(void)
+{
+    BEGIN_TEST(reader_sees_committed_file_during_write);
+    fs_reset();
+
+    int w0 = fs_open("rw.txt", VFS_O_CREAT | VFS_O_WRONLY | VFS_O_TRUNC);
+    fs_write(w0, (const uint8_t *)"old", 3u);
+    fs_close(w0);
+
+    int w = fs_open("rw.txt", VFS_O_RDWR | VFS_O_APPEND);
+    CHECK(w >= 0, "append open must succeed");
+    CHECK(fs_write(w, (const uint8_t *)"-new-data", 9u) == 9, "pending write of 9 bytes");
+
+    CHECK(file_size("rw.txt") == 3, "fs_list must still show the committed 3 bytes");
+    int r = fs_open("rw.txt", VFS_O_RDONLY);
+    uint8_t buf[16];
+    memset(buf, 0, sizeof(buf));
+    CHECK(fs_read(r, buf, sizeof(buf)) == 3 && memcmp(buf, "old", 3) == 0,
+          "another fd must read the committed 3 bytes, not 0xFF past them");
+    fs_close(r);
+
+    CHECK(fs_close(w) == 0, "close must commit");
+    CHECK(file_size("rw.txt") == 12, "the new size is published by close");
+    r = fs_open("rw.txt", VFS_O_RDONLY);
+    memset(buf, 0, sizeof(buf));
+    CHECK(fs_read(r, buf, sizeof(buf)) == 12 && memcmp(buf, "old-new-data", 12) == 0,
+          "a reader opened after the commit sees all of it");
+    fs_close(r);
+
+    END_TEST();
+}
+
+/* -------------------------------------------------------------------------
+ * test_deleted_file_fd_goes_stale  (#8)
+ * An fd open on a deleted file stays allocated but fails I/O, so it cannot
+ * be handed to (and then read or write) another file.
+ * ------------------------------------------------------------------------- */
+static void test_deleted_file_fd_goes_stale(void)
+{
+    BEGIN_TEST(deleted_file_fd_goes_stale);
+    fs_reset();
+
+    int w = fs_open("victim.txt", VFS_O_CREAT | VFS_O_WRONLY | VFS_O_TRUNC);
+    fs_write(w, (const uint8_t *)"victim", 6u);
+    fs_close(w);
+
+    int r = fs_open("victim.txt", VFS_O_RDONLY);
+    int p = fs_open("victim.txt", VFS_O_WRONLY | VFS_O_APPEND);
+    CHECK(r >= 0 && p >= 0, "reader and writer open");
+    CHECK(fs_delete("victim.txt") == 0, "delete while open must succeed");
+
+    /* A new file: it must not get r's or p's fd slot. */
+    int n = fs_open("other.txt", VFS_O_CREAT | VFS_O_WRONLY | VFS_O_TRUNC);
+    CHECK(n >= 0, "a new writer can start: the deleted file's buffer was freed");
+    CHECK(n != r && n != p, "the stale fds' slots are not reused");
+    fs_write(n, (const uint8_t *)"other", 5u);
+    fs_close(n);
+
+    uint8_t buf[8];
+    CHECK(fs_read(r, buf, sizeof(buf)) == -1, "read on a stale fd fails");
+    CHECK(fs_write(p, (const uint8_t *)"x", 1u) == -1, "write on a stale fd fails");
+    CHECK(fs_close(p) == 0 && fs_close(r) == 0, "close frees stale fds");
+    CHECK(file_size("other.txt") == 5, "the other file is untouched");
+    CHECK(file_size("victim.txt") == -1, "the pending write did not resurrect it");
+
+    /* fs_format does the same to every open fd. */
+    int f = fs_open("other.txt", VFS_O_RDONLY);
+    fs_format();
+    CHECK(fs_read(f, buf, sizeof(buf)) == -1, "an fd open across fs_format is stale");
+    CHECK(fs_close(f) == 0, "and closes cleanly");
+
+    END_TEST();
+}
+
+/* -------------------------------------------------------------------------
+ * test_close_programs_only_used_pages  (#39)
+ * A small file programs one 256-byte page, not the whole 4 KB sector.
+ * ------------------------------------------------------------------------- */
+static void test_close_programs_only_used_pages(void)
+{
+    BEGIN_TEST(close_programs_only_used_pages);
+    fs_reset();
+
+    int w = fs_open("tiny.txt", VFS_O_CREAT | VFS_O_WRONLY | VFS_O_TRUNC);
+    fs_write(w, (const uint8_t *)"ten bytes!", 10u);
+    fs_close(w);
+
+    /* tiny.txt is in slot 0, so its data is sector 1 of the mock region. */
+    const uint8_t *sector = mock_flash_buf + FS_BLOCK_SIZE;
+    CHECK(memcmp(sector, "ten bytes!", 10) == 0, "the data is on flash");
+    bool erased = true;
+    for (uint32_t i = FLASH_PAGE_SIZE; i < FS_BLOCK_SIZE; i++) {
+        if (sector[i] != 0xFFu) { erased = false; break; }
+    }
+    CHECK(erased, "pages past the first are left erased");
 
     END_TEST();
 }
@@ -599,12 +828,18 @@ int main(void)
     test_delete_reclaims_slot();
     test_max_files_limit();
     test_file_name_boundary();
+    test_file_name_too_long_rejected();
     test_trunc_zeroes_content();
     test_append_adds_to_end();
     test_open_rdonly_write_fails();
     test_scratch_owner_enforces_single_writer();
     test_reopen_after_close_starts_at_zero();
     test_metadata_change_keeps_pending_write();
+    test_v1_superblock_converted();
+    test_other_max_files_converted();
+    test_reader_sees_committed_file();
+    test_deleted_file_fd_goes_stale();
+    test_close_programs_only_used_pages();
 
     mock_flash_teardown();
     SUMMARY();

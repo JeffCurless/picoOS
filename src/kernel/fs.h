@@ -24,13 +24,14 @@
 #ifndef FS_MAX_FILES
 #define FS_MAX_FILES      32u        /* override via CMake for board-specific sizing */
 #endif
-#define FS_NAME_MAX       16u
+#define FS_NAME_MAX       16u        /* name buffer incl. NUL: names are 1-15 chars */
 #define FS_BLOCK_SIZE     4096u              /* matches flash erase sector   */
 #define FS_FLASH_OFFSET   (1024u * 1024u)   /* 1 MB into flash for FS region */
 #ifndef FS_FLASH_SIZE
 #define FS_FLASH_SIZE     (512u * 1024u)    /* override via CMake for board-specific sizing */
 #endif
 #define FS_SUPERBLOCK_MAGIC 0x50494353u     /* "PICS" in little-endian hex   */
+#define FS_VERSION          2u              /* on-flash format; 1 had no max_files */
 
 /* Maximum file data size: one flash sector (4 KB) per file.
  *
@@ -44,7 +45,7 @@
  * FS_MAX_FILES and FS_FLASH_SIZE are set per board by CMakeLists.txt:
  *   RP2040: FS_MAX_FILES=64,  FS_FLASH_SIZE=1 MB  (2 MB flash - 1 MB firmware)
  *   RP2350: FS_MAX_FILES=127, FS_FLASH_SIZE=3 MB  (4 MB flash - 1 MB firmware)
- * Maximum is 127 files: superblock must fit in one 4 KB sector (12 + N×32 ≤ 4096).
+ * Maximum is 127 files: superblock must fit in one 4 KB sector (16 + N×32 ≤ 4096).
  * RAM cost: superblock cache (~2 KB RP2040 / ~4 KB RP2350) + 4 KB write scratch buffer.
  */
 #define FS_MAX_FILE_DATA    FS_BLOCK_SIZE   /* 4 KB max per file             */
@@ -73,6 +74,10 @@ typedef struct {
     uint32_t   magic;       /* FS_SUPERBLOCK_MAGIC                   */
     uint32_t   version;     /* filesystem format version             */
     uint32_t   file_count;  /* number of used entries in files[]     */
+    uint32_t   max_files;   /* FS_MAX_FILES of the build that wrote it:
+                             * a build with a different table size
+                             * converts the table instead of reading
+                             * past its end (version 2)              */
     fs_entry_t files[FS_MAX_FILES];
 } fs_superblock_t;
 
@@ -83,14 +88,17 @@ typedef struct {
 /*
  * fs_init — initialise the filesystem.
  *           Reads the superblock from flash; if the magic is valid the
- *           existing filesystem is mounted.  Otherwise a fresh empty
- *           filesystem is created in the flash region.
+ *           existing filesystem is mounted.  A version-1 table, or one
+ *           written with a different FS_MAX_FILES, is converted in place
+ *           (files kept).  Otherwise a fresh empty filesystem is created.
  */
 void fs_init(void);
 
 /*
  * fs_open — open a file by name.
  *   mode uses the same VFS_O_* flags defined in vfs.h.
+ *   name is 1 to FS_NAME_MAX - 1 characters after an optional leading '/';
+ *   a longer or empty name fails rather than being stored cut short.
  *   Returns an internal FS fd on success, or -1 on failure.
  */
 int fs_open(const char *name, int mode);
@@ -98,27 +106,35 @@ int fs_open(const char *name, int mode);
 /*
  * fs_read — read up to n bytes from an open FS fd.
  *           Reads directly from XIP-mapped flash (zero RAM overhead).
+ *           Every fd but the writer's sees the file as last committed by
+ *           fs_close(); the writer's fd reads its own pending data.
+ *           Returns -1 for an fd whose file was deleted or formatted away.
  */
 int fs_read(int fd, uint8_t *buf, uint32_t n);
 
 /*
  * fs_write — write n bytes to an open FS fd.
  *            Data is accumulated in the scratch buffer and committed to
- *            flash when the fd is closed.
+ *            flash when the fd is closed.  The new size is not visible to
+ *            other fds (or ls) until then.
  */
 int fs_write(int fd, const uint8_t *buf, uint32_t n);
 
 /*
  * fs_close — close an open FS fd.
- *            If the fd was opened for writing and data was written, the
- *            scratch buffer is committed to flash and the superblock is
- *            updated.
+ *            If the fd was opened for writing and the file changed (data
+ *            written, or opened with VFS_O_TRUNC), the scratch buffer is
+ *            committed to flash and the superblock is updated.  The write
+ *            buffer is released either way.  Returns -1 if the commit failed.
  */
 int fs_close(int fd);
 
 /*
  * fs_delete — delete a file by name.
- *   Returns 0 on success, -1 if the file is not found.
+ *   Returns 0 on success, -1 if the file is not found (always the case for
+ *   a name longer than FS_NAME_MAX - 1 characters).  fds still open on the
+ *   file stay allocated but stale: reads and writes fail, and fs_close()
+ *   frees them.  Pending writes to it are discarded.
  */
 int fs_delete(const char *name);
 
@@ -131,7 +147,9 @@ void fs_list(int (*callback)(const fs_entry_t *entry));
 
 /*
  * fs_format — erase all files and reset the superblock on flash.
- *             Erases every sector in the FS flash region.
+ *             Erases the superblock and the data sector of each existing
+ *             file; free sectors are erased when first written.  Open fds
+ *             become stale, as after fs_delete().
  */
 void fs_format(void);
 

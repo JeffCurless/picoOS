@@ -218,15 +218,11 @@ int vfs_open(const char *path, int mode)
             return -1;
         }
 
-        f->used      = true;
-        f->type      = VFS_TYPE_DEV;
-        f->pos       = 0u;
-        f->dev_id    = did;
+        f->used       = true;
+        f->type       = VFS_TYPE_DEV;
+        f->dev_id     = did;
         f->fs_file_id = 0u;
-        f->mode      = mode;
         set_owner(f);
-        strncpy(f->path, path, VFS_PATH_MAX - 1u);
-        f->path[VFS_PATH_MAX - 1u] = '\0';
 
         kmutex_unlock(&vfs_lock);
         return fd;
@@ -241,13 +237,9 @@ int vfs_open(const char *path, int mode)
 
     f->used       = true;
     f->type       = VFS_TYPE_FILE;
-    f->pos        = 0u;
     f->dev_id     = DEV_COUNT;   /* invalid / unused */
     f->fs_file_id = (uint32_t)fs_fd;
-    f->mode       = mode;
     set_owner(f);
-    strncpy(f->path, path, VFS_PATH_MAX - 1u);
-    f->path[VFS_PATH_MAX - 1u] = '\0';
 
     kmutex_unlock(&vfs_lock);
     return fd;
@@ -275,9 +267,6 @@ int vfs_read(int fd, uint8_t *buf, uint32_t n)
 
     /* Filesystem file: delegate with position tracking. */
     int result = fs_read((int)f->fs_file_id, buf, n);
-    if (result > 0) {
-        f->pos += (uint32_t)result;
-    }
     kmutex_unlock(&vfs_lock);
     return result;
 }
@@ -303,9 +292,6 @@ int vfs_write(int fd, const uint8_t *buf, uint32_t n)
     }
 
     int result = fs_write((int)f->fs_file_id, buf, n);
-    if (result > 0) {
-        f->pos += (uint32_t)result;
-    }
     kmutex_unlock(&vfs_lock);
     return result;
 }

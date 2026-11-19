@@ -660,19 +660,6 @@ void isr_systick(void)
 }
 
 /* -------------------------------------------------------------------------
- * sched_tick — public wrapper (declared in sched.h)
- *
- * Provided for callers that want to drive the scheduler tick manually (e.g.
- * from a hardware timer callback).  In the default configuration the SysTick
- * ISR above is used instead, but having this wrapper makes the teaching code
- * explicit about the tick-to-scheduler relationship.
- * ------------------------------------------------------------------------- */
-void sched_tick(void)
-{
-    isr_systick();
-}
-
-/* -------------------------------------------------------------------------
  * Scheduler trace — public API (see sched.h)
  * ------------------------------------------------------------------------- */
 void sched_trace_start(const char *filter)
