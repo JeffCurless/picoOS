@@ -167,7 +167,7 @@ These tests verify the instrumentation added to `sync.c` when `PICOOS_LOCK_DEBUG
 
 ---
 
-### 3 — `test_fs` (18 tests) — flash filesystem
+### 3 — `test_fs` (24 tests) — flash filesystem
 
 **Source**: `tests/fs/test_fs.c`  
 **Module under test**: `src/kernel/fs.c`  
@@ -176,7 +176,7 @@ These tests verify the instrumentation added to `sync.c` when `PICOOS_LOCK_DEBUG
 
 Every test starts with `fs_init()`, which initialises the FS mutex; calling `fs_format()` or any other FS function first would find an uninitialised (apparently held) mutex and hang.
 
-The flash mock provides a `malloc`-backed buffer sized `(1 + FS_MAX_FILES) × 4 KB`, initialised to `0xFF` (erased state).  `flash_range_erase` does `memset` to `0xFF`; `flash_range_program` does `memcpy`.  `host_xip_base` is set so that XIP pointer arithmetic in `fs.c` (`XIP_BASE + FS_FLASH_OFFSET + offset`) resolves to the correct position in the RAM buffer.
+The flash mock provides a `malloc`-backed buffer sized `(1 + FS_MAX_FILES) × 4 KB`, initialised to `0xFF` (erased state).  It behaves like the real NOR flash: `flash_range_erase` sets whole 4 KB sectors to `0xFF`, `flash_range_program` takes whole 256-byte pages and ANDs the data in (programming can only clear bits, so writing over unerased flash shows up as corrupt data), and a misaligned or out-of-range call aborts the test.  `host_xip_base` is set so that XIP pointer arithmetic in `fs.c` (`XIP_BASE + FS_FLASH_OFFSET + offset`) resolves to the correct position in the RAM buffer.
 
 The suite uses `FS_MAX_FILES=8` (set at compile time) to keep the RAM buffer under 40 KB.
 
@@ -184,7 +184,7 @@ Each test calls `fs_reset()` (helper in the test file) which calls `mock_flash_i
 
 | Test | What it verifies |
 |---|---|
-| `format_creates_valid_superblock` | Raw flash contains magic `0x50494353`, version `1`, file_count `0` after format |
+| `format_creates_valid_superblock` | Raw flash contains magic `0x50494353`, version `2`, file_count `0` and max_files `FS_MAX_FILES` after format |
 | `format_idempotent` | Calling `fs_format()` twice produces the same valid empty filesystem |
 | `corrupt_superblock_triggers_reformat` | Writing bad magic to flash then calling `fs_init()` triggers a reformat; all files are gone |
 | `create_file_persists_metadata_across_reinit` | Create and close a file; call `fs_init()` to re-read flash; file is still listed |
@@ -196,14 +196,20 @@ Each test calls `fs_reset()` (helper in the test file) which calls `mock_flash_i
 | `delete_reclaims_directory_slot` | Creating a file with a previously deleted name succeeds |
 | `max_files_limit` | Creating `FS_MAX_FILES` files all succeed; creating one more returns -1 |
 | `file_name_at_max_length_boundary` | A name of `FS_NAME_MAX - 1` characters stores and is found correctly |
-| `trunc_clears_file_content` | Write data; reopen with `O_TRUNC` and close without writing; file size is 0 |
+| `file_name_too_long_rejected` | A name of `FS_NAME_MAX` characters (or empty, or `/`) fails to open, creates nothing, and does not alias its 15-char prefix; `fs_delete` of it reports not found (#7) |
+| `trunc_clears_file_content` | Write data; reopen with `O_TRUNC` and close without writing; file size is 0, and still 0 after `fs_init()` re-reads flash (#18) |
 | `append_extends_file` | Write N bytes, close; reopen with `O_APPEND`; write M bytes; total size is N+M and content is contiguous |
 | `write_to_rdonly_fd_fails` | `fs_write` on a read-only fd returns -1 |
-| `scratch_owner_single_writer_enforcement` | A second write-mode open while the first is still open returns -1; after the first is closed (with data written so dirty=true) the next write open succeeds |
+| `scratch_owner_single_writer_enforcement` | A second write-mode open while the first is still open returns -1; after the first is closed (even with nothing written) the next write open succeeds |
 | `reopen_resets_position_to_zero` | Closing and reopening a file for read starts at byte 0 regardless of how far the previous fd read |
 | `metadata_change_keeps_pending_write` | While one file is open for writing, creating another file and deleting a third (both rewrite the superblock) must not disturb its unsaved data |
+| `v1_superblock_converted_in_place` | A version-1 table (no `max_files`, erased tail) mounts with its file, size and data, and is written back as version 2 (#31) |
+| `other_max_files_table_converted` | A table from a build with fewer slots drops the entries past its end; one claiming more slots does not read the erased tail as files (#31) |
+| `reader_sees_committed_file_during_write` | While an append is pending, `fs_list` and another fd see the committed 3 bytes, not the writer's new size; after close all 12 are visible (#31) |
+| `deleted_file_fd_goes_stale` | fds open on a deleted file keep their slots (a new file gets another), fail reads and writes, and close cleanly; the same after `fs_format` (#8) |
+| `close_programs_only_used_pages` | A 10-byte file programs one page; the rest of its sector stays erased (#39) |
 
-> **Note on single-writer behaviour**: `fs.c` uses a single 4 KB scratch buffer for all writes.  The scratch buffer is released on `fs_close()` only when `dirty == true` (i.e. at least one `fs_write` was called on that fd).  Opening a file for write and closing it without writing any data does not release the buffer — this is a documented teaching imperfection.  Tests that verify write-open lifecycle therefore write at least one byte before closing.
+> **Note on single-writer behaviour**: `fs.c` uses a single 4 KB scratch buffer for all writes, so only one file can be open for writing at a time (a documented teaching imperfection).  `fs_close()` on the writer's fd always releases the buffer, whether or not anything was written.  Until that close commits the data, every other fd and `fs_list()` see the file as it is on flash.
 
 ---
 

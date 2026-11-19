@@ -60,15 +60,6 @@ void sched_start_core1(void);
 void sched_start(void);
 
 /*
- * sched_tick  — public wrapper around isr_systick().  Useful for driving
- *               the scheduler tick from a hardware timer callback or in
- *               test/simulation environments.  In normal operation the
- *               SysTick ISR (isr_systick) fires automatically every 1 ms
- *               and does NOT go through this wrapper.
- */
-void sched_tick(void);
-
-/*
  * sched_yield — voluntarily surrender the CPU.  Triggers a PendSV
  *               exception so that sched_next_thread() picks the next
  *               ready thread before returning.

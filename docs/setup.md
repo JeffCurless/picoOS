@@ -316,7 +316,7 @@ Test project /home/user/picoOS/builds/tests
 |--------|--------|-------|---------|
 | `test_mem` | `src/kernel/mem.c` | 14 | Zero alloc, alignment, exhaustion, fragmentation, coalescing, random sizes |
 | `test_sync` | `src/kernel/sync.c` | 37 | Spinlock, mutex, semaphore, event flags, message queue — non-blocking paths; `PICOOS_LOCK_DEBUG` deadlock detection |
-| `test_fs` | `src/kernel/fs.c` | 17 | Format, CRUD, limits, name boundary, truncate, append, persistence, corruption |
+| `test_fs` | `src/kernel/fs.c` | 24 | Format, CRUD, limits, name boundary and over-long names, truncate, table conversion, stale fds, readers during a write, append, persistence, corruption |
 | `test_vfs` | `src/kernel/vfs.c` | 10 | Device/file routing, FD exhaustion, double-close, mount table limits |
 
 See **[docs/testing.md](testing.md)** for a full description of each test case and instructions for adding new ones.

@@ -276,13 +276,11 @@ static int cmd_kill(int argc, char **argv)
     /* Copy the name first: the TCB may be freed (and zeroed) right away. */
     char name[sizeof(t->name)];
     memcpy(name, t->name, sizeof(name));
-    bool self = (t == (tcb_t *)CURRENT_TCB);
 
+    /* Never this thread: the shell is PID_SHELL, in the kernel range
+     * refused above, so no self-kill handling is needed (SYS_KILL has it). */
     task_kill_thread(t);
     shell_print("kill: thread %u (%s) killed\r\n", (unsigned)tid, name);
-    if (self) {
-        sched_yield();   /* reaped by the scheduler; does not return */
-    }
     /* If that was the process's last thread, close what it left open.
      * A thread that holds a kmutex dies only when it releases it; its
      * files are closed by the next vfs_open() instead. */
@@ -395,6 +393,20 @@ static int cmd_cat(int argc, char **argv)
 
 /* --- fs ------------------------------------------------------------------ */
 
+/* fs_name_fits — false (with a message) if name is too long to store.
+ * fs_open() refuses such a name; this just says why instead of a bare
+ * "cannot open".  Device paths (/dev/...) are all short enough. */
+static bool fs_name_fits(const char *cmd, const char *name)
+{
+    const char *n = (name[0] == '/') ? name + 1 : name;
+    if (strlen(n) < FS_NAME_MAX) {
+        return true;
+    }
+    shell_print("%s: name '%s' is too long (max %u characters)\r\n",
+                cmd, name, (unsigned)(FS_NAME_MAX - 1u));
+    return false;
+}
+
 /* fs write <file>          — interactive multi-line mode (end with '.' alone)
  * fs write <file> <text>   — write a single line and newline, overwriting file
  * fs append <file> <text>  — append a line and newline to an existing file
@@ -409,6 +421,9 @@ static int cmd_fs(int argc, char **argv)
             shell_println("Usage: fs write <file> [text]");
             shell_println("       Without [text]: interactive multi-line mode.");
             shell_println("       End input with a single '.' on its own line.");
+            return -1;
+        }
+        if (!fs_name_fits("fs write", argv[2])) {
             return -1;
         }
 
@@ -443,15 +458,15 @@ static int cmd_fs(int argc, char **argv)
                 if (n == 1 && line[0] == '.') {
                     break;   /* sentinel: done */
                 }
-                /* Append newline so file has proper line endings. */
-                strncat(line, "\n", sizeof(line) - (size_t)n - 1u);
-                int w = vfs_write(fd, (const uint8_t *)line,
-                                  (uint32_t)strlen(line));
-                if (w < 0) {
+                /* Then the newline, as its own write: a full-length line
+                 * (SHELL_LINE_MAX - 1 chars) leaves no room for it in line[]. */
+                int w  = vfs_write(fd, (const uint8_t *)line, (uint32_t)n);
+                int nl = (w >= 0) ? vfs_write(fd, (const uint8_t *)"\n", 1u) : -1;
+                if (w < 0 || nl < 0) {
                     shell_println("fs write: write error (file full?)");
                     break;
                 }
-                total += w;
+                total += w + nl;
             }
         }
 
@@ -471,6 +486,9 @@ static int cmd_fs(int argc, char **argv)
     if (strcmp(sub, "append") == 0) {
         if (argc < 4) {
             shell_println("Usage: fs append <file> <text>");
+            return -1;
+        }
+        if (!fs_name_fits("fs append", argv[2])) {
             return -1;
         }
 

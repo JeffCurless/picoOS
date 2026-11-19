@@ -47,11 +47,9 @@ typedef enum {
 typedef struct {
     bool     used;
     vfs_type_t type;
-    char     path[VFS_PATH_MAX];
-    uint32_t pos;
     dev_id_t dev_id;       /* valid when type == VFS_TYPE_DEV  */
-    uint32_t fs_file_id;   /* valid when type == VFS_TYPE_FILE */
-    int      mode;
+    uint32_t fs_file_id;   /* valid when type == VFS_TYPE_FILE; fs.c keeps
+                            * the position and enforces the open mode    */
     uint32_t owner_pid;    /* process that opened it (0 = no thread, e.g.
                             * before the scheduler starts: never reaped)  */
     uint32_t owner_serial; /* that process's pcb_t.serial when it opened  */

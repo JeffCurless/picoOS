@@ -290,10 +290,6 @@ be freed.
 ### 3.7 Additional Task API
 
 ```c
-// Count of live threads / processes (across all slots)
-int task_thread_count(void);
-int task_process_count(void);
-
 // Raw slot access — used by 'ps' and 'threads' shell commands
 // Returns the TCB/PCB at index idx, or NULL if the slot is empty
 tcb_t *task_get_thread_slot(int idx);
@@ -477,6 +473,11 @@ vfs_close(fd);
 | `VFS_O_APPEND` | 0x10 | Start writing at the end of the file |
 
 `vfs_open` returns a non-negative file descriptor on success, or `-1` on failure.
+A filesystem name is 1 to 15 characters (`FS_NAME_MAX - 1`) after an optional
+leading `/`; a longer or empty name fails instead of being stored cut short.
+Written data reaches flash at `vfs_close`; until then other descriptors (and `ls`)
+see the file as it was.  A descriptor left open on a file that is deleted or
+formatted away fails every read and write until it is closed.
 Maximum simultaneously open VFS descriptors: `VFS_MAX_OPEN = 16`, of which at most
 `FS_MAX_OPEN_FDS = 8` can be filesystem files.  Only one file can be open for writing
 at a time.
@@ -1065,7 +1066,7 @@ typedef struct {
 |----------|-------|---------|
 | `FS_MAX_FILES` | 64 (RP2040) / 127 (RP2350) | Maximum number of files — set per-board by CMake |
 | `FS_MAX_FILE_DATA` | 4096 bytes | Maximum size per file |
-| `FS_NAME_MAX` | 16 | Filename buffer (15 chars + NUL) |
+| `FS_NAME_MAX` | 16 | Filename buffer (15 chars + NUL); longer names are refused |
 | `FS_BLOCK_SIZE` | 4096 bytes | Flash erase sector size |
 
 ---

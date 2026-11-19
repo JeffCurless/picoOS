@@ -305,6 +305,11 @@ def upload_file(ser: serial.Serial, local_path: str, remote_name: str):
         return False
 
     remote_name = os.path.basename(remote_name)
+    # FS_NAME_MAX is 16 including the NUL.  A longer name is refused, and
+    # every line sent after the failed 'fs write' would run as a command.
+    if not 1 <= len(remote_name) <= 15:
+        print(f"[upload] ERROR: '{remote_name}' must be 1-15 characters.")
+        return False
     lines = text.splitlines()
 
     print(f"[upload] Uploading '{local_path}' -> '{remote_name}' "

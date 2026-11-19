@@ -703,29 +703,3 @@ void task_kill_process(pcb_t *proc)
         task_kill_thread(snapshot[i]);
     }
 }
-
-/* -------------------------------------------------------------------------
- * Counts
- * ------------------------------------------------------------------------- */
-
-int task_thread_count(void)
-{
-    int n = 0;
-    for (int i = 0; i < MAX_THREADS; i++) {
-        if (tcb_used[i]) {
-            n++;
-        }
-    }
-    return n;
-}
-
-int task_process_count(void)
-{
-    int n = 0;
-    for (int i = 0; i < MAX_PROCESSES; i++) {
-        if (pcb_used[i]) {
-            n++;
-        }
-    }
-    return n;
-}
