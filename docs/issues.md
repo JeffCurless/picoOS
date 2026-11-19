@@ -1,6 +1,6 @@
 # picoOS Outstanding Issues
 
-Known bugs and loose ends in picoOS, as of v0.5.2 (2026-11-18). Every entry was
+Known bugs and loose ends in picoOS, as of v0.5.3 (2026-11-19). Every entry was
 checked against the code at that version.
 
 This is a different list from [imperfections.md](imperfections.md). An

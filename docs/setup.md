@@ -244,6 +244,7 @@ cmake -B builds/pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico \
 | `PICOOS_DISPLAY_ENABLE` | ON | ST7789 driver + `/dev/display` |
 | `PICOOS_DISPLAY_PACK2` | OFF | Use Display Pack 2 (320×240, ~75 KB framebuffer) instead of Display Pack (240×135, ~32 KB) |
 | `PICOOS_DISPLAY_SHELL` | ON | `display` shell command |
+| `PICOOS_SPLASH_IMAGE` | empty | Boot splash image for Display Pack builds (see below) |
 | `PICOOS_LED_ENABLE` | ON | RGB LED driver + `/dev/led` |
 | `PICOOS_LED_SHELL` | ON | `led` shell command |
 | `PICOOS_BT_ENABLE` | ON | Bluetooth scanning on pico_w / pico2_w; ignored on boards without a CYW43 |
@@ -252,6 +253,18 @@ cmake -B builds/pico -DPICO_SDK_PATH="$HOME/pico-sdk" -DPICO_BOARD=pico \
 | `PICOOS_SCAN_RACE_INJECT` | OFF | **Test only** — re-opens the scan-buffer race for `scantest`; never flash these images for normal use |
 
 Setting `PICOOS_DISPLAY_ENABLE=OFF` cascades OFF to all sub-features.  Setting any sub-feature ON automatically enables `PICOOS_DISPLAY_ENABLE`.
+
+### Boot splash image (optional)
+
+A Display Pack build boots to a blue screen with the version.  To show your own picture instead, point `PICOOS_SPLASH_IMAGE` at any image Pillow can read (PNG, JPEG, BMP, …):
+
+```bash
+pip install pillow                                   # only needed with a splash image
+PICOOS_SPLASH_IMAGE=art/logo.png ./build pico        # the _D/_D2 variants get the image
+cmake -B builds/pico_D … -DPICOOS_SPLASH_IMAGE=art/logo.png   # or by hand
+```
+
+At build time `tools/mkimage.py` scales it to the panel (240×135 or 320×240; aspect ratio kept, black borders), converts it to RGB332 with dithering, and compiles it in as a `const` array.  It lives in flash (32,400 B Display Pack / 76,800 B Display Pack 2) and uses no SRAM.  No-display variants ignore it.  Without the option nothing is generated and the version splash is shown.  A relative path is taken from the top-level source directory.  CMake stops with an error if the file is missing or Pillow is not installed.  `./build` always passes the variable, so running it without `PICOOS_SPLASH_IMAGE` set takes an earlier image out of the build directories.  To check the result on the host, or to crop (`--fill`) or stretch (`--stretch`) instead of fitting, run the tool yourself: `python3 tools/mkimage.py logo.png /tmp/s.c --width 240 --height 135 --preview /tmp/p.png`.
 
 ### Incremental builds
 

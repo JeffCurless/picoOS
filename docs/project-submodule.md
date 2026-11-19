@@ -222,6 +222,17 @@ To check that the flags are applied, build with `make VERBOSE=1` and look for `-
 
 The same rule applies to any other per-source property you set on your app files from the project root, such as `COMPILE_DEFINITIONS`: pass `TARGET_DIRECTORY picoos` there as well.
 
+### Optional: boot splash image
+
+On Display Pack builds your project can replace the "picoOS M.m.e" boot screen with its own image.  Set `PICOOS_SPLASH_IMAGE` as a normal variable before `add_subdirectory(picoOS/src)`:
+
+```cmake
+set(PICOOS_SPLASH_IMAGE ${CMAKE_CURRENT_SOURCE_DIR}/art/logo.png)
+add_subdirectory(picoOS/src)
+```
+
+`picoOS/tools/mkimage.py` converts the image at build time into a `const` RGB332 array sized for the panel the build targets, and rebuilds it when the image changes.  It costs flash only (32,400 B Display Pack / 76,800 B Display Pack 2), no SRAM, and is shown the moment the display starts, before the filesystem is mounted.  The build host needs Python 3 with Pillow (`pip install pillow`).  Builds without a display ignore the variable.  See "Boot splash image" in `docs/setup.md`.
+
 ---
 
 ## Step 5 — Create the `build` script

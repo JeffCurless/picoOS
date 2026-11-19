@@ -3,7 +3,7 @@
 # ---------------------------------------------------------------------------
 set(PICOOS_VERSION_MAJOR 0)
 set(PICOOS_VERSION_MINOR 5)
-set(PICOOS_VERSION_EDIT  2)
+set(PICOOS_VERSION_EDIT  3)
 
 message(STATUS "picoOS version        : ${PICOOS_VERSION_MAJOR}.${PICOOS_VERSION_MINOR}.${PICOOS_VERSION_EDIT}")
 
@@ -249,6 +249,65 @@ if(PICOOS_HAS_BT)
     list(APPEND PICOOS_SOURCES kernel/bluetooth.c)
 endif()
 
+# ---------------------------------------------------------------------------
+# Boot splash image (Display Pack builds only)
+#
+# Set PICOOS_SPLASH_IMAGE to any image Pillow can read (PNG, JPEG, BMP, ...)
+# and tools/mkimage.py converts it at build time into a const RGB332 array,
+# shown by display_open() in place of the "picoOS M.m.e" splash.  The array
+# lives in flash (32,400 B Display Pack / 76,800 B Display Pack 2), not SRAM.
+# Unset (the default): nothing is generated and the version splash is shown.
+#
+#   cmake -B builds/x -DPICOOS_SPLASH_IMAGE=art/logo.png     # or, in a parent
+#   set(PICOOS_SPLASH_IMAGE ${CMAKE_CURRENT_SOURCE_DIR}/art/logo.png)
+#
+# A relative path is taken from the top-level source directory.  Requires
+# Python 3 with Pillow (pip install pillow) on the build host.
+# ---------------------------------------------------------------------------
+if(NOT DEFINED PICOOS_SPLASH_IMAGE)
+    set(PICOOS_SPLASH_IMAGE "" CACHE FILEPATH "Boot splash image for Display Pack builds (empty = version text)")
+endif()
+
+set(_picoos_splash OFF)
+if(PICOOS_SPLASH_IMAGE AND NOT PICOOS_DISPLAY_ENABLE)
+    message(STATUS "picoOS splash image   : ignored (no display)")
+elseif(PICOOS_SPLASH_IMAGE)
+    get_filename_component(_splash_src "${PICOOS_SPLASH_IMAGE}" ABSOLUTE
+                           BASE_DIR "${CMAKE_SOURCE_DIR}")
+    if(NOT EXISTS "${_splash_src}")
+        message(FATAL_ERROR "PICOOS_SPLASH_IMAGE: '${_splash_src}' does not exist")
+    endif()
+
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    execute_process(COMMAND ${Python3_EXECUTABLE} -c "import PIL"
+                    RESULT_VARIABLE _pil_rc OUTPUT_QUIET ERROR_QUIET)
+    if(NOT _pil_rc EQUAL 0)
+        message(FATAL_ERROR "PICOOS_SPLASH_IMAGE needs Pillow for "
+                            "${Python3_EXECUTABLE}: pip install pillow")
+    endif()
+
+    if(PICOOS_DISPLAY_PACK2)
+        set(_splash_w 320)
+        set(_splash_h 240)
+    else()
+        set(_splash_w 240)
+        set(_splash_h 135)
+    endif()
+
+    set(_splash_tool "${CMAKE_CURRENT_SOURCE_DIR}/../tools/mkimage.py")
+    set(_splash_c    "${CMAKE_CURRENT_BINARY_DIR}/splash_img.c")
+    add_custom_command(
+        OUTPUT  "${_splash_c}"
+        COMMAND ${Python3_EXECUTABLE} "${_splash_tool}" "${_splash_src}" "${_splash_c}"
+                --width ${_splash_w} --height ${_splash_h}
+        DEPENDS "${_splash_src}" "${_splash_tool}"
+        COMMENT "Converting splash image ${_splash_src}"
+        VERBATIM)
+    list(APPEND PICOOS_SOURCES "${_splash_c}")
+    set(_picoos_splash ON)
+    message(STATUS "picoOS splash image   : ${_splash_src} (${_splash_w}x${_splash_h})")
+endif()
+
 # Inject parent-project app sources (absolute paths required).
 if(PICOOS_APP_SOURCES)
     list(APPEND PICOOS_SOURCES ${PICOOS_APP_SOURCES})
@@ -370,6 +429,10 @@ endif()
 
 if(PICOOS_DISPLAY_SHELL)
     target_compile_definitions(picoos PRIVATE PICOOS_DISPLAY_SHELL=1)
+endif()
+
+if(_picoos_splash)
+    target_compile_definitions(picoos PRIVATE PICOOS_HAS_SPLASH_IMAGE=1)
 endif()
 
 if(PICOOS_LED_ENABLE)
