@@ -15,6 +15,7 @@
 # Output naming:     <board>os-v<ver>  <board>os_D-v<ver>  <board>os_D2-v<ver>
 #
 # Override the SDK path: PICO_SDK_PATH=/path/to/pico-sdk ./build
+# Build type (default MinSizeRel, -Os): PICOOS_BUILD_TYPE=Release ./build
 
 SDK="${PICO_SDK_PATH:-$HOME/workspace/pico-sdk}"
 
@@ -63,7 +64,11 @@ build_variant() {
 
     local dir="$BUILDS/${board}_${disp}"
     echo "--- ${board} / ${disp} ---"
-    cmake -B "$dir" -DPICO_SDK_PATH="$SDK" -DPICO_BOARD="$board" $flags || return 1
+    # Explicit build type: an existing build dir keeps whatever type its
+    # CMakeCache.txt holds, so the CMakeLists.txt default alone would not
+    # move old trees off Release (-O3).
+    cmake -B "$dir" -DPICO_SDK_PATH="$SDK" -DPICO_BOARD="$board" \
+          -DCMAKE_BUILD_TYPE="${PICOOS_BUILD_TYPE:-MinSizeRel}" $flags || return 1
     make -j"$JOBS" -C "$dir"                                              || return 1
     cp -f "$dir"/src/*.uf2 kits/
 }

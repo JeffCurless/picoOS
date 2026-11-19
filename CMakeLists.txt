@@ -16,6 +16,15 @@ elseif(PICO_BOARD STREQUAL "pico2w")
 endif()
 
 # Pull in the Pico SDK before the project() call so the toolchain is set.
+# Optimise for size by default (-Os).  The SDK would otherwise pick Release
+# (-O3), which inlines and unrolls the kernel's pool loops: about 25% more
+# flash for no benefit that matters here.  Must be set before the SDK import,
+# which applies its own default.  Override with -DCMAKE_BUILD_TYPE=Release.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE MinSizeRel CACHE STRING
+        "Choose the type of build, options are: 'Debug', 'Release', 'MinSizeRel', 'RelWithDebInfo'.")
+endif()
+
 include(pico_sdk_import.cmake)
 
 project(picoos C CXX ASM)
