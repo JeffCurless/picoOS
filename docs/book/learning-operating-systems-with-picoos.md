@@ -201,7 +201,7 @@ Keep a Pico plugged in and a terminal open while you read. An operating system i
 - `$ ./build pico` — a command typed on your computer.
 - **RP2040** means the original Pico and Pico W; **RP2350** means the Pico 2 and Pico 2 W.
 
-This edition describes picoOS v0.5.2.
+This edition describes picoOS v0.5.3.
 
 <a id="ch-1"></a>
 ## Chapter 1 — Getting Started
@@ -254,7 +254,7 @@ From the picoOS directory:
 ./build             # builds all 12 variants
 ```
 
-`build` is a script, not a folder. Never delete it. picoOS treats every compiler warning in its own code as an error, so a build either finishes cleanly or stops at the first variant with a problem and prints `BUILD FAILED`. Each board is compiled in its own `builds/<board>_<variant>/` directory, and the finished images are copied to `kits/`. A file name such as `picoos_D-v0.5.2.uf2` means: pico board, Display Pack build (`_D`), version 0.5.2. `_D2` means Display Pack 2; no suffix means no display.
+`build` is a script, not a folder. Never delete it. picoOS treats every compiler warning in its own code as an error, so a build either finishes cleanly or stops at the first variant with a problem and prints `BUILD FAILED`. Each board is compiled in its own `builds/<board>_<variant>/` directory, and the finished images are copied to `kits/`. A file name such as `picoos_D-v0.5.3.uf2` means: pico board, Display Pack build (`_D`), version 0.5.3. `_D2` means Display Pack 2; no suffix means no display.
 
 <a id="s-1-4"></a>
 ### 1.4 Flash
@@ -277,7 +277,7 @@ The script finds the Pico by its USB ID. You should see a banner like this:
 
 ```
 =======================================================
-picoOS  v0.5.2
+picoOS  v0.5.3
 
   Platform : RP2040, dual ARM Cortex-M0+ (133 MHz max)
   Options  : DISPLAY_PACK
@@ -381,9 +381,12 @@ The choices are CMake options, declared and explained at the top of `src/CMakeLi
 | `PICOOS_DISPLAY_PACK2` | OFF | Drive the 320×240 Display Pack 2 instead of the 240×135 Display Pack. |
 | `PICOOS_LED_ENABLE` | ON | The pack's RGB LED and `/dev/led`. |
 | `PICOOS_DISPLAY_SHELL`, `PICOOS_LED_SHELL` | ON | The `display` and `led` shell commands. OFF keeps the driver for apps but drops the command. |
+| `PICOOS_SPLASH_IMAGE` | empty | An image file shown at boot on a Display Pack build instead of the version text. |
 | `PICOOS_INCLUDE_DEMO_APPS` | ON | The built-in apps: `producer`, `consumer`, `sensor`, `pi`, `hwtest` and, on W boards, `scantest`. A project that supplies its own apps turns this off. |
 
 The options depend on each other, and `src/CMakeLists.txt` enforces the rules. Turning the display off turns off the LED and both shell commands, because they all live on the same pack. The `led` command needs the LED driver. Bluetooth needs the radio and shares the WiFi driver's connection to it, so a W board can have WiFi without Bluetooth but not Bluetooth without WiFi.
+
+The splash image shows that build-time choices can carry data as well as code. A Display Pack build normally boots to a blue screen showing the version. Set `PICOOS_SPLASH_IMAGE` to a PNG or JPEG and the build runs `tools/mkimage.py`. It scales the picture to the panel, converts each pixel to the display's one-byte RGB332 format, and writes the result as a C file holding one `const` array. Because the array is `const`, the linker leaves it in flash, and the CPU reads it there the way it reads code: the image costs 32 KB (Display Pack) or 75 KB (Display Pack 2) of flash and no SRAM. `display_open()` copies it into the framebuffer when the display starts. It needs no filesystem, so it appears as early as the version text did. Leave the option empty and the array is never generated, so the image costs nothing.
 
 A few more options tune the kernel itself rather than the hardware: `PICOOS_HEAP_KB`, `PICOOS_MAX_THREADS` and `PICOOS_MAX_PROCESSES` size the heap and the thread and process tables (Chapters 4 and 7), and `PICOOS_LOCK_DEBUG` adds a deadlock detector (Chapter 8).
 
@@ -408,7 +411,7 @@ cmake -B builds/picow_nobt -DPICO_BOARD=picow \
 make -j4 -C builds/picow_nobt
 ```
 
-CMake prints a summary of the options it settled on, and the boot banner's `Options` line shows what the image contains. Check it, because the file name records only the board and the display: this image is called `picowos-v0.5.2.uf2`, the same as the standard Pico W build with Bluetooth.
+CMake prints a summary of the options it settled on, and the boot banner's `Options` line shows what the image contains. Check it, because the file name records only the board and the display: this image is called `picowos-v0.5.3.uf2`, the same as the standard Pico W build with Bluetooth.
 
 <a id="s-2-6"></a>
 ### 2.6 Three words you will meet everywhere
@@ -971,7 +974,7 @@ Both cores call `kmalloc()`. If both walked and split the same free block at the
 - `pico> mem`, then `run producer`, `run consumer`, `run sensor`, and `mem` again. How much did each thread cost?
 - Kill one in the middle (`kill <tid>`), start a different one, and look at "Largest free".
 - Run the host tests with `./build tests`. Read `tests/mem/` to see a fragmentation test that needs no hardware.
-- Run `python3 tools/mem_report.py builds/pico_D/src/picoos_D-v0.5.2.elf.map` and find the heap array.
+- Run `python3 tools/mem_report.py builds/pico_D/src/picoos_D-v0.5.3.elf.map` and find the heap array.
 
 <a id="s-7-10"></a>
 ### 7.10 Think about it

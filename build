@@ -16,6 +16,8 @@
 #
 # Override the SDK path: PICO_SDK_PATH=/path/to/pico-sdk ./build
 # Build type (default MinSizeRel, -Os): PICOOS_BUILD_TYPE=Release ./build
+# Boot splash image for the _D/_D2 variants: PICOOS_SPLASH_IMAGE=art/logo.png ./build
+#   (needs Pillow; unset = the "picoOS M.m.e" version splash)
 
 SDK="${PICO_SDK_PATH:-$HOME/workspace/pico-sdk}"
 
@@ -27,6 +29,14 @@ if [ -z "$PICOTOOL_FETCH_FROM_GIT_PATH" ] && [ -d "$HOME/workspace/picotool-inst
     export PICOTOOL_FETCH_FROM_GIT_PATH="$HOME/workspace/picotool-install"
 fi
 JOBS="$(nproc)"
+
+# Always passed, so an image left in a build dir's CMakeCache.txt from an
+# earlier run is cleared when PICOOS_SPLASH_IMAGE is unset.
+SPLASH=""
+if [ -n "$PICOOS_SPLASH_IMAGE" ]; then
+    SPLASH="$(realpath -e "$PICOOS_SPLASH_IMAGE")" \
+        || { echo "PICOOS_SPLASH_IMAGE: '$PICOOS_SPLASH_IMAGE' not found" >&2; exit 1; }
+fi
 BUILDS="builds"     # every build tree lives under here
 
 # ---------------------------------------------------------------------------
@@ -68,7 +78,8 @@ build_variant() {
     # CMakeCache.txt holds, so the CMakeLists.txt default alone would not
     # move old trees off Release (-O3).
     cmake -B "$dir" -DPICO_SDK_PATH="$SDK" -DPICO_BOARD="$board" \
-          -DCMAKE_BUILD_TYPE="${PICOOS_BUILD_TYPE:-MinSizeRel}" $flags || return 1
+          -DCMAKE_BUILD_TYPE="${PICOOS_BUILD_TYPE:-MinSizeRel}" \
+          -DPICOOS_SPLASH_IMAGE="$SPLASH" $flags                       || return 1
     make -j"$JOBS" -C "$dir"                                              || return 1
     cp -f "$dir"/src/*.uf2 kits/
 }

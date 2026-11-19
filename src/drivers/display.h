@@ -67,6 +67,15 @@
 #define COLOR_MAGENTA RGB332(255,   0, 255)
 
 /* -------------------------------------------------------------------------
+ * Boot splash image — generated at build time by tools/mkimage.py from
+ * PICOOS_SPLASH_IMAGE (src/CMakeLists.txt).  One RGB332 byte per pixel,
+ * row-major, exactly the framebuffer layout.  const, so it stays in flash.
+ * ------------------------------------------------------------------------- */
+#ifdef PICOOS_HAS_SPLASH_IMAGE
+extern const uint8_t picoos_splash_img[DISP_WIDTH * DISP_HEIGHT];
+#endif
+
+/* -------------------------------------------------------------------------
  * Called by dev_init() to register the 'display' shell command.
  * ------------------------------------------------------------------------- */
 void display_shell_register(void);

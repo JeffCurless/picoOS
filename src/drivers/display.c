@@ -539,27 +539,35 @@ static void draw_text_impl(int px, int py, const char *str,
  * Device interface
  * ========================================================================= */
 
+/* splash_draw — boot splash, flushed at once for the earliest possible
+ * visual feedback (display_open() runs from dev_init(), before the FS).
+ * With a build-time image (PICOOS_SPLASH_IMAGE) it is copied from flash
+ * as is; otherwise a blue screen with the centred version text. */
+static void splash_draw(void)
+{
+#ifdef PICOOS_HAS_SPLASH_IMAGE
+    memcpy(framebuffer, picoos_splash_img, sizeof(framebuffer));
+#else
+#ifdef PICOOS_DISPLAY_PACK2
+    const uint8_t scale = 3u;
+#else
+    const uint8_t scale = 2u;
+#endif
+    int tx = (int)((DISP_WIDTH  - (sizeof(PICOOS_SPLASH_TEXT) - 1u) * 8u * scale) / 2u);
+    int ty = (int)((DISP_HEIGHT - 8u * scale) / 2u);
+    memset(framebuffer, COLOR_BLUE, sizeof(framebuffer));
+    draw_text_impl(tx, ty, PICOOS_SPLASH_TEXT, COLOR_WHITE, COLOR_BLUE, scale);
+#endif
+    dirty_mark_all();
+    display_flush_fb();
+}
+
 int display_open(void)
 {
     if (!initialized) {
         display_hw_init();
         initialized = true;
-
-        /* Splash: blue fill + centered title, flushed immediately to give the
-         * earliest possible visual feedback and assess boot-splash feasibility. */
-        {
-#ifdef PICOOS_DISPLAY_PACK2
-            const uint8_t scale = 3u;
-#else
-            const uint8_t scale = 2u;
-#endif
-            int tx = (int)((DISP_WIDTH  - (sizeof(PICOOS_SPLASH_TEXT) - 1u) * 8u * scale) / 2u);
-            int ty = (int)((DISP_HEIGHT - 8u * scale) / 2u);
-            memset(framebuffer, COLOR_BLUE, sizeof(framebuffer));
-            dirty_mark_all();
-            draw_text_impl(tx, ty, PICOOS_SPLASH_TEXT, COLOR_WHITE, COLOR_BLUE, scale);
-            display_flush_fb();
-        }
+        splash_draw();
     }
     write_cursor = 0u;
     return 0;
