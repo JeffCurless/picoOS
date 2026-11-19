@@ -119,6 +119,8 @@ typedef enum {
  * Do NOT reorder these first six fields without updating sched_asm.S.
  * ------------------------------------------------------------------------- */
 
+struct spinlock;   /* sync.h; tcb_t only points at one */
+
 typedef struct tcb {
     uint32_t        tid;            /* Unique thread ID                      */
     uint32_t        pid;            /* PID of the owning process             */
@@ -148,6 +150,11 @@ typedef struct tcb {
                                      * its ready queue when it joins a waiter
                                      * list, and sharing one link cut the
                                      * ready queue behind it.                */
+    struct tcb    **wait_list;      /* Head of the waiter list it is on, and */
+    struct spinlock *wait_lock;     /* the lock guarding it; both NULL when
+                                     * on none.  Written under that lock
+                                     * (sync.c).  A kill uses them to unlink
+                                     * a blocked thread and free it at once. */
 
 #ifdef PICOOS_LOCK_DEBUG
     /* -----------------------------------------------------------------------

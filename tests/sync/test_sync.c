@@ -763,6 +763,82 @@ static void test_lock_debug_spinlock_timeout_fires(void)
 /* -------------------------------------------------------------------------
  * main
  * ------------------------------------------------------------------------- */
+/* -------------------------------------------------------------------------
+ * Kill of a blocked thread (#5)
+ *
+ * A thread killed while it waits on a primitive used to stay on the waiter
+ * list until the primitive was signalled again; if it never was, the TCB
+ * and stack leaked.  sync_kill() now unlinks it under the list's lock and
+ * hands it back to be freed.  The tests block the one mock thread, and the
+ * yield hook (running "while it is blocked") kills it, checks, then lets
+ * the wait finish so the test can continue.
+ * ------------------------------------------------------------------------- */
+static ksemaphore_t   kb_sem;
+static event_flags_t  kb_ev;
+static kill_result_t  kb_result;
+static bool           kb_was_listed;
+static bool           kb_list_empty;
+static bool           kb_fields_clear;
+
+static void kill_blocked_sem_hook(void)
+{
+    tcb_t *self    = (tcb_t *)current_tcb[0];
+    kb_was_listed  = (kb_sem.waiters == self && self->wait_list == &kb_sem.waiters &&
+                      self->wait_lock == &kb_sem.spin);
+    kb_result      = sync_kill(self);
+    kb_list_empty  = (kb_sem.waiters == NULL);
+    kb_fields_clear = (self->wait_list == NULL && self->wait_lock == NULL &&
+                       self->wait_next == NULL);
+    self->state    = THREAD_RUNNING;   /* the mock "thread" carries on */
+    kb_sem.count   = 1;                /* let ksemaphore_wait() return  */
+}
+
+static void test_kill_blocked_semaphore_waiter(void)
+{
+    BEGIN_TEST(kill_unlinks_blocked_semaphore_waiter);
+    ksemaphore_init(&kb_sem, 0);
+    mock_yield_hook = kill_blocked_sem_hook;
+    ksemaphore_wait(&kb_sem);
+
+    CHECK(kb_was_listed,   "the blocked thread records its list and lock");
+    CHECK(kb_result == KILL_FREE, "sync_kill hands a blocked waiter back to be freed");
+    CHECK(kb_list_empty,   "it is unlinked from the semaphore's waiter list");
+    CHECK(kb_fields_clear, "and its wait_list/wait_lock/wait_next are cleared");
+    END_TEST();
+}
+
+static void kill_blocked_event_hook(void)
+{
+    tcb_t *self    = (tcb_t *)current_tcb[0];
+    kb_was_listed  = (kb_ev.waiters == self && self->wait_lock == &kb_ev.spin);
+    kb_result      = sync_kill(self);
+    kb_list_empty  = (kb_ev.waiters == NULL);
+    self->state    = THREAD_RUNNING;
+    kb_ev.flags    = 0x1u;             /* let event_flags_wait() return */
+}
+
+static void test_kill_blocked_event_waiter(void)
+{
+    BEGIN_TEST(kill_unlinks_blocked_event_flags_waiter);
+    event_flags_init(&kb_ev);
+    mock_yield_hook = kill_blocked_event_hook;
+    (void)event_flags_wait(&kb_ev, 0x1u, false);
+
+    CHECK(kb_was_listed,   "the blocked thread is on the event-flags list");
+    CHECK(kb_result == KILL_FREE, "sync_kill hands it back to be freed");
+    CHECK(kb_list_empty,   "it is unlinked from the event-flags waiter list");
+    END_TEST();
+}
+
+static void test_kill_unblocked_thread_not_unlinked(void)
+{
+    BEGIN_TEST(kill_of_thread_on_no_list_leaves_lists_alone);
+    tcb_t *self = (tcb_t *)current_tcb[0];
+    CHECK(self->wait_lock == NULL, "a running thread is on no waiter list");
+    CHECK(sync_kill(self) == KILL_DONE, "the mock sched_kill decides (nothing to unlink)");
+    END_TEST();
+}
+
 int main(void)
 {
     printf("picoOS sync primitives — unit tests\n");
@@ -809,6 +885,9 @@ int main(void)
     test_mqueue_drain_to_empty();
     test_mqueue_msg_content_integrity();
     test_mqueue_interleaved_send_recv();
+    test_kill_blocked_semaphore_waiter();
+    test_kill_blocked_event_waiter();
+    test_kill_unblocked_thread_not_unlinked();
 
 #ifdef PICOOS_LOCK_DEBUG
     printf("\nDeadlock detection (PICOOS_LOCK_DEBUG)\n");

@@ -381,7 +381,7 @@ delim_1 ", "
 '''
 
 
-def title_page(title, author, version, url, when):
+def title_page(title, author, version, when):
     return [
         r"\begin{titlepage}", r"\centering", r"\vspace*{0.25\textheight}",
         r"{\sffamily\bfseries\Huge " + tex_escape(title) + r"\par}",
@@ -393,8 +393,7 @@ def title_page(title, author, version, url, when):
         r"\thispagestyle{empty}", r"\vspace*{\fill}", r"\noindent",
         r"\textit{" + tex_escape(title) + r"}\\[2pt]",
         tex_escape(author) + r"\\[2pt]",
-        r"Edition for picoOS " + tex_escape(version) + ", typeset " + when + r".\\[8pt]",
-        (r"Online edition:\\{\small\url{" + url + "}}") if url else "",
+        r"Edition for picoOS " + tex_escape(version) + ", typeset " + when + r".",
         r"\cleardoublepage", "",
     ]
 
@@ -404,7 +403,6 @@ def convert(md):
     title = lines[0].lstrip("# ").strip()
     byline = lines[2] if len(lines) > 2 else ""
     author = byline.split(" · ")[0].strip()
-    url_m = re.search(r"\((https?://[^)]+)\)", byline)
     ver_m = re.search(r"describes picoOS (v[\d.]+\d)", md)
 
     _, sections, _ = toc.number_sections(lines)
@@ -412,7 +410,6 @@ def convert(md):
 
     out = [r"\begin{document}", r"\frontmatter"]
     out += title_page(title, author, ver_m.group(1) if ver_m else "",
-                      url_m.group(1) if url_m else "",
                       datetime.date.today().strftime("%B %Y"))
     out += [r"\tableofcontents", ""]
 

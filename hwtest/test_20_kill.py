@@ -124,3 +124,12 @@ def test_no_threads_left_behind(ctx):
     names = sorted(t["name"] for t in p.threads().values())
     leftovers = [n for n in names if re.match(r"hwt|hwtest", n)]
     check(not leftovers, f"test threads still alive: {leftovers}")
+
+
+def test_device_kill_blocked(ctx):
+    """#5: a thread killed while it waits on a semaphore, event flags, a
+    message queue (either side) or a mutex that is never signalled is freed
+    at once: gone from the thread table, off the waiter list, stack back on
+    the heap.  Then MAX_THREADS + 8 kills in a row, which used to run the
+    thread pool dry."""
+    _run_device_test(ctx.pico, "kill-blocked", timeout=60.0)

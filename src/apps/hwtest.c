@@ -33,6 +33,7 @@
  *   run hwtest kill-file       self-checking: a killed process's files are closed (#26)
  *   run hwtest fs-longname     self-checking: an over-long file name is refused (#7)
  *   run hwtest fs-fds          self-checking: readers during a write, deleted-file fds (#31, #8)
+ *   run hwtest kill-blocked    self-checking: a killed waiter is freed at once (#5)
  *   run hwtest holdmutex       holder: lock a mutex for HOLD_MS, then unlock
  *   run hwtest holdfile        holder: keep hwt_hold.txt open for writing, forever
  *   run hwtest leakfile        holder: write hwt_leak.txt and exit without closing
@@ -314,6 +315,126 @@ static void mode_fs_fds(void)
     check(fs_delete(FDS_B) == 0, "clean up");
 }
 
+/* -------------------------------------------------------------------------
+ * kill-blocked (#5) — a thread killed while it waits on a primitive that
+ * is never signalled must be freed at once.  It used to stay on the
+ * waiter list as a ZOMBIE until the next wake-up: with none coming, its
+ * TCB and stack leaked, and enough such kills used up the thread pool.
+ * ------------------------------------------------------------------------- */
+enum { KB_SEM, KB_EVENT, KB_MQ_RECV, KB_MQ_SEND, KB_MUTEX, KB_KINDS };
+
+static const char *const kb_names[KB_KINDS] = {
+    "semaphore", "event flags", "mqueue recv", "mqueue send", "mutex",
+};
+
+static ksemaphore_t   kb_sem;
+static event_flags_t  kb_ev;
+static mqueue_t       kb_mq;
+static kmutex_t       kb_mutex;
+static volatile bool  kb_started;
+static volatile bool  kb_returned;   /* must never be set: killed while waiting */
+
+static void kb_waiter(void *arg)
+{
+    uint32_t msg = 0u;
+    kb_started = true;
+    switch ((int)(intptr_t)arg) {
+    case KB_SEM:     ksemaphore_wait(&kb_sem);                 break;
+    case KB_EVENT:   (void)event_flags_wait(&kb_ev, 0x1u, false); break;
+    case KB_MQ_RECV: mqueue_recv(&kb_mq, &msg);                break;
+    case KB_MQ_SEND: mqueue_send(&kb_mq, &msg);                break;
+    case KB_MUTEX:   kmutex_lock(&kb_mutex); kmutex_unlock(&kb_mutex); break;
+    default:                                                   break;
+    }
+    kb_returned = true;
+}
+
+/* Start a waiter of this kind, wait until it is BLOCKED, kill it, and
+ * check it is gone at once with its list empty and its stack returned. */
+static bool kb_one(pcb_t *proc, int kind, bool report)
+{
+    uint32_t used_before, free_b, largest;
+    kmem_stats(&used_before, &free_b, &largest);
+
+    kb_started  = false;
+    kb_returned = false;
+    tcb_t *t = task_create_thread(proc, "hwt-waiter", kb_waiter, (void *)(intptr_t)kind,
+                                  4u, 1024u);
+    if (t == NULL) {
+        check(false, "create a waiter thread (pool or heap exhausted?)");
+        return false;
+    }
+    uint32_t tid = t->tid;
+
+    bool blocked = false;
+    for (int i = 0; i < 100 && !blocked; i++) {
+        sys_sleep(10);
+        tcb_t *w = task_find_thread(tid);
+        blocked = kb_started && w != NULL && w->state == THREAD_BLOCKED;
+    }
+
+    syscall_dispatch(SYS_KILL, tid, 0, 0, 0);
+
+    uint32_t used_after;
+    kmem_stats(&used_after, &free_b, &largest);
+    tcb_t *const *list = (kind == KB_SEM)     ? &kb_sem.waiters
+                       : (kind == KB_EVENT)   ? &kb_ev.waiters
+                       : (kind == KB_MQ_RECV) ? &kb_mq.recv_waiters
+                       : (kind == KB_MQ_SEND) ? &kb_mq.send_waiters
+                       :                        &kb_mutex.waiters;
+    bool ok = blocked && thread_gone(tid) && *list == NULL &&
+              used_after == used_before && !kb_returned;
+    if (report || !ok) {
+        shell_print("[hwtest]   %s waiter: blocked %d, gone %d, list empty %d, heap %+d B\r\n",
+                    kb_names[kind], (int)blocked, (int)thread_gone(tid),
+                    (int)(*list == NULL), (int)(used_after - used_before));
+        check(blocked, "waiter is BLOCKED before the kill");
+        check(thread_gone(tid), "killed waiter is freed at once");
+        check(*list == NULL, "and unlinked from the waiter list");
+        check(used_after == used_before, "and its stack is back on the heap");
+    }
+    return ok;
+}
+
+static void mode_kill_blocked(void)
+{
+    pcb_t *proc = task_find_process((uint32_t)sys_getpid());
+
+    ksemaphore_init(&kb_sem, 0);
+    event_flags_init(&kb_ev);
+    kmutex_init(&kb_mutex);
+
+    for (int kind = 0; kind < KB_KINDS; kind++) {
+        mqueue_init(&kb_mq, sizeof(uint32_t));
+        if (kind == KB_MQ_SEND) {
+            uint32_t m = 0u;
+            for (uint32_t i = 0u; i < MQ_MAX_MSG; i++) {
+                mqueue_send(&kb_mq, &m);   /* fill it, so the sender blocks */
+            }
+        }
+        if (kind == KB_MUTEX) {
+            kmutex_lock(&kb_mutex);        /* held by us: the waiter blocks */
+        }
+        kb_one(proc, kind, true);
+        if (kind == KB_MUTEX) {
+            kmutex_unlock(&kb_mutex);
+        }
+    }
+
+    /* More kills than there are TCBs: with a leak the pool runs out. */
+    int rounds = MAX_THREADS + 8, passed = 0;
+    for (int i = 0; i < rounds; i++) {
+        if (!kb_one(proc, KB_SEM, false)) {
+            break;
+        }
+        passed++;
+    }
+    shell_print("[hwtest]   %d of %d kill rounds clean\r\n", passed, rounds);
+    check(passed == rounds, "more kills than MAX_THREADS leak nothing");
+
+    check(!kb_returned, "no killed waiter ever returned from its wait");
+}
+
 /* =========================================================================
  * Holder modes — the host acts while these hold a state
  * ========================================================================= */
@@ -373,6 +494,7 @@ static const hwtest_mode_t modes[] = {
     { "kill-file",  mode_kill_file,  true,  "killed process's files are closed (#26)" },
     { "fs-longname", mode_fs_longname, true, "over-long file name is refused (#7)" },
     { "fs-fds",     mode_fs_fds,     true,  "readers during a write, deleted-file fds (#31, #8)" },
+    { "kill-blocked", mode_kill_blocked, true, "a killed waiter is freed at once (#5)" },
     { "holdmutex",  mode_holdmutex,  false, "hold a mutex for 3 s" },
     { "holdfile",   mode_holdfile,   false, "keep hwt_hold.txt open for writing" },
     { "leakfile",   mode_leakfile,   false, "exit with hwt_leak.txt still open" },
@@ -404,6 +526,6 @@ void hwtest(void *arg)
 
     shell_print("[hwtest] usage: run hwtest <mode>\r\n");
     for (size_t i = 0u; i < sizeof(modes) / sizeof(modes[0]); i++) {
-        shell_print("[hwtest]   %-11s %s\r\n", modes[i].name, modes[i].help);
+        shell_print("[hwtest]   %-12s %s\r\n", modes[i].name, modes[i].help);
     }
 }

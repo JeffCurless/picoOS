@@ -17,6 +17,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "task.h"
+#include "sched.h"   /* kill_result_t */
 
 /* -------------------------------------------------------------------------
  * Deadlock detection (debug builds only)
@@ -65,7 +66,7 @@
  * claim one only for hot, dedicated locks (sched_lock, heap_lock).  See
  * docs/locking.md for the full allocation picture.
  * ------------------------------------------------------------------------- */
-typedef struct {
+typedef struct spinlock {   /* tag: task.h points at it (tcb_t.wait_lock) */
     spin_lock_t      *hw;         /* RP2040 HW spinlock — SMP-safe; NULL until spinlock_init() */
     volatile uint32_t lock;       /* software sentinel (fallback / lock-debug) */
 #ifdef PICOOS_LOCK_DEBUG
@@ -217,5 +218,13 @@ void mqueue_recv_dbg(mqueue_t *q, void *msg_out, const char *file, int line);
 #define mqueue_recv(q, msg)              mqueue_recv_dbg(q, msg, __FILE__, __LINE__)
 
 #endif /* PICOOS_LOCK_DEBUG */
+
+/* -------------------------------------------------------------------------
+ * sync_kill — one attempt at killing thread t (task_kill_thread() repeats
+ * it on KILL_RETRY and frees t on KILL_FREE).  A thread blocked on a
+ * primitive is unlinked from its waiter list here, under that list's lock,
+ * so it is freed at once even if the primitive is never signalled again.
+ * ------------------------------------------------------------------------- */
+kill_result_t sync_kill(tcb_t *t);
 
 #endif /* KERNEL_SYNC_H */

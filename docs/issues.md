@@ -1,6 +1,6 @@
 # picoOS Outstanding Issues
 
-Known bugs and loose ends in picoOS, as of v0.5.1 (2026-11-18). Every entry was
+Known bugs and loose ends in picoOS, as of v0.5.2 (2026-11-18). Every entry was
 checked against the code at that version.
 
 This is a different list from [imperfections.md](imperfections.md). An
@@ -24,7 +24,6 @@ entries are both, and say so.
 
 | # | Severity | Area | Issue |
 |---|---|---|---|
-| 5 | Medium | kernel | A thread killed while blocked leaks if its primitive is never signalled |
 | 9 | Medium | bluetooth | One-shot `bt scan` drops Classic name requests |
 | 10 | Medium | apps | Re-running `producer` strands a waiting `consumer` |
 | 13 | Medium | sync | L2 ignored waiter-pool failure, L3 same-stripe nesting deadlock, L4 `spinlock_init` panic |
@@ -50,21 +49,6 @@ entries are both, and say so.
 ---
 
 ## Medium
-
-### #5 — A thread killed while blocked leaks if its primitive is never signalled
-
-**Where:** `sched_kill()` (`src/kernel/sched.c`), `sched_unblock()`, the waiter
-lists in `src/kernel/sync.c`.
-
-A thread killed while BLOCKED becomes a ZOMBIE, but it is still on the
-primitive's waiter list, so it can only be freed when that primitive wakes it
-(`sched_unblock()` frees it then). If the mutex, semaphore, queue or event is
-never signalled again, the TCB, its stack, and (if it was the last thread) the
-PCB are never freed. An event-flags waiter also keeps its slot in
-`event_waiter_pool[]`.
-
-**Fix idea:** record in the TCB what it is blocked on (the waiter-list head and
-its lock), so `sched_kill()` can unlink and free it at once.
 
 ### #9 — One-shot `bt scan` drops Classic name requests
 
@@ -302,6 +286,7 @@ left. Allocating the buffers when `scantest` starts would return it.
 
 | # | Issue | Version | Commit |
 |---|---|---|---|
+| 5 | A thread killed while blocked leaked if its primitive was never signalled | 0.5.2 | (pending) |
 | 7 | Names of 16+ characters stored cut short, duplicated on each create | 0.5.1 | 240f197 |
 | 8 | fs fd of a deleted file freed under the VFS, aliasing the next file | 0.5.1 | 240f197 |
 | 18 | `O_TRUNC` + close without a write: size 0 in RAM only | 0.5.1 | 240f197 |

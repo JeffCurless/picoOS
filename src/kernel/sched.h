@@ -68,9 +68,12 @@ void sched_yield(void);
 
 /*
  * sched_block — move thread t to BLOCKED state.  The thread will not be
- *               scheduled until sched_unblock() is called on it.
+ *               scheduled until sched_unblock() is called on it.  Returns
+ *               false, and makes t a ZOMBIE instead, if a kill is pending
+ *               on t and it holds no kmutex: the caller must then not put
+ *               it on a waiter list, and its yield reaps it.
  */
-void sched_block(tcb_t *t);
+bool sched_block(tcb_t *t);
 
 /*
  * sched_unblock — move thread t from BLOCKED back to READY and add it
@@ -82,13 +85,27 @@ void sched_block(tcb_t *t);
 bool sched_unblock(tcb_t *t);
 
 /*
- * sched_kill — mark t killed, under the scheduler lock.  Returns true if
- *              t is off-CPU and out of every queue, so the caller must
- *              task_free_thread() it now; false if it is freed later (it
- *              is the caller, is running on the other core, is waiting
- *              on a primitive, or holds a kmutex).  Use task_kill_thread() rather than this.
+ * sched_kill — mark t killed, under the scheduler lock.  Use
+ *              task_kill_thread() rather than this.
+ *
+ *   on_list   t->wait_list is set and the caller holds t->wait_lock, so a
+ *             BLOCKED t can be unlinked from its waiter list right now
+ *             (sync_kill() does that on KILL_FREE).
+ *
+ * Returns:
+ *   KILL_FREE   t is off-CPU and will be out of every queue: the caller
+ *               frees it (task_free_thread) once it has unlinked it.
+ *   KILL_DONE   nothing for the caller to do: t is the caller, already
+ *               dying, or freed later (it holds a kmutex, or is running on
+ *               the other core: kill_pending).
+ *   KILL_RETRY  t is BLOCKED but cannot be unlinked yet: it is still
+ *               switching out on the other core, its waker is between
+ *               dequeueing and waking it, or it is about to join a list.
+ *               Each window is a few instructions; yield and try again.
  */
-bool sched_kill(tcb_t *t);
+typedef enum { KILL_DONE, KILL_FREE, KILL_RETRY } kill_result_t;
+
+kill_result_t sched_kill(tcb_t *t, bool on_list);
 
 /*
  * sched_kill_point — called by kmutex_unlock() when the current thread has

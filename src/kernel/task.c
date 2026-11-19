@@ -269,6 +269,8 @@ tcb_t *task_create_thread(pcb_t      *proc,
     t->cpu_time_us  = 0;
     t->next       = NULL;
     t->wait_next  = NULL;
+    t->wait_list  = NULL;
+    t->wait_lock  = NULL;
 
     strncpy(t->name, name ? name : "thread", sizeof(t->name) - 1);
     t->name[sizeof(t->name) - 1] = '\0';
@@ -657,17 +659,27 @@ void task_free_process(pcb_t *p)
 /* -------------------------------------------------------------------------
  * task_kill_thread
  *
- * sched_kill() decides, under the scheduler lock, whether t can be freed
- * now.  A thread that is running (here or on the other core) or waiting on
- * a sync primitive cannot: freeing it would pull the stack out from under
- * a running CPU, or leave a dangling pointer in a waiter list.  Those are
- * freed later by sched_next_thread() or sched_unblock().  A thread holding
- * a kmutex keeps running until it releases the last one, then dies in
- * kmutex_unlock() (sched_kill_point).
+ * sync_kill() decides, under the waiter list's lock (if t is on one) and
+ * the scheduler lock, whether t can be freed now.  A thread blocked on a
+ * sync primitive is unlinked from the primitive's waiter list and freed
+ * here.  A thread that is running cannot be: freeing it would pull the
+ * stack out from under a CPU.  It is freed by sched_next_thread() when it
+ * switches out.  A thread holding a kmutex keeps running until it releases
+ * the last one, then dies in kmutex_unlock() (sched_kill_point).
+ *
+ * KILL_RETRY covers windows a few instructions wide (t blocking or being
+ * woken on the other core), so yielding and trying again ends quickly.
  * ------------------------------------------------------------------------- */
 void task_kill_thread(tcb_t *t)
 {
-    if (t != NULL && sched_kill(t)) {
+    if (t == NULL) {
+        return;
+    }
+    kill_result_t r;
+    while ((r = sync_kill(t)) == KILL_RETRY) {
+        sched_yield();
+    }
+    if (r == KILL_FREE) {
         task_free_thread(t);   /* also frees the PCB when last thread gone */
     }
 }

@@ -79,7 +79,7 @@ The kernel modules under test (`mem.c`, `sync.c`, `fs.c`, `vfs.c`) are compiled 
 
 ---
 
-### 2 — `test_sync` (39 tests) — synchronisation primitives
+### 2 — `test_sync` (42 tests) — synchronisation primitives
 
 **Source**: `tests/sync/test_sync.c`  
 **Module under test**: `src/kernel/sync.c`  
@@ -148,6 +148,9 @@ The mock also provides `lock_deadlock_panic()`, which instead of halting capture
 | `mqueue_drain_to_empty` | Fill then drain; count returns to 0 |
 | `mqueue_message_content_integrity` | All `MQ_MAX_MSG` unique payloads match exactly on receive |
 | `mqueue_interleaved_send_recv` | Alternating sends and receives preserve order and empty the queue |
+| `kill_unlinks_blocked_semaphore_waiter` | `sync_kill()` on a thread blocked on a semaphore returns `KILL_FREE`, unlinks it and clears its `wait_list`/`wait_lock`/`wait_next` (#5) |
+| `kill_unlinks_blocked_event_flags_waiter` | The same for an event-flags waiter (#5) |
+| `kill_of_thread_on_no_list_leaves_lists_alone` | A thread on no waiter list is left to `sched_kill()` (`KILL_DONE` in the mock) |
 
 #### Deadlock detection — `PICOOS_LOCK_DEBUG` (7 tests)
 

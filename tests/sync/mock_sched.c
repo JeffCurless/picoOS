@@ -69,7 +69,19 @@ void (*mock_yield_hook)(void) = NULL;
  * Core scheduler stubs used by sync.c
  * ========================================================================= */
 
-void sched_block(tcb_t *t)  { if (t) t->state = THREAD_BLOCKED; }
+bool sched_block(tcb_t *t)  { if (t) t->state = THREAD_BLOCKED; return t != NULL; }
+
+/* sched_kill: the real decision table lives in sched.c.  The mock covers
+ * what sync_kill() relies on: a BLOCKED thread whose list lock is held is
+ * marked dead and handed back to be unlinked and freed. */
+kill_result_t sched_kill(tcb_t *t, bool on_list)
+{
+    if (t != NULL && t->state == THREAD_BLOCKED && on_list) {
+        t->state = THREAD_ZOMBIE;
+        return KILL_FREE;
+    }
+    return KILL_DONE;
+}
 bool sched_unblock(tcb_t *t){ if (t) t->state = THREAD_READY; return t != NULL; }
 
 void sched_yield(void)
