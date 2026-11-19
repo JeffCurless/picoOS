@@ -10,7 +10,7 @@
 | `latex/` | Intermediate LaTeX files from `build_pdf.py`; ignored by git and safe to delete |
 | `book-outline.md`, `investigation-notes.md` | Earlier planning notes; not part of the book |
 
-The book is a local copy of the [online edition](https://claude.ai/code/artifact/dac58cfd-0013-4df3-931a-9dfa92107735). Edits made in one are not copied to the other automatically.
+This Markdown file is the only copy of the book: edit it here, then regenerate the contents, index and PDFs as below. (An earlier online edition was retired in 0.5.2.)
 
 ## Regenerating after edits
 

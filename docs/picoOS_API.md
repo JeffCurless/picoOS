@@ -266,7 +266,7 @@ A killed thread is freed only once nothing can still be using it:
 | Thread is… | Freed |
 |------------|-------|
 | READY, SLEEPING | at once |
-| BLOCKED on a mutex, semaphore, queue or event flags | when the primitive wakes it; the wake-up passes to the next waiter |
+| BLOCKED on a mutex, semaphore, queue or event flags | at once: the kill unlinks it from the primitive's waiter list (under that list's lock) |
 | running on the other core | when it next switches out (within one 10 ms time slice) |
 | the caller | at its next yield — `SYS_KILL` and the shell yield for you |
 | holding a `kmutex` (in any state above) | when it releases the last one: `kmutex_unlock()` ends the thread instead of returning. Until then it keeps running |

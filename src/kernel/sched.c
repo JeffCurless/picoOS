@@ -219,15 +219,25 @@ void sched_remove_thread(tcb_t *t)
 /* -------------------------------------------------------------------------
  * sched_block
  * ------------------------------------------------------------------------- */
-void sched_block(tcb_t *t)
+bool sched_block(tcb_t *t)
 {
     if (t == NULL) {
-        return;
+        return false;
     }
     uint32_t save = spinlock_irq_acquire(&sched_lock);
-    t->state = THREAD_BLOCKED;
+    /* Killed while it ran on the other core (sched_kill set kill_pending):
+     * die here rather than block.  Blocked with the kill still pending, it
+     * would wait on a primitive that may never be signalled (#5). */
+    bool block = !(t->kill_pending && t->mutex_depth == 0u);
+    if (block) {
+        t->state = THREAD_BLOCKED;
+    } else {
+        t->kill_pending = false;
+        t->state        = THREAD_ZOMBIE;   /* reaped at the caller's yield */
+    }
     sched_remove_thread_raw(t);
     spinlock_irq_release(&sched_lock, save);
+    return block;
 }
 
 /* -------------------------------------------------------------------------
@@ -241,10 +251,11 @@ bool sched_unblock(tcb_t *t)
     uint32_t save = spinlock_irq_acquire(&sched_lock);
 
     if (t->state == THREAD_ZOMBIE) {
-        /* Thread was killed while blocked on a sync primitive.  The primitive
-         * has now dequeued its waiter-list reference, so it is safe to free
-         * the TCB.  Release the scheduler lock first to avoid holding two
-         * spinlocks across task_free_thread's heap operations. */
+        /* Defensive: a kill unlinks a blocked thread from its waiter list
+         * itself (sync_kill), so a ZOMBIE should never be dequeued here.
+         * If one is, the primitive has just dropped its reference, so it
+         * is safe to free.  Release the scheduler lock first to avoid
+         * holding two spinlocks across task_free_thread's heap work. */
         spinlock_irq_release(&sched_lock, save);
         task_free_thread(t);
         return false;
@@ -262,45 +273,53 @@ bool sched_unblock(tcb_t *t)
 /* -------------------------------------------------------------------------
  * sched_kill
  *
- * Decide, under sched_lock, how a killed thread is freed.  The lock makes
- * the answer stick: sched_next_thread() records current_tcb[] under it, so
- * a thread that is not current on either core here cannot start running
- * before we are done, and a BLOCKED one has really switched out.
+ * Decide, under the scheduler lock, how a killed thread is freed.  The lock
+ * makes the answer stick: sched_next_thread() records current_tcb[] under
+ * it, so a thread that is not current on either core here cannot start
+ * running before we are done.
  *
+ *   already ZOMBIE        KILL_DONE — someone else is freeing it
+ *   the caller itself     ZOMBIE (or kill_pending if it holds a kmutex);
+ *                         reaped by sched_next_thread() at its next yield
  *   holds a kmutex        kill_pending; it runs on until its last
  *   (mutex_depth > 0)     kmutex_unlock(), which calls sched_kill_point()
  *                         and dies there.  Freeing it now would leave the
  *                         mutex locked forever — and fs_mutex/vfs_lock
  *                         with it, hanging every file operation — with
  *                         the data it guards half-updated.
- *   the caller itself     ZOMBIE; reaped by sched_next_thread() at its
- *                         next yield
- *   current on the other  kill_pending; that core's sched_next_thread()
- *   core                  reaps it (or defers, if it just blocked) when it
- *                         switches out — at most one time slice away
- *   BLOCKED               ZOMBIE; still in a primitive's waiter list, so
- *                         sched_unblock() frees it when it is dequeued
- *   already ZOMBIE        nothing — someone else is freeing it
- *   READY / SLEEPING /    ZOMBIE, removed from the ready queue; the caller
- *   NEW                   frees it (returns true)
+ *   current on the other  running: kill_pending; that core's
+ *   core                  sched_next_thread() reaps it at its next switch,
+ *                         or sched_block() if it blocks first.
+ *                         BLOCKED: it is still switching out — KILL_RETRY
+ *   BLOCKED, on_list      ZOMBIE, KILL_FREE: the caller holds its waiter
+ *                         list's lock and unlinks it (sync_kill)
+ *   BLOCKED, not on_list  KILL_RETRY: between sched_block() and joining the
+ *                         list, or dequeued by a waker that has not yet
+ *                         called sched_unblock()
+ *   READY / SLEEPING /    ZOMBIE, removed from the ready queue, KILL_FREE
+ *   NEW
+ *
+ * Before #5 a BLOCKED thread was only marked ZOMBIE and left on its waiter
+ * list for the primitive's next wake-up to free; if that never came, the
+ * TCB, stack and PCB leaked.
  *
  * mutex_depth is changed only by the thread itself.  It is read here for a
  * thread that is not running, so it cannot change under us; a running one
  * goes the kill_pending way and sched_next_thread() reads it at switch-out.
  * ------------------------------------------------------------------------- */
-bool sched_kill(tcb_t *t)
+kill_result_t sched_kill(tcb_t *t, bool on_list)
 {
     if (t == NULL) {
-        return false;
+        return KILL_DONE;
     }
-    uint32_t core = get_core_num();
-    bool     free_now = false;
+    uint32_t      core   = get_core_num();
+    kill_result_t result = KILL_DONE;
 
     uint32_t save = spinlock_irq_acquire(&sched_lock);
-    if (trace_on && t->state != THREAD_ZOMBIE) {
-        trace_record(TRACE_KILL, t->state, t->tid, t->name, 0u, NULL);
-    }
-    if (t->state == THREAD_ZOMBIE) {
+    thread_state_t state = t->state;
+    bool other = (t == current_tcb[core ^ 1u]);
+
+    if (state == THREAD_ZOMBIE) {
         /* nothing — already dying */
     } else if (t == current_tcb[core]) {
         if (t->mutex_depth > 0u) {
@@ -308,19 +327,31 @@ bool sched_kill(tcb_t *t)
         } else {
             t->state = THREAD_ZOMBIE;
         }
-    } else if (t == current_tcb[core ^ 1u] || t->mutex_depth > 0u) {
+    } else if (t->mutex_depth > 0u) {
         t->kill_pending = true;
-    } else if (t->state == THREAD_BLOCKED) {
-        t->state = THREAD_ZOMBIE;
+    } else if (state == THREAD_BLOCKED) {
+        if (other || !on_list) {
+            result = KILL_RETRY;
+        } else {
+            t->state = THREAD_ZOMBIE;   /* caller unlinks, then frees */
+            result   = KILL_FREE;
+        }
+    } else if (other) {
+        t->kill_pending = true;
     } else {
         /* ZOMBIE before the free, so the SysTick wake loop (which reads
          * state without this lock) never re-queues a SLEEPING thread. */
         sched_remove_thread_raw(t);
         t->state = THREAD_ZOMBIE;
-        free_now = true;
+        result   = KILL_FREE;
+    }
+
+    /* Trace the kill once: not on a retry, not for a thread already dying. */
+    if (trace_on && state != THREAD_ZOMBIE && result != KILL_RETRY) {
+        trace_record(TRACE_KILL, (uint8_t)state, t->tid, t->name, 0u, NULL);
     }
     spinlock_irq_release(&sched_lock, save);
-    return free_now;
+    return result;
 }
 
 /* -------------------------------------------------------------------------
@@ -472,13 +503,12 @@ tcb_t *sched_next_thread(void)
     }
 
     /* Killed from the other core while it ran here (sched_kill).  If it
-     * has just blocked it is in a primitive's waiter list: make it a ZOMBIE
-     * for sched_unblock() to free, but do not reap it here.  If it holds a
-     * kmutex, leave it be: it dies at its last kmutex_unlock(). */
-    bool kill_deferred = false;
+     * holds a kmutex, leave it be: it dies at its last kmutex_unlock().
+     * It cannot be BLOCKED here: sched_block() turns a thread with a kill
+     * pending into a ZOMBIE instead, and sched_kill() never sets
+     * kill_pending on a BLOCKED thread. */
     if (cur != NULL && cur->kill_pending && cur->mutex_depth == 0u) {
         cur->kill_pending = false;
-        kill_deferred     = (cur->state == THREAD_BLOCKED);
         cur->state        = THREAD_ZOMBIE;
     }
 
@@ -506,7 +536,7 @@ tcb_t *sched_next_thread(void)
      * above; assembly has already saved its context, so freeing the stack
      * here is safe. */
     bool zombie_reaped = false;
-    if (cur != NULL && cur->state == THREAD_ZOMBIE && !kill_deferred) {
+    if (cur != NULL && cur->state == THREAD_ZOMBIE) {
         sched_remove_thread_raw(cur);
         task_free_thread(cur);   /* frees stack + TCB slot; may acquire heap_lock */
         zombie_reaped = true;

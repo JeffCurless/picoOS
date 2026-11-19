@@ -320,9 +320,11 @@ void spinlock_release(spinlock_t *s)
  * Waiters are kept in FIFO order so that the first thread to block is the
  * first to be woken (fair scheduling).  The list is singly-linked through
  * tcb_t.wait_next.  Must be called with the owning spinlock already held. */
-static void waiter_enqueue(tcb_t **head, tcb_t *t)
+static void waiter_enqueue(tcb_t **head, spinlock_t *lock, tcb_t *t)
 {
     t->wait_next = NULL;
+    t->wait_list = head;   /* lets a kill find and unlink it (sync_kill) */
+    t->wait_lock = lock;
     if (*head == NULL) {
         *head = t;
         return;
@@ -347,7 +349,39 @@ static tcb_t *waiter_dequeue(tcb_t **head)
     tcb_t *t = *head;
     *head = t->wait_next;
     t->wait_next = NULL;
+    t->wait_list = NULL;
+    t->wait_lock = NULL;
     return t;
+}
+
+/* waiter_remove — unlink t from the waiter list rooted at *head, wherever
+ * it is.  Must be called with the owning spinlock already held. */
+static void waiter_remove(tcb_t **head, tcb_t *t)
+{
+    for (tcb_t **pp = head; *pp != NULL; pp = &(*pp)->wait_next) {
+        if (*pp == t) {
+            *pp = t->wait_next;
+            break;
+        }
+    }
+    t->wait_next = NULL;
+    t->wait_list = NULL;
+    t->wait_lock = NULL;
+}
+
+/* block_current — block the calling thread on the waiter list *head,
+ * guarded by lock, which the caller holds (IRQs off).  The caller then
+ * releases the lock and yields.  Returns false if the thread was not
+ * queued because a kill is pending on it: it is a ZOMBIE now, and the
+ * yield reaps it (sched_block). */
+static bool block_current(tcb_t **head, spinlock_t *lock)
+{
+    tcb_t *self = (tcb_t *)CURRENT_TCB;
+    if (!sched_block(self)) {
+        return false;
+    }
+    waiter_enqueue(head, lock, self);
+    return true;
 }
 
 /* wake_one — hand one wake-up to the first live waiter on the list.  A
@@ -360,6 +394,43 @@ static void wake_one(tcb_t **head)
     tcb_t *t;
     while ((t = waiter_dequeue(head)) != NULL && !sched_unblock(t)) {
     }
+}
+
+/* Defined with the event flags below. */
+static void event_waiter_free(tcb_t *t);
+
+/* sync_kill — one attempt at killing t; task_kill_thread() repeats it on
+ * KILL_RETRY.  If t is on a waiter list, take that list's lock first (lock
+ * order: primitive stripe, then sched_lock), so sched_kill() can mark a
+ * BLOCKED t dead and it can be unlinked here in one step.  The caller then
+ * frees it at once instead of leaving it for a wake-up that may never
+ * come (#5).
+ *
+ * t->wait_lock is read without a lock to find which lock to take, then
+ * checked again under it: if t was woken (or moved) in between, retry. */
+kill_result_t sync_kill(tcb_t *t)
+{
+    spinlock_t *lock = t->wait_lock;
+    uint32_t    save = 0u;
+
+    if (lock != NULL) {
+        save = spinlock_irq_acquire(lock);
+        if (t->wait_lock != lock) {
+            spinlock_irq_release(lock, save);
+            return KILL_RETRY;
+        }
+    }
+
+    kill_result_t r = sched_kill(t, lock != NULL);
+
+    if (lock != NULL) {
+        if (r == KILL_FREE) {
+            waiter_remove(t->wait_list, t);
+            event_waiter_free(t);   /* an event-flags waiter holds a pool slot */
+        }
+        spinlock_irq_release(lock, save);
+    }
+    return r;
 }
 
 /* =========================================================================
@@ -394,8 +465,7 @@ void kmutex_lock(kmutex_t *m)
         }
 
         /* Mutex is held by another thread — block and yield. */
-        waiter_enqueue(&m->waiters, (tcb_t *)CURRENT_TCB);
-        sched_block((tcb_t *)CURRENT_TCB);
+        block_current(&m->waiters, &m->spin);
         spinlock_irq_release(&m->spin, irq_save);
 
         /* When we are unblocked the mutex may still be held; loop. */
@@ -462,8 +532,7 @@ void kmutex_lock_dbg(kmutex_t *m, const char *file, int line)
         ((tcb_t *)CURRENT_TCB)->blk_holder_file = m->acq_file;
         ((tcb_t *)CURRENT_TCB)->blk_holder_line = m->acq_line;
 
-        waiter_enqueue(&m->waiters, (tcb_t *)CURRENT_TCB);
-        sched_block((tcb_t *)CURRENT_TCB);
+        block_current(&m->waiters, &m->spin);
         spinlock_irq_release(&m->spin, irq_save);
         sched_yield();
 
@@ -496,8 +565,7 @@ void ksemaphore_wait(ksemaphore_t *s)
         }
 
         /* Count is 0 — block without touching count. */
-        waiter_enqueue(&s->waiters, (tcb_t *)CURRENT_TCB);
-        sched_block((tcb_t *)CURRENT_TCB);
+        block_current(&s->waiters, &s->spin);
         spinlock_irq_release(&s->spin, irq_save);
 
         sched_yield();
@@ -536,8 +604,7 @@ void ksemaphore_wait_dbg(ksemaphore_t *s, const char *file, int line)
         ((tcb_t *)CURRENT_TCB)->blk_holder_file = NULL;
         ((tcb_t *)CURRENT_TCB)->blk_holder_line = 0;
 
-        waiter_enqueue(&s->waiters, (tcb_t *)CURRENT_TCB);
-        sched_block((tcb_t *)CURRENT_TCB);
+        block_current(&s->waiters, &s->spin);
         spinlock_irq_release(&s->spin, irq_save);
         sched_yield();
 
@@ -653,6 +720,8 @@ void event_flags_set(event_flags_t *e, uint32_t mask)
             /* Remove from list. */
             *prev_ptr = next;
             cur->wait_next = NULL;
+            cur->wait_list = NULL;
+            cur->wait_lock = NULL;
             event_waiter_free(cur);
             sched_unblock(cur);
         } else {
@@ -692,8 +761,9 @@ uint32_t event_flags_wait(event_flags_t *e, uint32_t mask, bool wait_for_all)
 
         /* Not yet satisfied — block this thread. */
         event_waiter_alloc((tcb_t *)CURRENT_TCB, mask, wait_for_all);
-        waiter_enqueue(&e->waiters, (tcb_t *)CURRENT_TCB);
-        sched_block((tcb_t *)CURRENT_TCB);
+        if (!block_current(&e->waiters, &e->spin)) {
+            event_waiter_free((tcb_t *)CURRENT_TCB);   /* killed: not waiting */
+        }
         spinlock_irq_release(&e->spin, irq_save);
 
         sched_yield();
@@ -730,8 +800,9 @@ uint32_t event_flags_wait_dbg(event_flags_t *e, uint32_t mask, bool wait_for_all
         ((tcb_t *)CURRENT_TCB)->blk_holder_line = 0;
 
         event_waiter_alloc((tcb_t *)CURRENT_TCB, mask, wait_for_all);
-        waiter_enqueue(&e->waiters, (tcb_t *)CURRENT_TCB);
-        sched_block((tcb_t *)CURRENT_TCB);
+        if (!block_current(&e->waiters, &e->spin)) {
+            event_waiter_free((tcb_t *)CURRENT_TCB);   /* killed: not waiting */
+        }
         spinlock_irq_release(&e->spin, irq_save);
         sched_yield();
 
@@ -775,8 +846,7 @@ void mqueue_send(mqueue_t *q, const void *msg)
         }
 
         /* Queue full — block sender. */
-        waiter_enqueue(&q->send_waiters, (tcb_t *)CURRENT_TCB);
-        sched_block((tcb_t *)CURRENT_TCB);
+        block_current(&q->send_waiters, &q->spin);
         spinlock_irq_release(&q->spin, irq_save);
 
         sched_yield();
@@ -802,8 +872,7 @@ void mqueue_recv(mqueue_t *q, void *msg_out)
         }
 
         /* Queue empty — block receiver. */
-        waiter_enqueue(&q->recv_waiters, (tcb_t *)CURRENT_TCB);
-        sched_block((tcb_t *)CURRENT_TCB);
+        block_current(&q->recv_waiters, &q->spin);
         spinlock_irq_release(&q->spin, irq_save);
 
         sched_yield();
@@ -873,8 +942,7 @@ void mqueue_send_dbg(mqueue_t *q, const void *msg, const char *file, int line)
         ((tcb_t *)CURRENT_TCB)->blk_holder_file = NULL;
         ((tcb_t *)CURRENT_TCB)->blk_holder_line = 0;
 
-        waiter_enqueue(&q->send_waiters, (tcb_t *)CURRENT_TCB);
-        sched_block((tcb_t *)CURRENT_TCB);
+        block_current(&q->send_waiters, &q->spin);
         spinlock_irq_release(&q->spin, irq_save);
         sched_yield();
 
@@ -906,8 +974,7 @@ void mqueue_recv_dbg(mqueue_t *q, void *msg_out, const char *file, int line)
         ((tcb_t *)CURRENT_TCB)->blk_holder_file = NULL;
         ((tcb_t *)CURRENT_TCB)->blk_holder_line = 0;
 
-        waiter_enqueue(&q->recv_waiters, (tcb_t *)CURRENT_TCB);
-        sched_block((tcb_t *)CURRENT_TCB);
+        block_current(&q->recv_waiters, &q->spin);
         spinlock_irq_release(&q->spin, irq_save);
         sched_yield();
 

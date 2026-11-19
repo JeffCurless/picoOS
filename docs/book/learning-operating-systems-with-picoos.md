@@ -1,6 +1,6 @@
 # Learning Operating Systems with picoOS
 
-Jeff Curless · November 2026 · local copy of the [online edition](https://claude.ai/code/artifact/dac58cfd-0013-4df3-931a-9dfa92107735)
+Jeff Curless · November 2026
 
 <!-- toc:start -->
 
@@ -201,7 +201,7 @@ Keep a Pico plugged in and a terminal open while you read. An operating system i
 - `$ ./build pico` — a command typed on your computer.
 - **RP2040** means the original Pico and Pico W; **RP2350** means the Pico 2 and Pico 2 W.
 
-This edition describes picoOS v0.4.8.
+This edition describes picoOS v0.5.2.
 
 <a id="ch-1"></a>
 ## Chapter 1 — Getting Started
@@ -254,7 +254,7 @@ From the picoOS directory:
 ./build             # builds all 12 variants
 ```
 
-`build` is a script, not a folder. Never delete it. picoOS treats every compiler warning in its own code as an error, so a build either finishes cleanly or stops at the first variant with a problem and prints `BUILD FAILED`. Each board is compiled in its own `builds/<board>_<variant>/` directory, and the finished images are copied to `kits/`. A file name such as `picoos_D-v0.4.8.uf2` means: pico board, Display Pack build (`_D`), version 0.4.8. `_D2` means Display Pack 2; no suffix means no display.
+`build` is a script, not a folder. Never delete it. picoOS treats every compiler warning in its own code as an error, so a build either finishes cleanly or stops at the first variant with a problem and prints `BUILD FAILED`. Each board is compiled in its own `builds/<board>_<variant>/` directory, and the finished images are copied to `kits/`. A file name such as `picoos_D-v0.5.2.uf2` means: pico board, Display Pack build (`_D`), version 0.5.2. `_D2` means Display Pack 2; no suffix means no display.
 
 <a id="s-1-4"></a>
 ### 1.4 Flash
@@ -277,7 +277,7 @@ The script finds the Pico by its USB ID. You should see a banner like this:
 
 ```
 =======================================================
-picoOS  v0.4.8
+picoOS  v0.5.2
 
   Platform : RP2040, dual ARM Cortex-M0+ (133 MHz max)
   Options  : DISPLAY_PACK
@@ -408,7 +408,7 @@ cmake -B builds/picow_nobt -DPICO_BOARD=picow \
 make -j4 -C builds/picow_nobt
 ```
 
-CMake prints a summary of the options it settled on, and the boot banner's `Options` line shows what the image contains. Check it, because the file name records only the board and the display: this image is called `picowos-v0.4.8.uf2`, the same as the standard Pico W build with Bluetooth.
+CMake prints a summary of the options it settled on, and the boot banner's `Options` line shows what the image contains. Check it, because the file name records only the board and the display: this image is called `picowos-v0.5.2.uf2`, the same as the standard Pico W build with Bluetooth.
 
 <a id="s-2-6"></a>
 ### 2.6 Three words you will meet everywhere
@@ -534,6 +534,8 @@ typedef struct tcb {
     char            name[16];
     struct tcb     *next;         /* link in a ready queue             */
     struct tcb     *wait_next;    /* link in a lock's waiter list      */
+    struct tcb    **wait_list;    /* the waiter list it is on, if any  */
+    spinlock_t     *wait_lock;    /* ... and the lock that guards it   */
 } tcb_t;
 ```
 
@@ -620,7 +622,7 @@ A thread runs only after the scheduler picks it from READY; blocking, sleeping a
 
 A thread cannot free its own stack while it is still standing on it. So a finished thread only marks itself ZOMBIE and yields. The next time the scheduler runs, on a different stack, it frees the zombie's memory. This is called **reaping**.
 
-`kill` follows the same rule. A thread that is READY or SLEEPING is freed at once. A thread running on the other core is only marked, and is reaped when that core next switches away from it. A thread waiting on a lock stays in the lock's waiter list as a ZOMBIE until the lock wakes it (Chapter 8).
+`kill` follows the same rule. A thread that is READY or SLEEPING is freed at once. A thread running on the other core is only marked, and is reaped when that core next switches away from it. A thread waiting on a lock is taken off the lock's waiter list and freed at once; its TCB records which list that is (Chapter 8). One exception overrides all of these: a thread that holds a mutex is only marked, and dies when it releases its last one.
 
 <a id="s-4-6"></a>
 ### 4.6 Try this
@@ -858,7 +860,7 @@ On a pico with a Display Pack, the build's linker map (read with `tools/mem_repo
 | Filesystem buffers | \~6 KB |
 | TCB/PCB tables, VFS tables, other globals | \~12 KB |
 | Pico SDK and everything else | \~12 KB |
-| Free | \~108 KB |
+| Free | \~106 KB |
 
 The C compiler puts every variable in one of four places:
 
@@ -969,7 +971,7 @@ Both cores call `kmalloc()`. If both walked and split the same free block at the
 - `pico> mem`, then `run producer`, `run consumer`, `run sensor`, and `mem` again. How much did each thread cost?
 - Kill one in the middle (`kill <tid>`), start a different one, and look at "Largest free".
 - Run the host tests with `./build tests`. Read `tests/mem/` to see a fragmentation test that needs no hardware.
-- Run `python3 tools/mem_report.py builds/pico_D/src/picoos_D-v0.4.8.elf.map` and find the heap array.
+- Run `python3 tools/mem_report.py builds/pico_D/src/picoos_D-v0.5.2.elf.map` and find the heap array.
 
 <a id="s-7-10"></a>
 ### 7.10 Think about it
@@ -1066,8 +1068,7 @@ void kmutex_lock(kmutex_t *m) {
             spinlock_irq_release(&m->spin, irq);
             return;
         }
-        waiter_enqueue(&m->waiters, CURRENT_TCB);       /* join the line   */
-        sched_block(CURRENT_TCB);                       /* not READY now   */
+        block_current(&m->waiters, &m->spin);           /* BLOCKED; join the line */
         spinlock_irq_release(&m->spin, irq);
         sched_yield();                                  /* switch out      */
     }                                                   /* woken: try again */
@@ -1080,7 +1081,9 @@ Three details are worth slowing down for.
 
 **A wake-up is a hint, not a gift.** `kmutex_unlock()` frees the mutex and wakes the first waiter. But by the time the waiter runs, a third thread may have taken the mutex. So the waiter loops back and checks again. Almost every OS works this way.
 
-**The waiter list has its own link.** Waiters are chained through the TCB's `wait_next` field, not `next`. It looks as if they could share: a BLOCKED thread is in no ready queue, so `next` should be free. But look at the order of the calls above. `waiter_enqueue()` runs *before* `sched_block()`, while the thread is still in its ready queue. Earlier versions of picoOS did share the field, and `waiter_enqueue()` set `next = NULL` on a thread that still had other threads queued behind it. That cut the ready queue in two. `sched_block()` then unlinked the thread, and everything after it at the same priority was lost: still READY, on no queue, never scheduled again. Nothing crashed and nothing was printed. A display thread just stopped updating, and `threads` showed it READY with its CPU time frozen. The fix cost 4 bytes per TCB. The lesson: a field is free only if *every* path agrees it is free, at every moment.
+**The waiter list has its own link.** Waiters are chained through the TCB's `wait_next` field, not `next`. It looks as if they could share: a BLOCKED thread is in no ready queue, so `next` should be free. Earlier versions of picoOS did share the field, and joined the waiter list *before* calling `sched_block()`, while the thread was still in its ready queue. `waiter_enqueue()` set `next = NULL` on a thread that still had other threads queued behind it. That cut the ready queue in two. `sched_block()` then unlinked the thread, and everything after it at the same priority was lost: still READY, on no queue, never scheduled again. Nothing crashed and nothing was printed. A display thread just stopped updating, and `threads` showed it READY with its CPU time frozen. The fix cost 4 bytes per TCB. (Today `block_current()` calls `sched_block()` first, so sharing would happen to work; the separate link means it no longer depends on that order.) The lesson: a field is free only if *every* path agrees it is free, at every moment.
+
+**A waiter knows where it waits.** `waiter_enqueue()` also records in the TCB which list the thread joined and which lock guards it (`wait_list`, `wait_lock`). Nothing in the lock needs that; `kill` does. To kill a waiting thread, `sync_kill()` takes that lock, unlinks the thread and frees it on the spot. Until v0.5.2 a killed waiter was only marked ZOMBIE and left in the line for the next wake-up to free. If the lock was never released again, the dead thread's TCB and stack (about 1 KB) were never freed, and a few such kills could use up the thread table.
 
 <a id="s-8-6"></a>
 ### 8.6 Semaphores
@@ -1138,8 +1141,8 @@ picoOS's mutex is simple on purpose. Each of these is a deliberate teaching poin
 
 - **Not recursive.** If a thread locks a mutex it already holds, it waits for itself forever.
 - **No owner check on unlock.** Any thread can unlock any mutex.
-- **Killing a lock holder.** `kill` removes a thread even if it holds a mutex. Nobody will ever unlock it, and every waiter blocks forever.
-- **Killing a waiter.** A thread killed while it waits stays in the waiter list as a ZOMBIE. The lock frees it instead of waking it, and passes the wake-up on to the next waiter. If the lock is never released again, the zombie's memory is never freed.
+- **Killing a lock holder.** Freeing a thread that holds a mutex would leave the mutex locked for good, so `kill` only marks it. It keeps running, and dies inside its last `kmutex_unlock()`. The price: a thread that never unlocks can never be killed.
+- **Killing a waiter.** A thread killed while it waits is taken out of the waiter list and freed at once (8.5). The kill has to take the lock's spinlock first, then the scheduler's, in the same order as every other path. If the thread is in the middle of blocking on the other core, the kill yields and tries again a moment later.
 - **A race that was real.** Between `spinlock_irq_release()` and the context switch in `kmutex_lock()`, the thread is still running on its core. If the other core woke it in that tiny window, the scheduler could start it on the second core while it was still on the first: two cores on one stack. `docs/locking.md` listed this as a suspected race, and it is now fixed. The scheduler records each core's running thread under `sched_lock`, and `sched_next_thread()` skips a READY thread that is still current on the other core. Note what the bug was: every step held the right lock, but READY did not mean "not running". A test that hammers one mutex from both cores is still worth writing.
 
 <a id="s-8-12"></a>
@@ -1374,7 +1377,7 @@ The command numbers are grouped by device: `0x01xx` timer, `0x02xx` GPIO, `0x03x
 - a path in the mount table (`/dev/...`) goes to the device layer;
 - anything else goes to the flash filesystem (Chapter 12).
 
-It returns a small integer, the **file descriptor**, which indexes a table of up to 16 open files. Each entry remembers the type, the path, the current position and the open mode. Later calls such as `vfs_read(fd, …)` look up the entry and route the call. Modes combine as flags: `VFS_O_RDONLY`, `VFS_O_WRONLY`, `VFS_O_CREAT`, `VFS_O_TRUNC`, `VFS_O_APPEND`.
+It returns a small integer, the **file descriptor**, which indexes a table of up to 16 open files. Each entry remembers whether it is a device or a file, which one, and which process opened it, so the files of a process that dies can be closed for it. The read position and the open mode are kept by the layer below. Later calls such as `vfs_read(fd, …)` look up the entry and route the call. Modes combine as flags: `VFS_O_RDONLY`, `VFS_O_WRONLY`, `VFS_O_CREAT`, `VFS_O_TRUNC`, `VFS_O_APPEND`.
 
 The table of open files is shared by every thread on both cores, so it is protected by a mutex, `vfs_lock`. A mutex and not a spinlock: opening a file may read flash, which is too slow to do with interrupts off.
 
@@ -1421,9 +1424,11 @@ flash offset 1 MB
 +-----------+-----------+-----------+-----     -+-----------+
 ```
 
-Sector 0 holds the **superblock**: a magic number (`0x50494353`, "PICS"), a version, a count, and one 32-byte entry per file slot — name (up to 15 characters), size, used flag. File slot *i* always lives in sector *i* + 1. There are no directories and no file larger than 4 KB.
+Sector 0 holds the **superblock**: a magic number (`0x50494353`, "PICS"), a format version, a count, the number of slots, and one 32-byte entry per file slot — name, size, used flag. A name is 1 to 15 characters; a longer one is refused rather than cut short, because a shortened name would never match the full one again. File slot *i* always lives in sector *i* + 1. There are no directories and no file larger than 4 KB.
 
-The number of slots is set per board: 64 on RP2040, 127 on RP2350. Why stop at 127? Because the superblock must fit in one sector: 12 + 127 × 32 = 4,076 bytes, and 128 would need 4,108.
+The number of slots is set per board: 64 on RP2040, 127 on RP2350. Why stop at 127? Because the superblock must fit in one sector: 16 + 127 × 32 = 4,080 bytes, and 128 would need 4,112.
+
+The superblock records its slot count so that a build with a different count does not read past the end of the table. Because file *i* lives in sector *i* + 1 whatever the count, a table from another build, or from the first format (version 1, before the count was stored), is converted in place when it is mounted, keeping every file that fits.
 
 <a id="s-12-3"></a>
 ### 12.3 Reading is free
@@ -1433,11 +1438,13 @@ Because flash is mapped at `0x1000_0000`, the filesystem reads a file with a `me
 <a id="s-12-4"></a>
 ### 12.4 Writing is careful
 
-Writes are collected in a 4 KB SRAM buffer, `fs_buffer`, and nothing touches flash until the file is closed. `fs_close()` then:
+Writes are collected in a 4 KB SRAM buffer, `fs_buffer`, and nothing touches flash until the file is closed. Until then the new data, and the new size, belong to the writer alone: any other descriptor on the file, and `ls`, still see the file as it is on flash. `fs_close()` then:
 
 1. Erases the file's sector.
-2. Programs it from the buffer.
-3. Rewrites the superblock (the size may have changed).
+2. Programs it from the buffer: only the 256-byte pages that hold data, so a 10-byte file costs one page.
+3. Publishes the new size, and rewrites the superblock if the size changed.
+
+Opening with `VFS_O_TRUNC` counts as a change even if nothing is written, so closing commits the empty file. If a file is deleted while it is open, its descriptors stay allocated but every read and write on them fails; closing them frees them. Freeing them at once would let the next file opened reuse the slot, and the old descriptor would then read someone else's file.
 
 There is only one write buffer, so **only one file can be open for writing at a time**. A second writer gets an error. That costs a limitation and saves 4 KB of SRAM for each extra writer you do not support.
 
@@ -1467,7 +1474,7 @@ The filesystem is protected by a `kmutex_t`. A mutex and not a spinlock, because
 
 Pull the power between step 1 and step 3 of a close. The sector is erased, but the superblock still says the file is, say, 900 bytes long. The next boot reads 900 bytes of `0xFF`. Real filesystems avoid this with a **journal** or **copy-on-write**: write the new version somewhere else first, then flip one small pointer at the end.
 
-The superblock is also rewritten on every single save. It will wear out long before the file sectors do. Spreading writes across sectors is called **wear levelling**, and every SD card and SSD does it in its controller.
+The superblock is also rewritten on every save that changes a file's size, and every create and delete. It will wear out long before the file sectors do. Spreading writes across sectors is called **wear levelling**, and every SD card and SSD does it in its controller.
 
 <a id="s-12-8"></a>
 ### 12.8 Try this
@@ -1765,10 +1772,9 @@ Every shortcut you met in this book is a project waiting to be done. Each one be
 | Sorted sleep queue instead of scanning 32 TCBs every millisecond | `sched.c` | 5 | Medium |
 | Priority bitmap for an O(1) pick of the next ready queue | `sched.c` | 5 | Medium |
 | Priority inheritance for `kmutex_t` | `sync.c`, `sched.c` | 8 | Medium |
-| Free a thread killed while it waits at once: record what it is blocked on and unlink it | `task.c`, `sync.c` | 4, 8 | Medium |
 | Wake the other core at once with an inter-processor interrupt | `sched.c` | 6 | Medium |
 | Buffered, asynchronous console output | `shell.c`, `dev.c` | 13 | Medium |
-| Release a killed thread's mutexes, or refuse to kill a lock holder | `task.c`, `sync.c` | 4, 8 | Medium |
+| Kill a thread that never releases its mutex (today it cannot be killed) | `task.c`, `sync.c` | 4, 8 | High |
 | More than one writer, or files larger than 4 KB | `fs.c` | 12 | Medium |
 | Power-safe saves: two superblocks or copy-on-write | `fs.c` | 12 | High |
 | Directories | `fs.c`, `vfs.c` | 12 | High |
@@ -1882,7 +1888,7 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 
 - back-pressure — [9.1](#s-9-1)
 - banner, boot — [1.5](#s-1-5), [1.6](#s-1-6), [1.7](#s-1-7), [2.5](#s-2-5), [3.2](#s-3-2), [3.5](#s-3-5)
-- BLOCKED state — [4.5](#s-4-5), [8.5](#s-8-5), [8.9](#s-8-9), [9.1](#s-9-1), [9.2](#s-9-2), [16.2](#s-16-2)
+- BLOCKED state — [4.5](#s-4-5), [8.5](#s-8-5), [8.9](#s-8-9), [9.1](#s-9-1), [9.2](#s-9-2)
 - Bluetooth — [P](#ch-p), [1.1](#s-1-1), [2.2](#s-2-2), [2.5](#s-2-5), [6.2](#s-6-2), [13.2](#s-13-2), [15](#ch-15), [15.1](#s-15-1), [15.6](#s-15-6)
 - boot sequence — [3](#ch-3), [3.1](#s-3-1), [3.2](#s-3-2), [3.4](#s-3-4)
 - BOOTSEL — [1.4](#s-1-4), [13.3](#s-13-3)
@@ -1963,13 +1969,13 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 
 - kernel process (PID 1) — [3.2](#s-3-2), [4.2](#s-4-2), [15.1](#s-15-1)
 - `kfree()` — [7.5](#s-7-5), [7.8](#s-7-8), [8.9](#s-8-9), [14.1](#s-14-1), [14.2](#s-14-2), [16.2](#s-16-2), [A.3](#s-a-3)
-- `kill`, `killproc` — [4.2](#s-4-2), [4.5](#s-4-5), [4.6](#s-4-6), [4.7](#s-4-7), [5.7](#s-5-7), [7.9](#s-7-9), [8.11](#s-8-11), [10.5](#s-10-5), [13.3](#s-13-3), [16.2](#s-16-2)
+- `kill`, `killproc` — [4.2](#s-4-2), [4.5](#s-4-5), [4.6](#s-4-6), [4.7](#s-4-7), [5.7](#s-5-7), [7.9](#s-7-9), [8.5](#s-8-5), [8.11](#s-8-11), [10.5](#s-10-5), [13.3](#s-13-3), [16.2](#s-16-2)
 - `kmalloc()` — [P.4](#s-p-4), [3.2](#s-3-2), [7.3](#s-7-3), [7.5](#s-7-5), [7.8](#s-7-8), [8.9](#s-8-9), [14.1](#s-14-1), [14.5](#s-14-5), [A.3](#s-a-3)
 - `kmutex_t`, `kmutex_lock()` — [8.5](#s-8-5), [8.11](#s-8-11), [8.12](#s-8-12), [8.13](#s-8-13), [10.4](#s-10-4), [12.6](#s-12-6), [15.4](#s-15-4), [16.2](#s-16-2), [A.3](#s-a-3)
 
 **L**
 
-- lock order — [8.9](#s-8-9), [15.4](#s-15-4)
+- lock order — [8.9](#s-8-9), [8.11](#s-8-11), [15.4](#s-15-4)
 - lockout victim — [3.2](#s-3-2), [3.5](#s-3-5), [12.5](#s-12-5)
 - lost wake-up — [8.5](#s-8-5), [15.4](#s-15-4)
 - lwIP — [15.1](#s-15-1)
@@ -2032,7 +2038,7 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 - SLEEPING state — [4.5](#s-4-5), [5.6](#s-5-6), [5.8](#s-5-8), [8.6](#s-8-6), [13.1](#s-13-1)
 - SMP (symmetric multiprocessing) — [6](#ch-6), [6.2](#s-6-2)
 - `spinlock_irq_acquire()` — [8.4](#s-8-4), [8.5](#s-8-5)
-- `spinlock_t` — [8.4](#s-8-4), [9.1](#s-9-1)
+- `spinlock_t` — [4.1](#s-4-1), [8.4](#s-8-4), [9.1](#s-9-1)
 - SRAM — [1.1](#s-1-1), [7](#ch-7), [7.1](#s-7-1), [7.3](#s-7-3), [12.4](#s-12-4)
 - stack — [3.3](#s-3-3), [4.4](#s-4-4), [7.4](#s-7-4)
 - stack overflow — [4.4](#s-4-4), [7.4](#s-7-4), [14.5](#s-14-5)
@@ -2077,4 +2083,4 @@ Numbers are section numbers: 7.5 is Chapter 7, section 5. A bare number such as 
 
 **Z**
 
-- ZOMBIE state — [4.5](#s-4-5), [5.3](#s-5-3), [8.11](#s-8-11)
+- ZOMBIE state — [4.5](#s-4-5), [5.3](#s-5-3), [8.5](#s-8-5)
